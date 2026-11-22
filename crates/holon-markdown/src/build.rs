@@ -2,6 +2,10 @@
 //! inline line into a `Block` with marks, tags, task state, and (when a
 //! construct is unsupported) a disclosed opaque block.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::path::Path;
+
 use holon_api::EntityUri;
 use holon_api::Priority;
 use holon_api::StateCategory;
@@ -31,13 +35,87 @@ pub const TASK_MARKERS: &[&str] = &[
 ];
 const DONE_MARKERS: &[&str] = &["DONE", "CANCELED", "CANCELLED"];
 
-/// The block id a file declares (`carrier` names where), refused by name
-/// unless an org id line could carry it as the same id: a declared block can
-/// be moved into an org file.
+/// The block URI for a bare id, or why org could not carry the id: a declared
+/// block can be moved into an org file, so only an id an org id line can hold
+/// as the same id is accepted.
+pub fn block_id(value: &str) -> Result<EntityUri, impl std::fmt::Display> {
+    holon_org_format::DrawerId::parse(value).map(|id| EntityUri::block(id.as_str()))
+}
+
+/// The block id a file declares (`carrier` names where), refused by name when
+/// [`block_id`] refuses it.
 pub fn declared_block_id(carrier: &str, value: &str) -> anyhow::Result<EntityUri> {
-    let id = holon_org_format::DrawerId::parse(value)
-        .map_err(|e| anyhow::anyhow!("{carrier} declares an unusable id: {e}"))?;
-    Ok(EntityUri::block(id.as_str()))
+    block_id(value).map_err(|e| anyhow::anyhow!("{carrier} declares an unusable id: {e}"))
+}
+
+/// Source lines of the ids one file has declared so far, so a second
+/// declaration of an id is refused instead of overwriting the first block.
+#[derive(Default)]
+pub struct IdLedger(HashMap<String, usize>);
+
+impl IdLedger {
+    /// `line` is 1-based.
+    pub fn declare(&mut self, id: &EntityUri, line: usize) -> anyhow::Result<()> {
+        match self.0.entry(id.to_string()) {
+            Entry::Occupied(first) => anyhow::bail!(
+                "the id {:?} is declared on line {} and again on line {line}",
+                id.id(),
+                first.get()
+            ),
+            Entry::Vacant(slot) => {
+                slot.insert(line);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Refuse an authored property key the store cannot hold as a property: a
+/// `block_raw` column name, or an internal key (hidden from the drawer, so it
+/// would reach neither the store nor the disk). `at` says where the key was
+/// authored.
+pub fn refuse_unstorable_key(key: &str, at: impl std::fmt::Display) -> anyhow::Result<()> {
+    if holon_api::schema::is_block_column(key)
+        || holon_org_format::models::is_hidden_drawer_key(key)
+    {
+        anyhow::bail!(
+            "{at}: the property `{key}` names a storage column or an internal key and cannot be stored as a property; rename the property"
+        );
+    }
+    Ok(())
+}
+
+/// The error of a render call on a read-only adapter: a write to a foreign
+/// vault is loss until anchored write-back exists, so the caller's write fails
+/// instead of the app.
+pub fn read_only_render(adapter: &str, path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{adapter} is read-only (Tier R/O): refused to render {}",
+        path.display()
+    )
+}
+
+/// `path` relative to `root` as UTF-8 text, the vault-relative name a file
+/// URI is built from.
+pub fn relative_name<'a>(path: &'a Path, root: &Path) -> anyhow::Result<&'a str> {
+    path.strip_prefix(root)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} is not under the vault root {}",
+                path.display(),
+                root.display()
+            )
+        })?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", path.display()))
+}
+
+/// The file stem of `path`, as the title of a page that declares none.
+pub fn file_title(path: &Path) -> anyhow::Result<&str> {
+    path.file_stem()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{} is not valid UTF-8", path.display()))
 }
 
 /// Build a text/rich block from raw inline content, extracting marks, tags,

@@ -18,9 +18,14 @@ use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::WriteTier;
 
+use crate::build::IdLedger;
 use crate::build::apply_planning;
 use crate::build::declared_block_id;
+use crate::build::file_title;
 use crate::build::opaque_block;
+use crate::build::read_only_render;
+use crate::build::refuse_unstorable_key;
+use crate::build::relative_name;
 use crate::build::text_block;
 use crate::params::build_block_params;
 
@@ -63,21 +68,11 @@ fn parse_property(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), val.to_string()))
 }
 
-fn doc_id_for(path: &Path, root: &Path, page_id: Option<&str>) -> Result<EntityUri> {
-    match page_id {
-        Some(id) => declared_block_id("the page's `id::`", id),
-        None => {
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            Ok(EntityUri::file(&rel.to_string_lossy()))
-        }
-    }
-}
-
-fn is_journal(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|r| r.components().next().map(|c| c.as_os_str() == "journals"))
-        .unwrap_or(false)
+fn is_journal(rel: &str) -> bool {
+    Path::new(rel)
+        .components()
+        .next()
+        .is_some_and(|c| c.as_os_str() == "journals")
 }
 
 impl FileFormatAdapter for LogseqMarkdownAdapter {
@@ -100,12 +95,15 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         parent_dir_id: &EntityUri,
         root: &Path,
     ) -> Result<FileFormatParseResult> {
+        let rel = relative_name(path, root)?;
         let lines: Vec<&str> = content.lines().collect();
         let mut idx = 0;
+        let mut ids = IdLedger::default();
 
         // --- Page properties: leading `key:: value` lines before the first
         // bullet.
         let mut page_props: Vec<(String, String)> = Vec::new();
+        let mut page_prop_lines: Vec<usize> = Vec::new();
         while idx < lines.len() {
             let l = lines[idx];
             if l.trim().is_empty() {
@@ -116,32 +114,36 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                 break;
             }
             if let Some(kv) = parse_property(l) {
+                page_prop_lines.push(idx + 1);
                 page_props.push(kv);
                 idx += 1;
             } else {
                 break;
             }
         }
-        let page_id = page_props
+        let page_id_pos = page_props
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("id"))
-            .map(|(_, v)| v.clone());
-        let title = page_props
+            .position(|(k, _)| k.eq_ignore_ascii_case("id"));
+        let page_id = page_id_pos.map(|p| page_props[p].1.clone());
+        let page_id_line = page_id_pos.map_or(1, |p| page_prop_lines[p]);
+        let title = match page_props
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("title"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            });
+        {
+            Some((_, v)) => v.clone(),
+            None => file_title(path)?.to_string(),
+        };
 
-        let file_id = doc_id_for(path, root, page_id.as_deref())
+        let file_id = match page_id.as_deref() {
+            Some(id) => declared_block_id("the page's `id::`", id)
+                .with_context(|| format!("{} line {page_id_line}", path.display()))?,
+            None => EntityUri::file(rel),
+        };
+        ids.declare(&file_id, page_id_line)
             .with_context(|| path.display().to_string())?;
         let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title);
         document.set_page(true);
-        for (k, v) in &page_props {
+        for ((k, v), line) in page_props.iter().zip(&page_prop_lines) {
             if k.eq_ignore_ascii_case("id") {
                 continue;
             }
@@ -150,10 +152,12 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                     document.tags.insert(t.to_string());
                 }
             } else {
+                refuse_unstorable_key(k, format_args!("line {line}"))
+                    .with_context(|| path.display().to_string())?;
                 document.set_property(k.clone(), v.clone());
             }
         }
-        if is_journal(path, root) {
+        if is_journal(rel) {
             document.tags.insert("journal".to_string());
         }
 
@@ -250,6 +254,8 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                     .with_context(|| format!("{} line {}", path.display(), idx + 1))?,
                 None => EntityUri::block(&format!("{}::b::{}", file_id.id(), seq)),
             };
+            ids.declare(&block_id, idx + 1)
+                .with_context(|| path.display().to_string())?;
 
             let mut full = first.clone();
             for c in &cont {
@@ -272,6 +278,8 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                 if k.eq_ignore_ascii_case("collapsed") {
                     continue; // document state, not user content
                 }
+                refuse_unstorable_key(k, format_args!("line {}", idx + 1))
+                    .with_context(|| path.display().to_string())?;
                 block.set_property(k.clone(), v.clone());
             }
             for p in &planning {
@@ -299,11 +307,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         path: &Path,
         _: &EntityUri,
     ) -> anyhow::Result<holon_api::Rendered> {
-        panic!(
-            "LogseqMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
-             foreign vault is loss under ADR 0025 until anchored write-back lands",
-            path.display()
-        );
+        Err(read_only_render("LogseqMarkdownAdapter", path))
     }
 
     fn render_blocks(
@@ -312,10 +316,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         path: &Path,
         _: &EntityUri,
     ) -> anyhow::Result<holon_api::Rendered> {
-        panic!(
-            "LogseqMarkdownAdapter is read-only: refused to render {}",
-            path.display()
-        );
+        Err(read_only_render("LogseqMarkdownAdapter", path))
     }
 
     fn doc_id_from_content(&self, content: &str) -> anyhow::Result<Option<EntityUri>> {

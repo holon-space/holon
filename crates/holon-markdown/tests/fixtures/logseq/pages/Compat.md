@@ -14,7 +14,7 @@ type:: test page
 - A parent block
   - a child referencing ((11111111-0000-4000-8000-000000000001))
     - a grandchild with a property
-      priority:: high
+      mood:: high
   - another child, collapsed
     collapsed:: true
 - A **bold** and *italic* and `code` block.

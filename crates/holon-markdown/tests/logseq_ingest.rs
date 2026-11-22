@@ -53,7 +53,7 @@ fn link_targets(b: &Block) -> Vec<EntityRef> {
 
 #[test]
 fn flavor_detected_from_config() {
-    assert_eq!(detect_flavor(&vault()), VaultFlavor::Logseq);
+    assert_eq!(detect_flavor(&vault()).unwrap(), VaultFlavor::Logseq);
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn tree_hierarchy_via_indentation() {
     assert_eq!(grandchild.parent_id, child.id);
     // grandchild property
     assert_eq!(
-        grandchild.get_property_str("priority"),
+        grandchild.get_property_str("mood"),
         Some("high".to_string())
     );
 }

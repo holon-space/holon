@@ -18,8 +18,13 @@ use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::WriteTier;
 
+use crate::build::IdLedger;
 use crate::build::declared_block_id;
+use crate::build::file_title;
 use crate::build::opaque_block;
+use crate::build::read_only_render;
+use crate::build::refuse_unstorable_key;
+use crate::build::relative_name;
 use crate::build::text_block;
 use crate::params::build_block_params;
 
@@ -134,20 +139,17 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
     ) -> Result<FileFormatParseResult> {
         let fm = parse_frontmatter(content);
 
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let title = fm
+        let rel = relative_name(path, root)?;
+        let title = match fm
             .scalars
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("title"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or(stem);
+        {
+            Some((_, v)) => v.clone(),
+            None => file_title(path)?.to_string(),
+        };
 
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let file_id = EntityUri::file(&rel.to_string_lossy());
+        let file_id = EntityUri::file(rel);
         let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title);
         document.set_page(true);
         for (k, v) in &fm.scalars {
@@ -165,6 +167,8 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                 }
                 continue;
             }
+            refuse_unstorable_key(k, "the frontmatter")
+                .with_context(|| path.display().to_string())?;
             document.set_property(k.clone(), v.clone());
         }
         for (k, items) in &fm.lists {
@@ -173,36 +177,42 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     document.tags.insert(it.clone());
                 }
             } else {
+                refuse_unstorable_key(k, "the frontmatter")
+                    .with_context(|| path.display().to_string())?;
                 document.set_property(k.clone(), items.join(", "));
             }
         }
 
         // Body starts after the frontmatter block.
-        let body: Vec<&str> = {
-            let all: Vec<&str> = content.lines().collect();
-            let mut start = 0;
-            if all.first().map(|l| l.trim_end()) == Some("---") {
-                if let Some(end) = all.iter().skip(1).position(|l| l.trim_end() == "---") {
-                    start = end + 2;
-                }
+        let all: Vec<&str> = content.lines().collect();
+        let mut body_start = 0;
+        if all.first().map(|l| l.trim_end()) == Some("---") {
+            if let Some(end) = all.iter().skip(1).position(|l| l.trim_end() == "---") {
+                body_start = end + 2;
             }
-            all[start..].to_vec()
-        };
+        }
+        let body = &all[body_start..];
 
         let mut blocks: Vec<Block> = Vec::new();
         let mut seq = 0usize;
         let mut heading_stack: Vec<(usize, EntityUri)> = Vec::new();
         let mut i = 0;
 
-        let mint = |seq: &mut usize,
-                    file_id: &EntityUri,
-                    explicit: Option<String>|
+        let mut ids = IdLedger::default();
+        ids.declare(&file_id, 1)
+            .with_context(|| path.display().to_string())?;
+        let mut mint = |seq: &mut usize,
+                        file_id: &EntityUri,
+                        explicit: Option<String>,
+                        line: usize|
          -> anyhow::Result<EntityUri> {
             let id = match explicit {
                 Some(e) => declared_block_id("a `^` block anchor", &e)
-                    .with_context(|| path.display().to_string())?,
+                    .with_context(|| format!("{} line {line}", path.display()))?,
                 None => EntityUri::block(&format!("{}::b::{}", file_id.id(), seq)),
             };
+            ids.declare(&id, line)
+                .with_context(|| path.display().to_string())?;
             *seq += 1;
             Ok(id)
         };
@@ -230,7 +240,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     .last()
                     .map(|(_, id)| id.clone())
                     .unwrap_or_else(|| file_id.clone());
-                let id = mint(&mut seq, &file_id, anchor)?;
+                let id = mint(&mut seq, &file_id, anchor, body_start + i + 1)?;
                 let block = text_block(id.clone(), parent, &text);
                 heading_stack.push((level, id));
                 blocks.push(block);
@@ -251,7 +261,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     src.push(body[j].to_string());
                     j += 1;
                 }
-                let id = mint(&mut seq, &file_id, None)?;
+                let id = mint(&mut seq, &file_id, None, body_start + i + 1)?;
                 blocks.push(opaque_block(id, parent, "callout", &src.join("\n")));
                 i = j;
                 continue;
@@ -271,7 +281,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                         j += 1;
                     }
                 }
-                let id = mint(&mut seq, &file_id, None)?;
+                let id = mint(&mut seq, &file_id, None, body_start + i + 1)?;
                 blocks.push(opaque_block(id, parent, "comment", &src.join("\n")));
                 i = j + 1;
                 continue;
@@ -279,7 +289,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
 
             // --- Embed `![[...]]` on its own line → opaque
             if trimmed.starts_with("![[") {
-                let id = mint(&mut seq, &file_id, None)?;
+                let id = mint(&mut seq, &file_id, None, body_start + i + 1)?;
                 blocks.push(opaque_block(id, parent, "embed", trimmed));
                 i += 1;
                 continue;
@@ -289,7 +299,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
             if let Some(rest) = list_item_body(trimmed) {
                 let (text, task) = checkbox_state(rest);
                 let (text, anchor) = split_block_anchor(&text);
-                let id = mint(&mut seq, &file_id, anchor)?;
+                let id = mint(&mut seq, &file_id, anchor, body_start + i + 1)?;
                 blocks.push(text_block(id, parent, &prefix_task(task, &text)));
                 i += 1;
                 continue;
@@ -306,7 +316,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     }
                     j += 1;
                 }
-                let id = mint(&mut seq, &file_id, None)?;
+                let id = mint(&mut seq, &file_id, None, body_start + i + 1)?;
                 blocks.push(opaque_block(id, parent, "code", &src.join("\n")));
                 i = j + 1;
                 continue;
@@ -331,7 +341,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
             }
             let joined = para.join("\n");
             let (text, anchor) = split_block_anchor(joined.trim_end());
-            let id = mint(&mut seq, &file_id, anchor)?;
+            let id = mint(&mut seq, &file_id, anchor, body_start + i + 1)?;
             blocks.push(text_block(id, parent, &text));
             i = j;
         }
@@ -351,11 +361,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         path: &Path,
         _: &EntityUri,
     ) -> anyhow::Result<holon_api::Rendered> {
-        panic!(
-            "ObsidianMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
-             foreign vault is loss under ADR 0025 until anchored write-back lands",
-            path.display()
-        );
+        Err(read_only_render("ObsidianMarkdownAdapter", path))
     }
 
     fn render_blocks(
@@ -364,10 +370,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         path: &Path,
         _: &EntityUri,
     ) -> anyhow::Result<holon_api::Rendered> {
-        panic!(
-            "ObsidianMarkdownAdapter is read-only: refused to render {}",
-            path.display()
-        );
+        Err(read_only_render("ObsidianMarkdownAdapter", path))
     }
 
     fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {

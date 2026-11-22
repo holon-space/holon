@@ -68,26 +68,37 @@ fn obsidian_adapter_refuses_writeback_drop_verdict() {
     assert!(err.to_string().contains("read-only") || err.to_string().contains("Tier R/O"));
 }
 
+/// One call per adapter and render entry point; there is no input space, the
+/// adapters are read-only for every input.
 #[test]
-#[should_panic(expected = "read-only")]
-fn logseq_render_document_panics() {
-    let a = LogseqMarkdownAdapter::new();
+fn every_render_entry_point_is_an_error_naming_adapter_and_path() {
     let doc = Block::new_text(
         EntityUri::file("Compat.md"),
         EntityUri::no_parent(),
         "Compat",
     );
-    let _ = a.render_document(
-        &doc,
-        &[],
-        Path::new("/v/Compat.md"),
-        &EntityUri::file("Compat.md"),
-    );
-}
-
-#[test]
-#[should_panic(expected = "read-only")]
-fn obsidian_render_blocks_panics() {
-    let a = ObsidianMarkdownAdapter::new();
-    let _ = a.render_blocks(&[], Path::new("/v/Note.md"), &EntityUri::file("Note.md"));
+    let uri = EntityUri::file("Compat.md");
+    let path = Path::new("/v/Compat.md");
+    let adapters: [(&str, Box<dyn FileFormatAdapter>); 2] = [
+        (
+            "LogseqMarkdownAdapter",
+            Box::new(LogseqMarkdownAdapter::new()),
+        ),
+        (
+            "ObsidianMarkdownAdapter",
+            Box::new(ObsidianMarkdownAdapter::new()),
+        ),
+    ];
+    for (name, adapter) in &adapters {
+        let errors = [
+            adapter.render_document(&doc, &[], path, &uri).unwrap_err(),
+            adapter.render_blocks(&[], path, &uri).unwrap_err(),
+        ];
+        for e in errors {
+            let message = e.to_string();
+            for needle in [name, "read-only", "/v/Compat.md"] {
+                assert!(message.contains(needle), "{needle} not in {message}");
+            }
+        }
+    }
 }

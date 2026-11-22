@@ -11,11 +11,11 @@
 //!   `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).
 //!
 //! Both adapters implement `holon_core::FileFormatAdapter`. They are **read
-//! only**: `render_document` / `render_blocks` panic (a write to a foreign file
-//! is loss by definition under ADR 0025 until anchored write-back lands), and
-//! `writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the
-//! controller-level gate that must veto any write to a foreign-vault doc before
-//! a renderer is ever reached.
+//! only**: `render_document` / `render_blocks` return an error (a write to a
+//! foreign file is loss by definition under ADR 0025 until anchored write-back
+//! lands), and `writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is
+//! the controller-level gate that must veto any write to a foreign-vault doc
+//! before a renderer is ever reached.
 
 pub mod build;
 pub mod inline;
@@ -27,6 +27,7 @@ pub use obsidian::ObsidianMarkdownAdapter;
 mod logseq;
 use std::path::Path;
 
+use anyhow::Context;
 pub use logseq::LogseqMarkdownAdapter;
 
 /// Which foreign flavor a vault root is, detected once from marker files.
@@ -43,14 +44,18 @@ pub enum VaultFlavor {
 /// Classify a vault by its on-disk marker directories. A folder with both
 /// markers is treated as LogSeq (its `.md` grammar is the stricter superset to
 /// parse); neither marker ⇒ `Org` (the native default). Never guesses per file.
-pub fn detect_flavor(root: &Path) -> VaultFlavor {
-    if root.join("logseq").join("config.edn").exists() {
+pub fn detect_flavor(root: &Path) -> anyhow::Result<VaultFlavor> {
+    let exists = |p: std::path::PathBuf| {
+        p.try_exists()
+            .with_context(|| format!("cannot probe {}", p.display()))
+    };
+    Ok(if exists(root.join("logseq").join("config.edn"))? {
         VaultFlavor::Logseq
-    } else if root.join(".obsidian").is_dir() {
+    } else if exists(root.join(".obsidian"))? && root.join(".obsidian").is_dir() {
         VaultFlavor::Obsidian
     } else {
         VaultFlavor::Org
-    }
+    })
 }
 
 /// Tier gate: refuses any write-back to a doc that belongs to a read-only

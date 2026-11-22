@@ -13,12 +13,18 @@ use holon_api::block::Block;
 use holon_api::marks_to_json;
 use holon_org_format::OrgBlockExt;
 
+use crate::build::FOREIGN_OPAQUE_KEY;
+
 /// Whether an edit from `a` to `b` changes anything [`build_block_params`]
-/// carries, so the ingest must emit an update. The priority cookie, planning
-/// lines and `key:: value` lines are stripped from `content`, so each is
-/// compared on its own.
+/// carries (but the clock fields), so the ingest must emit an update. The
+/// priority cookie, planning lines and `key:: value` lines are stripped from
+/// `content`, so each is compared on its own.
 pub fn content_differs(a: &Block, b: &Block) -> bool {
-    a.content != b.content
+    a.parent_id != b.parent_id
+        || a.content != b.content
+        || a.content_type != b.content_type
+        || emitted_source_language(a) != emitted_source_language(b)
+        || a.get_property_str(FOREIGN_OPAQUE_KEY) != b.get_property_str(FOREIGN_OPAQUE_KEY)
         || a.marks != b.marks
         || holon_api::EdgeField::ALL.iter().any(|f| f.differs(a, b))
         || a.task_state() != b.task_state()
@@ -26,6 +32,12 @@ pub fn content_differs(a: &Block, b: &Block) -> bool {
         || a.scheduled() != b.scheduled()
         || a.deadline() != b.deadline()
         || a.drawer_properties() != b.drawer_properties()
+}
+
+fn emitted_source_language(block: &Block) -> Option<String> {
+    (block.content_type == ContentType::Source)
+        .then(|| block.source_language.as_ref().map(|l| l.to_string()))
+        .flatten()
 }
 
 /// `previous` is the block as the file previously declared it. A task marker,
@@ -98,23 +110,23 @@ pub fn build_block_params(
         if holon_api::EdgeField::is_edge_drawer_key(&key) {
             continue;
         }
-        if holon_api::schema::is_block_column(&key) {
-            tracing::warn!(
-                block = %block.id,
-                key = %key,
-                "markdown property names a `block_raw` storage column and cannot be stored as a \
-                 property — dropping it from this block's ingest params. Rename the property."
-            );
-            continue;
-        }
+        assert!(
+            !holon_api::schema::is_block_column(&key),
+            "property `{key}` names a storage column; parse refuses such a file"
+        );
         params.insert(key.into(), Value::String(value));
+    }
+    if let Some(kind) = block.get_property_str(FOREIGN_OPAQUE_KEY) {
+        params.insert(FOREIGN_OPAQUE_KEY.into(), Value::String(kind));
+    } else if previous.is_some_and(|p| p.get_property(FOREIGN_OPAQUE_KEY).is_some()) {
+        params.insert(FOREIGN_OPAQUE_KEY.into(), Value::REMOVED);
     }
 
     if let Some(previous) = previous {
-        let dropped_properties = previous.drawer_properties().into_keys().filter(|key| {
-            !holon_api::EdgeField::is_edge_drawer_key(key)
-                && !holon_api::schema::is_block_column(key)
-        });
+        let dropped_properties = previous
+            .drawer_properties()
+            .into_keys()
+            .filter(|key| !holon_api::EdgeField::is_edge_drawer_key(key));
         let dropped_fields = ["priority", "scheduled", "deadline"]
             .into_iter()
             .filter(|key| previous.get_property(key).is_some())

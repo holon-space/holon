@@ -60,7 +60,7 @@ fn link_targets(b: &Block) -> Vec<EntityRef> {
 
 #[test]
 fn flavor_detected_from_dot_obsidian() {
-    assert_eq!(detect_flavor(&vault()), VaultFlavor::Obsidian);
+    assert_eq!(detect_flavor(&vault()).unwrap(), VaultFlavor::Obsidian);
 }
 
 #[test]
