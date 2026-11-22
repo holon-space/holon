@@ -5230,6 +5230,7 @@ dependencies = [
  "anyhow",
  "hex",
  "holon-api",
+ "proptest 1.11.0",
  "serde",
  "serde_json",
  "serde_yaml",

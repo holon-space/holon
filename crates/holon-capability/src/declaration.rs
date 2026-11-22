@@ -14,6 +14,7 @@
 
 use std::fmt;
 
+use anyhow::Context;
 use holon_api::ComputedTier;
 use holon_api::FieldLifetime;
 use holon_api::TypeDefinition;
@@ -105,7 +106,13 @@ pub fn check_computed_persisted(
             reason: format!("its result type cannot be inferred, so no home can vouch for it: {e}"),
         })?;
 
-        if let Some(reason) = unoffered_reason(registry, &home, kind)? {
+        let unoffered = unoffered_reason(registry, &home, kind).map_err(|e| HomeRefusal {
+            type_name: type_def.name.clone(),
+            field: field.name.clone(),
+            home: home.clone(),
+            reason: format!("{e:#}"),
+        })?;
+        if let Some(reason) = unoffered {
             return Err(HomeRefusal {
                 type_name: type_def.name.clone(),
                 field: field.name.clone(),
@@ -130,7 +137,7 @@ fn unoffered_reason(
     registry: &ProfileRegistry,
     home: &CapabilityProfileId,
     kind: FieldKind,
-) -> Result<Option<String>, HomeRefusal> {
+) -> anyhow::Result<Option<String>> {
     let value_kinds: &[ValueKind] = match kind {
         FieldKind::Text => &[ValueKind::String],
         FieldKind::Boolean => &[ValueKind::Boolean],
@@ -139,12 +146,7 @@ fn unoffered_reason(
     for value_kind in value_kinds {
         let support = registry
             .supports(home, &Feature::ComputedPersisted(*value_kind))
-            .map_err(|e| HomeRefusal {
-                type_name: String::new(),
-                field: String::new(),
-                home: home.clone(),
-                reason: e.to_string(),
-            })?;
+            .with_context(|| format!("asking home `{home}` whether it persists {value_kind:?}"))?;
         match support {
             Support::Offered => {}
             Support::NotOffered { reason } | Support::OfferedViaRehoming { reason, .. } => {
@@ -211,3 +213,106 @@ impl fmt::Display for UnknownHome {
 }
 
 impl std::error::Error for UnknownHome {}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::ComputedSpec;
+    use holon_api::FieldSchema;
+    use proptest::test_runner::Config;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+    use crate::fixture::MINIMAL;
+
+    /// (expression, SQL type of the computed column) per `FieldKind`.
+    const COMPUTATIONS: [(&str, &str); 3] = [
+        ("a == b", "BOOLEAN"),
+        ("a + b", "TEXT"),
+        ("n + 1", "INTEGER"),
+    ];
+
+    fn type_with_computed_field(
+        type_name: &str,
+        field_name: &str,
+        (expr, sql_type): (&str, &str),
+    ) -> TypeDefinition {
+        let mut fields = vec![
+            FieldSchema::new("id", "TEXT").primary_key(),
+            FieldSchema::new("a", "TEXT").nullable(),
+            FieldSchema::new("b", "TEXT").nullable(),
+            FieldSchema::new("n", "INTEGER").nullable(),
+        ];
+        fields.extend(FieldSchema::overflow_pair());
+        let mut type_def = TypeDefinition::new(type_name, fields);
+        let spec = ComputedSpec::parse(
+            field_name,
+            expr,
+            ComputedTier::ComputedPersisted,
+            &type_def.field_types(),
+            &holon_api::bounded_engine(),
+        )
+        .expect("the drawn expression lowers to SQL");
+        type_def.fields.push(FieldSchema {
+            name: field_name.to_string(),
+            sql_type: sql_type.to_string(),
+            lifetime: FieldLifetime::Computed {
+                spec: Box::new(spec),
+            },
+            ..Default::default()
+        });
+        type_def
+    }
+
+    fn registry_with_only_home_test() -> ProfileRegistry {
+        ProfileRegistry::from_yaml([("test", MINIMAL)]).expect("the minimal profile loads")
+    }
+
+    /// A refusal that comes from a registry error still names the type and the
+    /// field it is about, whatever kind the computed field produces.
+    fn refusal_names_its_subject(
+        type_name: &str,
+        field_name: &str,
+        computation: (&str, &str),
+        destination: &str,
+    ) -> Result<(), String> {
+        let registry = registry_with_only_home_test();
+        let type_def = type_with_computed_field(type_name, field_name, computation);
+        let seat = HomeSeat::Destination(CapabilityProfileId::new(destination));
+        match check_computed_persisted(&registry, &type_def, &seat) {
+            Ok(()) => Err(format!(
+                "an unregistered destination `{destination}` was accepted"
+            )),
+            Err(r) if r.type_name == type_name && r.field == field_name => Ok(()),
+            Err(r) => Err(format!(
+                "refusal names `{}.{}`, expected `{type_name}.{field_name}`",
+                r.type_name, r.field
+            )),
+        }
+    }
+
+    #[test]
+    fn a_refusal_from_an_unknown_destination_names_the_type_and_the_field() {
+        refusal_names_its_subject("person", "flag", COMPUTATIONS[0], "absent-home")
+            .expect("fixed case");
+
+        TestRunner::new(Config::default())
+            .run(
+                &(
+                    "[a-z][a-z0-9_]{0,8}",
+                    "c_[a-z0-9]{1,6}",
+                    0..COMPUTATIONS.len(),
+                    "absent-[a-z]{1,6}",
+                ),
+                |(type_name, field_name, computation, destination)| {
+                    refusal_names_its_subject(
+                        &type_name,
+                        &field_name,
+                        COMPUTATIONS[computation],
+                        &destination,
+                    )
+                    .map_err(proptest::test_runner::TestCaseError::fail)
+                },
+            )
+            .expect("the refusal names the offending field");
+    }
+}

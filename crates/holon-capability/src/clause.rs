@@ -275,26 +275,20 @@ impl EnforcementMap {
         Ok(())
     }
 
-    pub fn layer_of(&self, clause: ClauseId) -> EnforcementLayer {
-        if self.sync.iter().any(|d| d.clause == clause) {
-            EnforcementLayer::Sync
-        } else if self.operation.iter().any(|d| d.clause == clause) {
-            EnforcementLayer::Operation
-        } else if self.declaration.iter().any(|d| d.clause == clause) {
-            EnforcementLayer::Declaration
-        } else {
-            EnforcementLayer::Format
-        }
-    }
-
-    /// The enforcing site of a deferred clause.
-    pub fn site_of(&self, clause: ClauseId) -> Option<&str> {
-        self.sync
-            .iter()
-            .chain(self.operation.iter())
-            .chain(self.declaration.iter())
-            .find(|d| d.clause == clause)
-            .map(|d| d.site.as_str())
+    /// The layer and site that enforce `clause` when another layer owns it;
+    /// `None` when the format layer does.
+    pub fn deferral_of(&self, clause: ClauseId) -> Option<(EnforcementLayer, &DeferralSite)> {
+        let layered = [
+            (EnforcementLayer::Sync, &self.sync),
+            (EnforcementLayer::Operation, &self.operation),
+            (EnforcementLayer::Declaration, &self.declaration),
+        ];
+        layered.into_iter().find_map(|(layer, sites)| {
+            sites
+                .iter()
+                .find(|d| d.clause == clause)
+                .map(|site| (layer, site))
+        })
     }
 }
 
@@ -412,9 +406,8 @@ pub fn coverage_gaps(
     for &clause in ALL_CLAUSES {
         let marked = not_yet_certified.contains(&clause);
         let driven = probed.contains(&clause);
-        let layer = enforced_by.layer_of(clause);
 
-        if layer != EnforcementLayer::Format {
+        if let Some((layer, site)) = enforced_by.deferral_of(clause) {
             // Another layer owns it. The only errors possible here are
             // category errors — claiming it as a format TODO, or a
             // format-layer probe pretending to certify it.
@@ -433,7 +426,7 @@ pub fn coverage_gaps(
             deferred.push(DeferredClause {
                 clause,
                 layer,
-                site: enforced_by.site_of(clause).unwrap_or_default().to_string(),
+                site: site.site.clone(),
             });
             continue;
         }

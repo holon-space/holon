@@ -176,6 +176,10 @@ impl CapabilityProfile {
                     HomeSupport::no(format!("`{key}` carries a prefix this format erases"))
                 } else if self.property_keys().is_owned(key) {
                     HomeSupport::no(format!("`{key}` is owned by the format itself"))
+                } else if self.property_keys().is_engine_owned(key) {
+                    HomeSupport::no(format!(
+                        "`{key}` is minted by the format, which refuses an authored one"
+                    ))
                 } else {
                     HomeSupport::Offered
                 }
@@ -184,7 +188,10 @@ impl CapabilityProfile {
                 SiblingOrder::Unordered => {
                     HomeSupport::no("this format does not model sibling order at all")
                 }
-                _ => HomeSupport::Offered,
+                SiblingOrder::FilePosition
+                | SiblingOrder::FractionalIndex
+                | SiblingOrder::ExplicitInteger
+                | SiblingOrder::LinkedList => HomeSupport::Offered,
             },
             Feature::Reparent => match self.hierarchy().reparent {
                 Reparent::None => HomeSupport::no("this format does not allow reparenting"),
@@ -231,5 +238,98 @@ impl CapabilityProfile {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::test_runner::Config;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+    use crate::fixture::KeyLists;
+    use crate::fixture::strategies::lists_and_key;
+
+    fn keys(members: &[&str]) -> Vec<String> {
+        members.iter().map(|m| m.to_string()).collect()
+    }
+
+    /// `supports(PropertyKey)` offers exactly the keys no list refuses, and a
+    /// refusal names the key it is about.
+    fn offer_matches_the_refusal_set(lists: &KeyLists, key: &str) -> Result<(), String> {
+        let profile = CapabilityProfile::from_yaml(&lists.minimal_profile_yaml())
+            .map_err(|e| format!("a drawn key-list set must load: {e:#}"))?;
+        let refused = lists
+            .reserved_prefixes
+            .iter()
+            .any(|p| key.starts_with(p.as_str()))
+            || lists.reserved_keys.iter().any(|k| k == key)
+            || lists.engine_owned_keys.iter().any(|k| k == key);
+
+        match (
+            profile.supports(&Feature::PropertyKey(key.to_string())),
+            refused,
+        ) {
+            (HomeSupport::Offered, false) => Ok(()),
+            (HomeSupport::Offered, true) => Err(format!("`{key}` is refused but offered")),
+            (HomeSupport::NotOffered { .. }, false) => {
+                Err(format!("`{key}` is not refused but not offered"))
+            }
+            (HomeSupport::NotOffered { reason }, true) => reason
+                .contains(&format!("`{key}`"))
+                .then_some(())
+                .ok_or(format!("the refusal does not name `{key}`: {reason}")),
+        }
+    }
+
+    /// The property is checked on fixed cases first, then on drawn ones.
+    /// Fixed cases are stored as explicit lists, not as seeds, so a change to
+    /// the generator cannot turn them into other cases.
+    #[test]
+    fn a_property_key_is_offered_iff_no_key_list_refuses_it() {
+        let fixed = [
+            (
+                KeyLists {
+                    engine_owned_keys: keys(&["_provenance"]),
+                    ..KeyLists::default()
+                },
+                "_provenance",
+            ),
+            (
+                KeyLists {
+                    reserved_prefixes: keys(&["_"]),
+                    reserved_keys: keys(&["id"]),
+                    engine_owned_keys: keys(&["_provenance"]),
+                },
+                "title",
+            ),
+        ];
+        for (lists, key) in &fixed {
+            offer_matches_the_refusal_set(lists, key).expect("fixed case");
+        }
+
+        let only_engine_owned = std::cell::Cell::new(0usize);
+        TestRunner::new(Config::default())
+            .run(&lists_and_key(), |(lists, key)| {
+                let prefixed = lists
+                    .reserved_prefixes
+                    .iter()
+                    .any(|p| key.starts_with(p.as_str()));
+                only_engine_owned.set(
+                    only_engine_owned.get()
+                        + usize::from(
+                            lists.engine_owned_keys.contains(&key)
+                                && !lists.reserved_keys.contains(&key)
+                                && !prefixed,
+                        ),
+                );
+                offer_matches_the_refusal_set(&lists, &key)
+                    .map_err(proptest::test_runner::TestCaseError::fail)
+            })
+            .expect("the offer agrees with the refusal set");
+        assert!(
+            only_engine_owned.get() > 0,
+            "no drawn key was refused by the engine-owned list alone"
+        );
     }
 }

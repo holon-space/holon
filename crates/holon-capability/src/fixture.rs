@@ -216,3 +216,95 @@ pub fn minimal_with(old: &str, new: &str) -> String {
     );
     MINIMAL.replace(old, new)
 }
+
+/// The three property-key lists of axis 3, drawn together.
+///
+/// Every loadable profile may name any strings here: the loader does not
+/// require the lists to be disjoint, so the generator does not either.
+#[derive(Debug, Clone, Default)]
+pub struct KeyLists {
+    pub reserved_prefixes: Vec<String>,
+    pub reserved_keys: Vec<String>,
+    pub engine_owned_keys: Vec<String>,
+}
+
+impl KeyLists {
+    /// `MINIMAL` with these lists in axis 3. Each member is a JSON string, so
+    /// no drawn spelling can be read as another YAML scalar.
+    pub fn minimal_profile_yaml(&self) -> String {
+        let flow = |keys: &[String]| serde_json::to_string(keys).expect("strings serialise");
+        let yaml = minimal_with(
+            "reserved_prefixes: []",
+            &format!("reserved_prefixes: {}", flow(&self.reserved_prefixes)),
+        )
+        .replace(
+            "reserved_keys: []",
+            &format!("reserved_keys: {}", flow(&self.reserved_keys)),
+        )
+        .replace(
+            "engine_owned_keys: []",
+            &format!("engine_owned_keys: {}", flow(&self.engine_owned_keys)),
+        );
+        assert!(
+            yaml.contains(&flow(&self.engine_owned_keys)),
+            "fixture drift: the engine-owned list did not land in the profile"
+        );
+        yaml
+    }
+}
+
+pub mod strategies {
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    use proptest::strategy::Union;
+
+    use super::KeyLists;
+
+    /// A small alphabet so that a fresh key collides with a listed one often
+    /// enough to exercise the boundary between "listed" and "not listed".
+    const SPELLING: &str = "[a-c_]{1,4}";
+
+    pub fn key_lists() -> impl Strategy<Value = KeyLists> {
+        (
+            vec(SPELLING, 0..3),
+            vec(SPELLING, 0..3),
+            vec(SPELLING, 0..3),
+        )
+            .prop_map(
+                |(reserved_prefixes, reserved_keys, engine_owned_keys)| KeyLists {
+                    reserved_prefixes,
+                    reserved_keys,
+                    engine_owned_keys,
+                },
+            )
+    }
+
+    /// A key to ask about: weight 3 a member of each non-empty list, weight 3
+    /// a reserved prefix extended by a suffix, weight 2 a fresh spelling.
+    pub fn key_for(lists: &KeyLists) -> BoxedStrategy<String> {
+        let mut sources: Vec<(u32, BoxedStrategy<String>)> = vec![(2, SPELLING.boxed())];
+        if !lists.reserved_prefixes.is_empty() {
+            sources.push((
+                3,
+                (select(lists.reserved_prefixes.clone()), "[a-c_]{0,3}")
+                    .prop_map(|(prefix, suffix)| format!("{prefix}{suffix}"))
+                    .boxed(),
+            ));
+        }
+        for members in [&lists.reserved_keys, &lists.engine_owned_keys] {
+            if !members.is_empty() {
+                sources.push((3, select(members.clone()).boxed()));
+            }
+        }
+        Union::new_weighted(sources).boxed()
+    }
+
+    /// A key list set together with a key asked about.
+    pub fn lists_and_key() -> impl Strategy<Value = (KeyLists, String)> {
+        key_lists().prop_flat_map(|lists| {
+            let key = key_for(&lists);
+            (Just(lists), key)
+        })
+    }
+}
