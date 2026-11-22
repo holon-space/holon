@@ -1,6 +1,6 @@
 ---
 name: holon-feature
-description: The red-first PBT contract for building ANY new Holon feature or behavior change — extend the keystone (headless) or GPUI (windowed) PBT so it fails BECAUSE the feature is missing (red for the right reason), implement, show it green, then pass the dogfood-explorer gate. Use when implementing a new feature or changing observable behavior. NOT for pure bug fixes (use bug-gap-triage) or pure refactors.
+description: The red-first PBT contract for building ANY new Holon feature or behavior change — write a PBT on the lowest layer whose interface can observe the behaviour (the keystone or GPUI PBT for behaviour that crosses layers and for every UI bug) so it fails BECAUSE the feature is missing (red for the right reason), implement, show it green, then pass the dogfood-explorer gate. Use when implementing a new feature or changing observable behavior. NOT for pure bug fixes (use bug-gap-triage) or pure refactors.
 ---
 
 # Holon Feature Contract
@@ -18,7 +18,9 @@ here.
 
 Before touching implementation code:
 
-1. **Extend the keystone or GPUI PBT** — add a transition and/or an invariant
+1. **Write or extend the PBT on the LOWEST layer whose interface can observe the
+   behaviour** (a crate or module PBT; the keystone or GPUI PBT when the
+   behaviour crosses layers or is a UI bug) — add a transition and/or an invariant
    that exercises the new behavior. The generator must be able to *reach* the
    new state (transition), and an invariant must *judge* it.
 2. **Run it and capture the RED output.** The failure must be **for the right
@@ -69,11 +71,15 @@ The change summary lists each generator restriction with its reason, and each
 failure with its verdict, under `Generators:` (the summary template of the
 `verify-lane` skill). A restriction without a reason is a verifier finding.
 
-## 2. Which tier — headless keystone vs GPUI windowed
+## 2. Which tier — lowest observing layer, keystone, or GPUI windowed
+
+Pick the LOWEST layer whose interface can observe the behaviour. Use the
+keystone or GPUI PBT for behaviour that crosses layers and for every UI bug.
 
 | The feature is about… | Tier | Where |
 |---|---|---|
-| Data / state / behavior semantics (ops, projection, edges, task-state, org round-trip, query results) | **Headless keystone** | `crates/holon-integration-tests/` (transition + invariant into the composed PBT) |
+| Behavior one layer's interface fully observes (a parser, an op, a query, a store) | **Lowest-layer PBT** | the PBT of that crate or module (`crates/<crate>/tests/`), on that layer's public interface |
+| Data / state / behavior semantics that cross layers (ops, projection, edges, task-state, org round-trip, query results) | **Headless keystone** | `crates/holon-integration-tests/` (transition + invariant into the composed PBT) |
 | Anything the user **sees or touches** — layout, scroll, hover, caret, focus, selection, theme, drawer, keybinding | **GPUI windowed** | the windowed T3 PBTs (drive via GPUI, assert on rendered/layout state) |
 
 A feature that spans both — a new op AND its on-screen affordance — gets **both**
@@ -82,7 +88,7 @@ headless half when the user-visible half is the point.
 
 ## 3. Exception path — implementing without a covering PBT
 
-Landing a feature with **no** headless or GPUI PBT covering its functionality is
+Landing a feature with **no** PBT (lowest-layer, headless or GPUI) covering its functionality is
 allowed only in **rare** cases and **MUST be escalated to Martin BEFORE it
 lands** — it is never your call to make silently.
 

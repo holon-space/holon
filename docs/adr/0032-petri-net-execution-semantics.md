@@ -1019,8 +1019,10 @@ after it.
 
 Undo re-founding (§7) and the editing lease (§5) are later increments. Every
 one of them is a behavior change, so every one goes through the red-first
-property-based-test discipline of the `holon-feature` skill: the keystone or
-GPUI test fails *because* the behavior is missing, then passes.
+property-based-test discipline of the `holon-feature` skill: a PBT on the
+lowest layer whose interface can observe the behavior (the keystone or GPUI
+test when the behavior crosses layers) fails *because* the behavior is
+missing, then passes.
 
 **Costs accepted:**
 
