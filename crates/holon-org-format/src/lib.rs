@@ -20,6 +20,7 @@
 mod comma_escape;
 pub mod dense;
 pub mod drawer;
+mod encodable;
 pub mod inline_marks;
 pub mod link_parser;
 pub mod models;
@@ -52,6 +53,7 @@ pub use drawer::TypedDrawerKey;
 pub use drawer::UnrepresentableId;
 pub use drawer::UnrepresentableKey;
 pub use drawer::ValueCarrier;
+pub use encodable::refuse_unreadable_content;
 pub use inline_marks::SourceContentOffsets;
 pub use inline_marks::expected_reparse;
 pub use inline_marks::extract_block_marks;

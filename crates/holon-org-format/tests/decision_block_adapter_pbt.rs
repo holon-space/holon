@@ -15,6 +15,7 @@ use holon_api::block::Block;
 use holon_api::decision::AllowedDeciders;
 use holon_api::decision::AnswerInput;
 use holon_api::decision::Answerer;
+use holon_api::decision::Change;
 use holon_api::decision::Command;
 use holon_api::decision::Decider;
 use holon_api::decision::Decision;
@@ -656,6 +657,13 @@ proptest! {
     })]
 
     #[test]
+    fn a_rationale_reads_back_equal_or_is_refused_naming_a_changed_line(
+        rationale in nested_rationale()
+    ) {
+        equal_or_refused(&rationale)?;
+    }
+
+    #[test]
     fn a_stored_decision_reads_back_equal((d, shape) in decision()) {
         match try_stored(&d) {
             Ok(vault) => prop_assert_eq!(vault.read(), Ok(d)),
@@ -969,28 +977,173 @@ fn open_decision() -> Decision {
     .unwrap()
 }
 
-fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
+fn answer_change(d: &Decision, rationale: &str) -> Change {
+    d.apply(
+        Command::Answer {
+            by: Answerer::parse("person:eve").unwrap(),
+            body: AnswerInput::Pick(keys_of(vec!["a".into()])),
+            rationale: Some(Prose::parse(rationale, TextSite::Rationale).unwrap()),
+        },
+        instant(1, 0),
+        &allowed(),
+    )
+    .unwrap()
+}
+
+/// The operations that store `rationale` as an answer, before any org check.
+fn answer_ops(rationale: &str) -> (Vault, Vec<Operation>, Decision) {
     let d = open_decision();
-    let change = d
-        .apply(
-            Command::Answer {
-                by: Answerer::parse("person:eve").unwrap(),
-                body: AnswerInput::Pick(keys_of(vec!["a".into()])),
-                rationale: Some(Prose::parse(rationale, TextSite::Rationale).unwrap()),
-            },
-            instant(1, 0),
-            &allowed(),
-        )
-        .unwrap();
+    let change = answer_change(&d, rationale);
     let mut vault = stored(&d);
     let (_, children) = vault.decision();
     let mint = vault.mint();
-    let ops = decision_block::change_ops(&change, &children, || mint)?;
+    let ops = decision_block::change_ops(&change, &children, || mint).expect("adapter accepts");
+    let next = d.commit(change).unwrap();
+    (vault, ops, next)
+}
+
+fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
+    let (mut vault, ops, next) = answer_ops(rationale);
+    holon_org_format::refuse_unreadable_content(&ops)?;
     vault.apply(&ops);
     vault.round_trip_org();
-    let next = d.commit(change).unwrap();
     assert_eq!(vault.read(), Ok(next.clone()));
     Ok(next)
+}
+
+/// Whether org gives the stored answer back unchanged with no refusal in the
+/// way: the ground truth the refusal must agree with.
+fn org_keeps(rationale: &str) -> bool {
+    let (mut vault, ops, next) = answer_ops(rationale);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault.apply(&ops);
+        vault.round_trip_org();
+        vault.read() == Ok(next)
+    }))
+    .unwrap_or(false)
+}
+
+const CONTAINER_NAMES: &[&str] = &[
+    "verse", "comment", "center", "quote", "src", "example", "export", "special", "foo", "QUOTE",
+    "Src",
+];
+const DRAWER_NAMES: &[&str] = &["LOGBOOK", "PROPERTIES", "end", "log1", "a-b"];
+const KEYWORD_KEYS: &[&str] = &[
+    "begin",
+    "end",
+    "BEGINX",
+    "endx",
+    "Begin_",
+    "END_",
+    "begin_src",
+    "end_quote",
+    ":",
+    "TITLE",
+];
+
+fn one_of(items: &'static [&'static str]) -> impl Strategy<Value = &'static str> + Clone {
+    prop::sample::select(items)
+}
+
+/// `#+KEY:` lines with any key spelling, including the ones that start like a
+/// block delimiter.
+fn keyword_line() -> BoxedStrategy<String> {
+    let key = prop_oneof![
+        "[A-Za-z0-9_-]{1,6}".prop_map(String::from),
+        one_of(KEYWORD_KEYS).prop_map(String::from),
+    ];
+    (one_of(&["", "  ", "\t"]), key, one_of(&["", " x"]))
+        .prop_map(|(indent, key, value)| format!("{indent}#+{key}:{value}"))
+        .boxed()
+}
+
+/// Lines of text with drawers and blocks of every kind nested in each other,
+/// closed by a delimiter that matches in case or not.
+fn nested_lines() -> BoxedStrategy<Vec<String>> {
+    let leaf = prop_oneof![
+        keyword_line().prop_map(|l| vec![l]),
+        prop::sample::select(PLAIN_LINES).prop_map(|l| vec![l.to_string()]),
+    ];
+    leaf.prop_recursive(3, 12, 3, |inner| {
+        let inner = prop::collection::vec(inner, 0..4).prop_map(|parts| parts.concat());
+        prop_oneof![
+            (
+                one_of(CONTAINER_NAMES),
+                one_of(&["", " x"]),
+                prop::bool::ANY,
+                inner.clone()
+            )
+                .prop_map(|(name, arg, upper, inner)| {
+                    let closer = if upper {
+                        name.to_uppercase()
+                    } else {
+                        name.to_string()
+                    };
+                    [
+                        vec![format!("#+begin_{name}{arg}")],
+                        inner,
+                        vec![format!("#+end_{closer}")],
+                    ]
+                    .concat()
+                }),
+            inner.clone().prop_map(|inner| {
+                [
+                    vec!["#+begin: x".to_string()],
+                    inner,
+                    vec!["#+end:".to_string()],
+                ]
+                .concat()
+            }),
+            (one_of(DRAWER_NAMES), inner).prop_map(|(name, inner)| {
+                [vec![format!(":{name}:")], inner, vec![":END:".to_string()]].concat()
+            }),
+        ]
+    })
+    .boxed()
+}
+
+fn nested_rationale() -> impl Strategy<Value = String> {
+    prop::collection::vec(nested_lines(), 1..4).prop_map(|parts| parts.concat().join("\n"))
+}
+
+/// A write reads back equal, or is refused naming a line of the text that org
+/// changes; it is never accepted and changed, and never refused while org
+/// keeps it.
+fn equal_or_refused(rationale: &str) -> Result<(), TestCaseError> {
+    let kept = org_keeps(rationale);
+    match std::panic::catch_unwind(|| answered(rationale)) {
+        Ok(Ok(_)) => prop_assert!(kept),
+        Ok(Err(BlockDecisionError::Unencodable { text, .. })) => {
+            prop_assert!(
+                rationale.split('\n').any(|l| l == text),
+                "{rationale:?}: the refusal names {text:?}, no line of it"
+            );
+            prop_assert!(
+                !kept,
+                "{rationale:?}: refused naming {text:?}, but org keeps it"
+            );
+        }
+        Ok(Err(e)) => prop_assert!(false, "{rationale:?}: {e}"),
+        Err(_) => prop_assert!(false, "{rationale:?}: accepted, and org changes it"),
+    }
+    Ok(())
+}
+
+/// Fixed cases a generator found, kept as explicit state.
+#[test]
+fn fixed_rationales_read_back_equal_or_are_refused() {
+    for rationale in [
+        ":LOGBOOK:\n#+BEGINX: x\n:END:",
+        ":LOGBOOK:\n#+ENDX: x\n:END:",
+        "#+begin_src\n:LOGBOOK:\n#+TITLE: x\n:END:\n#+end_src",
+        "#+begin_verse\n#+TITLE: x\n#+end_verse",
+        "#+begin_comment\n#+TITLE: x\n#+end_comment",
+        ":PROPERTIES:\n#+TITLE: x\n:END:",
+        "#+begin_quote\n#+TITLE: x\n#+end_quote",
+        "#+begin_example\n#+TITLE: x\n#+end_example",
+    ] {
+        equal_or_refused(rationale).unwrap_or_else(|e| panic!("{e}"));
+    }
 }
 
 #[test]
@@ -999,16 +1152,21 @@ fn a_rationale_keeps_drawer_lines_indentation_and_inner_blank_lines() {
 }
 
 /// Fixed case: org lifts a keyword line out of a drawer or block, so the
-/// rationale is refused and the refusal names that line.
+/// rationale is refused and the refusal names a line of it.
 #[test]
-fn a_keyword_line_inside_a_drawer_or_block_is_refused_naming_the_line() {
-    for (rationale, line) in [
-        (":PROPERTIES:\n#+TITLE: x\n:END:", "#+TITLE: x"),
-        (":LOGBOOK:\n  #+TITLE: x\n:END:", "  #+TITLE: x"),
-        ("#+begin_quote\n#+TITLE: x\n#+end_quote", "#+TITLE: x"),
+fn a_keyword_line_inside_a_drawer_or_block_is_refused_naming_a_line() {
+    for rationale in [
+        ":PROPERTIES:\n#+TITLE: x\n:END:",
+        ":LOGBOOK:\n  #+TITLE: x\n:END:",
+        "#+begin_quote\n#+TITLE: x\n#+end_quote",
     ] {
         match answered(rationale) {
-            Err(BlockDecisionError::Unencodable { text, .. }) => assert_eq!(text, line),
+            Err(BlockDecisionError::Unencodable { text, .. }) => {
+                assert!(
+                    rationale.split('\n').any(|l| l == text),
+                    "{rationale:?}: {text:?}"
+                )
+            }
             other => panic!("{rationale:?}: {other:?}"),
         }
     }
