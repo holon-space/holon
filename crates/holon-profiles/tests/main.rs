@@ -9,4 +9,5 @@ mod profile_typed_computed_override_refusal;
 mod profile_write_target_refusal;
 mod type_home_file_and_block_conflict;
 mod type_services_declaration;
+mod ui_condition_split;
 mod vault_profile_admission_is_history_free;

@@ -93,7 +93,8 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "scale_factor",
 ];
 
-/// Map of entity name → live collection for Rhai lookup functions.
+/// Map of entity name → live collection for Rhai lookup functions. Every row
+/// has the three columns `id`, `parent_id` and `source_language`.
 pub type LiveEntities = HashMap<EntityName, Arc<LiveData<StorageEntity>>>;
 
 /// A live entity backing the bundled `block` profile's lookup-dependent
@@ -446,7 +447,7 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
             && UI_STATE_VARIABLES
                 .iter()
                 .any(|var| holon_core::util::expr_references(conjunct, var))
-            && !has_non_ui_references(conjunct);
+            && !has_non_ui_references(conjunct)?;
 
         if refs_only_ui {
             ui_predicates.push(parse_conjunct_to_predicate(conjunct)?);
@@ -470,6 +471,38 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
     Ok((data_condition, ui_condition))
 }
 
+/// If a literal or a bracket starts at `i`, the index after it (a bracket:
+/// after the bracket itself, with `open` updated); `None` for any other byte.
+fn skip_literal_or_nesting(source: &str, i: usize, open: &mut Vec<Open>) -> Result<Option<usize>> {
+    let bytes = source.as_bytes();
+    Ok(Some(match (bytes[i], bytes.get(i + 1).copied()) {
+        (quote @ (b'"' | b'\''), _) => skip_escaped_literal(source, i, quote)?,
+        (b'#', Some(b'#' | b'"')) => skip_raw_literal(source, i)?,
+        (b'`', _) => scan_backtick_text(source, i + 1, open)?,
+        (b'(', _) => {
+            open.push(Open::Bracket(b')'));
+            i + 1
+        }
+        (b'[', _) => {
+            open.push(Open::Bracket(b']'));
+            i + 1
+        }
+        (b'{', _) => {
+            open.push(Open::Bracket(b'}'));
+            i + 1
+        }
+        (closer @ (b')' | b']' | b'}'), _) => match open.pop() {
+            Some(Open::Bracket(expected)) if expected == closer => i + 1,
+            Some(Open::Interpolation) if closer == b'}' => scan_backtick_text(source, i + 1, open)?,
+            _ => anyhow::bail!(
+                "malformed condition `{source}`: unbalanced `{}`",
+                closer as char
+            ),
+        },
+        _ => return Ok(None),
+    }))
+}
+
 /// Split a Rhai condition on its TOP-LEVEL `&&` only, following the Rhai
 /// 1.26 tokenizer: a `&&` inside a literal or inside `()`, `[]` or `{}` belongs
 /// to its conjunct, it is not a boundary. Backtick literals may hold `${…}`
@@ -487,36 +520,15 @@ fn top_level_conjuncts(source: &str) -> Result<Vec<&str>> {
     let mut loose_operator = None;
     let mut i = 0;
     while i < bytes.len() {
+        if let Some(next) = skip_literal_or_nesting(source, i, &mut open)? {
+            i = next;
+            continue;
+        }
         let top_level = open.is_empty();
         match (bytes[i], bytes.get(i + 1).copied()) {
             (b'/', Some(b'/' | b'*')) => anyhow::bail!(
                 "malformed condition `{source}`: a comment cannot be split faithfully, remove it"
             ),
-            (quote @ (b'"' | b'\''), _) => i = skip_escaped_literal(source, i, quote)?,
-            (b'#', Some(b'#' | b'"')) => i = skip_raw_literal(source, i)?,
-            (b'`', _) => i = scan_backtick_text(source, i + 1, &mut open)?,
-            (b'(', _) => {
-                open.push(Open::Bracket(b')'));
-                i += 1;
-            }
-            (b'[', _) => {
-                open.push(Open::Bracket(b']'));
-                i += 1;
-            }
-            (b'{', _) => {
-                open.push(Open::Bracket(b'}'));
-                i += 1;
-            }
-            (closer @ (b')' | b']' | b'}'), _) => match open.pop() {
-                Some(Open::Bracket(expected)) if expected == closer => i += 1,
-                Some(Open::Interpolation) if closer == b'}' => {
-                    i = scan_backtick_text(source, i + 1, &mut open)?
-                }
-                _ => anyhow::bail!(
-                    "malformed condition `{source}`: unbalanced `{}`",
-                    closer as char
-                ),
-            },
             (b'&', Some(b'&')) if top_level => {
                 conjuncts.push(source[start..i].trim());
                 i += 2;
@@ -640,20 +652,24 @@ fn scan_backtick_text(source: &str, i: usize, open: &mut Vec<Open>) -> Result<us
     }
 }
 
-/// Check if a conjunct references any variables that are NOT UI state
-/// variables.
-fn has_non_ui_references(conjunct: &str) -> bool {
-    let ident_chars = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let mut i = 0;
+/// Whether a conjunct names any variable that is NOT a UI state variable.
+/// Text inside a literal and the letters of a number (`0x100`, `1e3`) are
+/// not names.
+fn has_non_ui_references(conjunct: &str) -> Result<bool> {
+    let ident_chars = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let bytes = conjunct.as_bytes();
+    let mut open = Vec::new();
+    let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            i = skip_quoted(bytes, i);
-            continue;
-        }
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+        if let Some(next) = skip_literal_or_nesting(conjunct, i, &mut open)? {
+            i = next;
+        } else if bytes[i].is_ascii_digit() {
+            while i < bytes.len() && (ident_chars(bytes[i]) || bytes[i] == b'.') {
+                i += 1;
+            }
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
             let start = i;
-            while i < bytes.len() && ident_chars(bytes[i] as char) {
+            while i < bytes.len() && ident_chars(bytes[i]) {
                 i += 1;
             }
             let ident = &conjunct[start..i];
@@ -664,27 +680,13 @@ fn has_non_ui_references(conjunct: &str) -> bool {
                 continue;
             }
             if !UI_STATE_VARIABLES.contains(&ident) {
-                return true;
+                return Ok(true);
             }
         } else {
             i += 1;
         }
     }
-    false
-}
-
-/// Index after the `"` or `'` literal starting at `i`, or the end of `bytes`
-/// when it is unterminated; `\\` escapes the next byte.
-fn skip_quoted(bytes: &[u8], i: usize) -> usize {
-    let quote = bytes[i];
-    let mut i = i + 1;
-    while i < bytes.len() && bytes[i] != quote {
-        if bytes[i] == b'\\' {
-            i += 1;
-        }
-        i += 1;
-    }
-    (i + 1).min(bytes.len())
+    Ok(false)
 }
 
 /// Parse a simple conjunct into a Predicate.
@@ -704,7 +706,7 @@ fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
             && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     };
 
-    if let Some((op, idx)) = find_comparison_operator(s) {
+    if let Some((op, idx)) = find_comparison_operator(s)? {
         let field = s[..idx].trim();
         anyhow::ensure!(
             is_ident(field),
@@ -743,47 +745,62 @@ fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
     )
 }
 
-/// Find the first comparison operator outside string literals.
+/// Find the first comparison operator outside literals.
 /// Returns the operator token and its byte index. Two-char operators win
 /// over their one-char prefixes at the same position.
-fn find_comparison_operator(s: &str) -> Option<(&'static str, usize)> {
-    let bytes = s.as_bytes();
+fn find_comparison_operator(s: &str) -> Result<Option<(&'static str, usize)>> {
+    let mut open = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            i = skip_quoted(bytes, i);
+    while i < s.len() {
+        if let Some(next) = skip_literal_or_nesting(s, i, &mut open)? {
+            i = next;
             continue;
         }
         for op in ["==", "!=", "<=", ">=", "<", ">"] {
             if s[i..].starts_with(op) {
-                return Some((op, i));
+                return Ok(Some((op, i)));
             }
         }
         i += 1;
     }
-    None
+    Ok(None)
 }
 
-/// Parse a literal value from a Rhai expression fragment.
+/// Parse the right side of a UI comparison: one quoted string, `true`,
+/// `false`, `()`/`null`, or a decimal number. Anything else is not a value the
+/// frontend can compare against.
 fn parse_literal_value(s: &str) -> Result<Value> {
     let s = s.trim();
-    Ok(
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            Value::String(s[1..s.len() - 1].to_string())
-        } else if s == "true" {
-            Value::Boolean(true)
-        } else if s == "false" {
-            Value::Boolean(false)
-        } else if s == "()" || s == "null" {
-            Value::Null
-        } else if let Ok(i) = s.parse::<i64>() {
-            Value::Integer(i)
-        } else if let Ok(f) = s.parse::<f64>() {
-            anyhow::ensure!(f.is_finite(), "literal `{s}` is not a finite number");
-            Value::Float(f)
-        } else {
-            Value::String(s.to_string())
-        },
+    if let Some(quote) = s.bytes().next().filter(|b| matches!(b, b'"' | b'\'')) {
+        anyhow::ensure!(
+            skip_escaped_literal(s, 0, quote)? == s.len(),
+            "right side `{s}` is more than one literal"
+        );
+        let evaluated = RhaiEngine::new()
+            .eval_expression::<rhai::Dynamic>(s)
+            .map_err(|e| anyhow::anyhow!("literal `{s}` is not a valid string: {e}"))?;
+        return match (evaluated.clone().into_string(), evaluated.as_char()) {
+            (Ok(text), _) => Ok(Value::String(text)),
+            (_, Ok(c)) => Ok(Value::String(c.to_string())),
+            _ => anyhow::bail!("literal `{s}` is neither a string nor a character"),
+        };
+    }
+    match s {
+        "true" => return Ok(Value::Boolean(true)),
+        "false" => return Ok(Value::Boolean(false)),
+        "()" | "null" => return Ok(Value::Null),
+        _ => {}
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return Ok(Value::Integer(i));
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        anyhow::ensure!(f.is_finite(), "literal `{s}` is not a finite number");
+        return Ok(Value::Float(f));
+    }
+    anyhow::bail!(
+        "right side `{s}` is not a literal (a comparison between two variables or an \
+         expression is not supported; write a string, `true`, `false`, `()` or a decimal number)"
     )
 }
 
@@ -1173,25 +1190,12 @@ pub fn validate_lookups_registered(profile: &ParsedProfile) -> Result<()> {
     Ok(())
 }
 
-/// Convert a StorageEntity (HashMap<String, Value>) to a Rhai map.
-/// Flattens `properties` sub-object into top-level keys.
+/// Convert a StorageEntity (HashMap<String, Value>) to a Rhai map of its
+/// top-level keys. A live entity row has the columns `id`, `parent_id` and
+/// `source_language`; it carries no `properties` object.
 fn storage_entity_to_rhai_map(entity: &StorageEntity) -> rhai::Dynamic {
     let mut map = rhai::Map::new();
     for (k, v) in entity {
-        if &**k == "properties" {
-            if let holon_api::Value::Object(props) = v {
-                for (pk, pv) in props {
-                    map.insert(pk.clone().into(), value_to_dynamic(pv));
-                }
-            } else if let holon_api::Value::String(json_str) = v
-                && let Ok(parsed) =
-                    serde_json::from_str::<HashMap<String, holon_api::Value>>(json_str)
-            {
-                for (pk, pv) in &parsed {
-                    map.insert(pk.clone().into(), value_to_dynamic(pv));
-                }
-            }
-        }
         map.insert(k.as_ref().into(), value_to_dynamic(v));
     }
     rhai::Dynamic::from(map)
@@ -1270,6 +1274,21 @@ impl ComputedFieldDisclosure {
                 }
             }
         }
+    }
+}
+
+/// The cache snapshot a row's entity profile is read from, held so the
+/// profile is borrowed per row, not copied.
+struct RowProfile {
+    entity_uri: holon_api::EntityUri,
+    cache: Arc<ProfileCache>,
+}
+
+impl RowProfile {
+    fn profile(&self) -> &EntityProfile {
+        self.cache
+            .get(self.entity_uri.scheme())
+            .expect("entity_profile_of only returns a row whose entity has a cached profile")
     }
 }
 
@@ -1383,7 +1402,7 @@ impl ProfileResolver {
     fn entity_profile_of(
         &self,
         row: &HashMap<String, holon_api::Value>,
-    ) -> std::result::Result<(holon_api::EntityUri, EntityProfile), Arc<RenderProfile>> {
+    ) -> std::result::Result<RowProfile, Arc<RenderProfile>> {
         // A row without an entity `id` (an aggregate or rule-trigger result)
         // is a legal value row, so it is logged at debug, not warn.
         let entity_uri = match row_id(row) {
@@ -1399,12 +1418,9 @@ impl ProfileResolver {
             }
         };
         let entity_name_str = entity_uri.scheme();
-        match self
-            .cache_signal
-            .get_cloned()
-            .get(&EntityName::new(entity_name_str))
-        {
-            Some(profile) => Ok((entity_uri, profile.clone())),
+        let cache = self.cache_signal.get_cloned();
+        match cache.get(entity_name_str) {
+            Some(_) => Ok(RowProfile { entity_uri, cache }),
             None => {
                 tracing::trace!(
                     "No profile registered for entity '{entity_name_str}' — using default",
@@ -1566,10 +1582,11 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
-        let (entity_uri, entity_profile) = match self.entity_profile_of(row) {
+        let held = match self.entity_profile_of(row) {
             Ok(found) => found,
             Err(settled) => return (settled, HashMap::new()),
         };
+        let (entity_uri, entity_profile) = (&held.entity_uri, held.profile());
         let entity_name_str = entity_uri.scheme();
 
         let engine = self.rhai_engine.read().unwrap().clone();
@@ -1611,8 +1628,8 @@ impl ProfileResolving for ProfileResolver {
             Err(_) => return HashMap::new(),
         };
         let cache = self.cache_signal.get_cloned();
-        let entity_profile = match cache.get(&EntityName::new(entity_uri.scheme())) {
-            Some(profile) => profile.clone(),
+        let entity_profile = match cache.get(entity_uri.scheme()) {
+            Some(profile) => profile,
             None => return HashMap::new(),
         };
         let engine = self.rhai_engine.read().unwrap().clone();
@@ -1632,10 +1649,11 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
-        let (entity_uri, entity_profile) = match self.entity_profile_of(row) {
+        let held = match self.entity_profile_of(row) {
             Ok(found) => found,
             Err(settled) => return (settled, HashMap::new()),
         };
+        let (entity_uri, entity_profile) = (&held.entity_uri, held.profile());
         let entity_name_str = entity_uri.scheme();
 
         let engine = self.rhai_engine.read().unwrap().clone();
@@ -1938,15 +1956,14 @@ mod tests {
     }
 
     #[test]
-    fn a_single_quoted_ampersand_pair_is_not_a_conjunct_boundary() {
-        let (data, ui) = split_condition("view_mode == 'list && table'").unwrap();
-        assert!(data.is_none(), "whole condition is UI-only, got {data:?}");
-        assert_eq!(
-            ui,
-            Predicate::Eq {
-                field: "view_mode".into(),
-                value: Value::String("list && table".into()),
-            }
+    fn a_single_quoted_ampersand_pair_is_refused_as_one_literal_not_split() {
+        let err = format!(
+            "{:#}",
+            split_condition("view_mode == 'list && table'").unwrap_err()
+        );
+        assert!(
+            err.contains("literal `'list && table'`"),
+            "the whole quoted text is the refused literal: {err}"
         );
     }
 
@@ -1958,7 +1975,7 @@ mod tests {
             ui,
             Predicate::Eq {
                 field: "view_mode".into(),
-                value: Value::String(r#"a\" && b"#.into()),
+                value: Value::String(r#"a" && b"#.into()),
             }
         );
     }

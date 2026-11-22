@@ -166,7 +166,7 @@ fn parse_invariant(
         ),
         OnViolationRepr::Repair(repair) => OnViolation::Repair(
             constant_repair(entity_name, repair)
-                .context("refused by ruling P-conv.a: a repair must be a constant delta on the subject itself, or the policy must be `disclose`")?,
+                .context("a repair must be a constant delta on the subject itself, or the policy must be `disclose`")?,
         ),
     };
     Ok(DeclaredInvariant {
