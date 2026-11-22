@@ -47,29 +47,43 @@ impl CrossingLog {
             return Err(UndoError::WasRejectedLoser(crossing_id.clone()));
         }
 
+        let committed = self.entries().iter().any(|e| {
+            matches!(&e.body, LogEntryBody::CrossingCommit { crossing_id: id } if id == crossing_id)
+        });
+        if !committed {
+            return Err(UndoError::NoCommittedCrossing(crossing_id.clone()));
+        }
+
         let winner = arb
             .winners
             .iter()
             .find(|c| &c.crossing_id == crossing_id)
             .ok_or_else(|| UndoError::NoCommittedCrossing(crossing_id.clone()))?;
 
-        let inverse = Crossing {
-            crossing_id: CrossingId(format!("{}~undo", crossing_id.0)),
-            block: winner.block.clone(),
-            source: winner.target.clone(),
-            target: winner.source.clone(),
-            widens_audience: !winner.widens_audience,
-            content: winner.content.clone(),
-            inverse_of: Some(crossing_id.clone()),
-            // The inverse supersedes the crossing it reverses, so after the
-            // undo only the inverse is live for the block (the original is
-            // history).
-            supersedes: Some(crossing_id.clone()),
-        };
-        let inverse_id = inverse.crossing_id.clone();
-        let key = self.append_entry(LogEntryBody::CrossingBegin(inverse));
+        let inverse_id = std::cell::RefCell::new(None);
+        let key = self.append_keyed(|key| {
+            let id = CrossingId(format!(
+                "{}~undo@{}.{}",
+                crossing_id.0, key.lamport, key.peer.0
+            ));
+            *inverse_id.borrow_mut() = Some(id.clone());
+            LogEntryBody::CrossingBegin(Crossing {
+                crossing_id: id,
+                block: winner.block.clone(),
+                source: winner.target.clone(),
+                target: winner.source.clone(),
+                widens_audience: !winner.widens_audience,
+                content: winner.content.clone(),
+                inverse_of: Some(crossing_id.clone()),
+                // The inverse supersedes the crossing it reverses, so after the
+                // undo only the inverse is live for the block.
+                supersedes: Some(crossing_id.clone()),
+            })
+        });
         self.append_entry(LogEntryBody::CrossingCommit {
-            crossing_id: inverse_id,
+            crossing_id: inverse_id
+                .into_inner()
+                .expect("append_keyed ran the body builder"),
         });
         Ok(key)
     }

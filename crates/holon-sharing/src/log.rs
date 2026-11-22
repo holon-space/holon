@@ -75,6 +75,15 @@ impl CrossingLog {
     }
 
     fn append(&self, body: LogEntryBody) -> CrossingKey {
+        self.append_keyed(|_| body)
+    }
+
+    /// Like [`append`](Self::append), but builds the body from the key the
+    /// entry receives, so a body that embeds the key cannot disagree with it.
+    pub(crate) fn append_keyed(
+        &self,
+        body: impl FnOnce(CrossingKey) -> LogEntryBody,
+    ) -> CrossingKey {
         // Lamport read IMMEDIATELY before the push = the lamport the new op
         // will receive. Concurrent appends from a shared base read
         // the same height => equal lamport => the peer tiebreak decides.
@@ -83,6 +92,7 @@ impl CrossingLog {
             lamport,
             peer: self.peer,
         };
+        let body = body(key);
         let sig: OwnerSig = self.authority.sign(&canonical_bytes(&key, &body));
         let entry = LogEntry { key, body, sig };
         let json = serde_json::to_string(&entry).expect("entry is serializable");

@@ -36,6 +36,20 @@ use proptest::prelude::*;
 
 const SHARE: &str = "owner-log";
 
+#[test]
+fn undo_of_an_uncommitted_crossing_is_refused() {
+    let log = new_log(&SecretKey::generate());
+    log.append_entry(LogEntryBody::CrossingBegin(crossing(
+        "X", "blk", "src", "tgt", false, "t",
+    )));
+    let before = log.entries();
+    assert_eq!(
+        log.undo_crossing(&CrossingId("X".into())),
+        Err(UndoError::NoCommittedCrossing(CrossingId("X".into())))
+    );
+    assert_eq!(log.entries(), before, "a refused undo appends nothing");
+}
+
 fn new_log(sk: &SecretKey) -> CrossingLog {
     CrossingLog::new(
         StablePeerId(stable_peer_id(sk, SHARE, 0)),
@@ -187,6 +201,94 @@ proptest! {
         // The winner is undoable (appends an inverse crossing).
         prop_assert!(a.undo_crossing(&winner_id).is_ok());
         prop_assert!(a.entries().len() > before_len);
+    }
+
+    /// Undo inverts only committed state: for every id of a single-device log
+    /// mixing committed and Begin-only (crashed mid-window) crossings, undo is
+    /// `Ok` iff the id won arbitration AND has a `CrossingCommit`; every refusal
+    /// appends nothing.
+    #[test]
+    fn undo_succeeds_iff_committed_winner(
+        warmup in 0u32..4,
+        spec in proptest::collection::vec((0usize..3, 0u8..3), 1..6),
+    ) {
+        let sk = SecretKey::generate();
+        let build = || {
+            let log = new_log(&sk);
+            for i in 0..warmup {
+                log.append_entry(warmup_policy_edit(i));
+            }
+            for (i, (blk, kind)) in spec.iter().enumerate() {
+                let c = crossing(&format!("c{i}"), &format!("blk{blk}"), "c-src", "c-tgt", false, "t");
+                if *kind == 0 {
+                    log.append_entry(LogEntryBody::CrossingBegin(c));
+                } else {
+                    commit_crossing(&log, &c);
+                }
+            }
+            log
+        };
+        for i in 0..spec.len() {
+            let id = CrossingId(format!("c{i}"));
+            let log = build();
+            let entries = log.entries();
+            let arb = arbitrate(&entries);
+            assert_total(&arb, spec.len());
+            let committed = entries.iter().any(|e| matches!(
+                &e.body,
+                LogEntryBody::CrossingCommit { crossing_id } if crossing_id == &id
+            ));
+            let res = log.undo_crossing(&id);
+            prop_assert_eq!(res.is_ok(), arb.is_winner(&id) && committed, "id {:?}: {:?}", id, res);
+            if res.is_err() {
+                prop_assert_eq!(log.entries(), entries);
+            }
+        }
+    }
+
+    /// Offline undos of one committed crossing on distinct devices mint
+    /// pairwise-distinct inverse ids; exactly one inverse wins, none is both
+    /// winner and loser, and the winning inverse can itself be undone (redo).
+    #[test]
+    fn concurrent_undos_mint_distinct_ids_and_redo_works(
+        warmup_a in 0u32..4,
+        warmup_b in 0u32..4,
+        authored_on_b in any::<bool>(),
+        undoers in prop_oneof![Just((true, false)), Just((false, true)), Just((true, true))],
+    ) {
+        let sk_a = SecretKey::generate();
+        let sk_b = SecretKey::generate();
+        let a = new_log(&sk_a);
+        let b = new_log(&sk_b);
+        for i in 0..warmup_a { a.append_entry(warmup_policy_edit(i)); }
+        for i in 0..warmup_b { b.append_entry(warmup_policy_edit(i)); }
+        let x = crossing("X", "blk", "c-src", "c-tgt", false, "t");
+        let author = if authored_on_b { &b } else { &a };
+        author.append_crossing(x.clone()).unwrap();
+        author.append_entry(LogEntryBody::CrossingCommit { crossing_id: x.crossing_id.clone() });
+        a.merge(&b);
+        b.merge(&a);
+
+        if undoers.0 { a.undo_crossing(&x.crossing_id).unwrap(); }
+        if undoers.1 { b.undo_crossing(&x.crossing_id).unwrap(); }
+        a.merge(&b);
+
+        let inverse_ids: Vec<CrossingId> = a.entries().into_iter().filter_map(|e| match e.body {
+            LogEntryBody::CrossingBegin(c) if c.inverse_of.is_some() => Some(c.crossing_id),
+            _ => None,
+        }).collect();
+        let distinct: BTreeSet<&CrossingId> = inverse_ids.iter().collect();
+        prop_assert_eq!(distinct.len(), inverse_ids.len(), "inverse ids collide: {:?}", inverse_ids);
+        prop_assert_eq!(inverse_ids.len(), usize::from(undoers.0) + usize::from(undoers.1));
+
+        let arb = arbitrate(&a.entries());
+        assert_total(&arb, 1 + inverse_ids.len());
+        for id in &inverse_ids {
+            prop_assert!(!(arb.is_winner(id) && arb.is_loser(id)), "`{}` is both winner and loser", id.0);
+        }
+        let winning: Vec<&CrossingId> = inverse_ids.iter().filter(|id| arb.is_winner(id)).collect();
+        prop_assert_eq!(winning.len(), 1, "exactly one inverse wins");
+        prop_assert!(a.undo_crossing(winning[0]).is_ok(), "redo of the winning inverse");
     }
 
     /// Gate 4: the migration journal is idempotent + resumable. A crash at any
