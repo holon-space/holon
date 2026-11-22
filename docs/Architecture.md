@@ -78,27 +78,6 @@ The structure is irreplaceable; the model is not. When evaluating new features, 
 ## Crate Structure
 
 ```
-crates/
-├── holon/                       # Main orchestration crate: sync, storage, API, DI wiring
-├── holon-api/                   # Shared value types, CDC types, entity derives
-├── holon-app/                   # DI assembly crate (composition root — names concrete backends)
-├── holon-core/                  # Core traits, Cell<T>, block ordering, file-format seam
-├── holon-engine/                # Standalone Petri-net engine CLI (YAML nets, WSJF ranking)
-├── holon-expr/                  # Compiled Rhai expressions shared by holon-api + holon-engine
-├── holon-frontend/              # Platform-agnostic ViewModel layer (MVVM)
-├── holon-turso/                 # Turso (SQLite-IVM) storage adapter
-├── holon-macros/                # Procedural macros for code generation
-├── holon-macros-test/           # Macro expansion tests
-├── holon-mcp-client/            # Reusable MCP client → OperationProvider bridge
-├── holon-orgmode/               # Org-mode file watching, DI wiring, sync controller
-├── holon-org-format/            # Pure org-mode parsing, rendering, diffing (no disk I/O)
-├── holon-filesystem/            # FileSystem + FileChangeSource ports and adapters
-├── holon-pbt-core/              # Cross-PBT transition traits shared between PBT crates
-├── holon-layout-testing/        # Shared layout-testing primitives for UI PBTs
-├── holon-block-roundtrip-testing/ # Block round-trip generators + NormalizedDocument comparison
-├── holon-architecture-tests/    # `cargo test` wrapper that shells out to archlint
-└── holon-integration-tests/     # Cross-crate integration & PBT tests
-
 frontends/
 ├── gpui/        # GPUI frontend (primary — desktop; mobile via gpui-mobile feature)
 ├── mcp/         # MCP server frontend (stdio + HTTP)
@@ -108,9 +87,9 @@ frontends/
 └── waterui/     # WaterUI frontend (excluded from workspace — upstream compatibility issues)
 ```
 
-> The tree above is the at-a-glance layout. The authoritative, machine-checked
-> inventory (with each crate's purpose and C4 level) is generated to
-> [CrateMap.md](Architecture/CrateMap.md) — see below.
+> The crate inventory (each crate's purpose and C4 level) is generated to
+> [CrateMap.md](Architecture/CrateMap.md) and machine-checked — see below. The
+> tree above lists the frontends only.
 
 ### Crate Responsibilities
 
@@ -290,7 +269,7 @@ The one that governs the block write path:
 | `crates/holon-api/src/live_data.rs` | `LiveData<T>` CDC-driven collection + `BlockFeed` (CDC mirror of the block matview) for reactive consumers |
 | `crates/holon/src/api/ui_watcher.rs` | watch_ui: merge_triggers → switch_map → UiEvent stream |
 | `crates/holon-turso/src/turso.rs` | Turso backend + CDC |
-| `crates/holon/src/sync/loro_module.rs` | Standalone Loro DI module (independent of OrgMode) |
+| `crates/holon-loro-wiring/src/loro_module.rs` | Standalone Loro DI module (independent of OrgMode) |
 | `crates/holon-loro/src/iroh_sync_adapter.rs` | Iroh P2P sync primitives: endpoints, ALPNs, `sync_doc_*`, `SharedTreeSyncManager` |
 | `crates/holon-loro/src/loro_share_backend.rs` | Loro document sharing (P2P) |
 | `crates/holon-loro/src/multi_peer.rs` | Shared multi-peer Loro sync infrastructure for property-based testing (PeerState/GroupState/GroupTransition) |

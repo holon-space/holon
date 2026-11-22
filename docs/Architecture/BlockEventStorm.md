@@ -271,19 +271,19 @@ shipped. Anchors: `share_subtree`, `HistoryRetention` in
 **H6 — Markdown identity drift. ✅ MOOT — the markdown crate carries no renderer.**
 An out-of-charset block id used to be *silently* dropped from rendered markdown (empty
 `^` marker), so the re-parse minted a fresh UUID → the block lost identity across a
-round-trip. `crates/holon-markdown` is a workspace member again (`Cargo.toml:19`), but
-in an ingest-only shape: `LogseqMarkdownAdapter` (`logseq.rs:81`) and
-`ObsidianMarkdownAdapter` (`obsidian.rs:121`) both report `WriteTier::ReadOnly` and
+round-trip. `crates/holon-markdown` is a workspace member again, but
+in an ingest-only shape: `LogseqMarkdownAdapter` and
+`ObsidianMarkdownAdapter` both report `WriteTier::ReadOnly` and
 there is no render path for an id to drift through. Read-only-ness is what is pinned
-now — `ReadOnlyWriteGuard` (`lib.rs:62`) plus the adapters' `writeback_drops` refusal,
+now — `ReadOnlyWriteGuard` (`crates/holon-markdown/src/lib.rs`) plus the adapters' `writeback_drops` refusal,
 by `crates/holon-markdown/tests/write_guard.rs`; ingest by `logseq_ingest.rs` and
 `obsidian_ingest.rs`.
 
 - **Wiring gap (do not forget):** neither markdown adapter is in the vault
-  `FormatRegistry`, which holds org and `.cook` alone
-  (`crates/holon-app/src/wiring.rs:359-364`). They are held out deliberately: both
+  `FormatRegistry`, which holds `OrgFormatAdapter` and the bundled
+  `PluginFormatAdapter`s alone (`crates/holon-app/src/wiring.rs`). They are held out deliberately: both
   claim `md`, and the registry refuses a duplicate extension at construction until a
-  vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`).
+  vault-flavor discriminator picks between them (ruling D56.a, comment at the registry construction in `wiring.rs`).
   **When markdown graduates into file-sync:** a write tier above `ReadOnly` brings back
   a renderer, and with it this identity property — lift it into the composed invariant
   catalog (per the `pbt-composition` skill) rather than re-adding a standalone
@@ -340,8 +340,8 @@ A hard Turso/IVM constraint that shapes the entire read path: writes go to
 reactivity silently. Characterized in `cdc_base_vs_matview_repro.rs`.
 
 **H10 — Two block query sources, DI-selected. ✅ FIXED (2026-07-02).**
-`crates/holon/src/sync/loro_block_query_source.rs` and
-`.../turso_block_query_source.rs` both exist; "what reads a block" depends on the
+`crates/holon-loro-wiring/src/loro_block_query_source.rs` and
+`crates/holon/src/sync/turso_block_query_source.rs` both exist; "what reads a block" depends on the
 wired graph, so the same logical read has two implementations that could drift.
 **Fix (pinned, not merged):** a query-source *equivalence* PBT now proves the two
 arms agree. `tests/turso_block_query_source_round_trip_pbt.rs::loro_and_turso_query_sources_agree`

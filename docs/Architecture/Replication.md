@@ -400,7 +400,7 @@ account for offline; previously a standalone sketch in
   per-entity serial replay, command compaction for long offline periods,
   batch sync under one idempotency key.
 
-The `OperationLog`'s `PendingSync`/`Synced`/`Cancelled` statuses
+The operation log's (`OperationLogStore`) `PendingSync`/`Synced`/`Cancelled` statuses
 ([Sync](Sync.md)) are the implemented today-side of this: undo bookkeeping now,
 sync bookkeeping later. There is deliberately **one** future offline design —
 this section — not three.
@@ -491,9 +491,9 @@ See [Sync.md](Sync.md) for the current implementation surface this evolves.
 > the sole-writer / authority-first-delete / intent-vocabulary work — still has
 > those Phase 1 items open (spec header: Phase 0 in progress).
 > Cell backing types `LoroMetaCellBacking<T>`
-> (`holon-loro/src/loro_meta_cell_backing.rs:95`) and `LwwScalarBacking<T>`
-> (`holon-core/src/cell.rs:301`) **are implemented and wired** via
-> `block_cell_registry.rs` (scalar resolution at :547, meta at :609), alongside
+> (`holon-loro/src/loro_meta_cell_backing.rs`) and `LwwScalarBacking<T>`
+> (`holon-core/src/cell.rs`) **are implemented and wired** via
+> `block_cell_registry.rs` (meta) and `sql_cell_registry.rs` (scalar), alongside
 > `LoroTextCellBacking` **and** `LwwTextCellBacking`. The tree-position backings
 > `LoroTreeParentCellBacking` / `LoroTreePositionCellBacking` remain
 > unimplemented; the `write_field` carve-outs in `block_cell_registry.rs` route

@@ -45,7 +45,7 @@
                  └──────────────────────┘
 ```
 
-Block is currently the only entity type with a cell registry and cache (`BlockCellRegistry` in `crates/holon-loro/src/block_cell_registry.rs`; `QueryableCache<Block>` wired in `crates/holon/src/sync/event_infra_module.rs`). A second entity type (e.g. a future Todoist integration — planned as an MCP server, see [Integrations](Integrations.md)) would add a sibling column with its own registry, cache, and authority.
+Block is currently the only entity type with a cell registry and cache (`BlockCellRegistry` in `crates/holon-loro/src/block_cell_registry.rs`; `QueryableCache<Block>` wired in `crates/holon-loro-wiring/src/event_infra_module.rs`). A second entity type (e.g. a future Todoist integration — planned as an MCP server, see [Integrations](Integrations.md)) would add a sibling column with its own registry, cache, and authority.
 
 The **Cell Registry** layer (added in 2026-05) gives the UI and chord ops a unified reactive read primitive over storage. Cells project from authorities through the event log + matview projection; writes through cells flow back to the authority via typed `CrudOperations` methods.
 
@@ -356,5 +356,5 @@ intent channel. Its canonical design — log shape, `id_mappings` as the
 `OwnForeign(map)` ID capability, the stop-on-first-failure batch policy, and
 the invariants kept warm today — lives in
 [Replication §7, "The durable form of this channel"](Replication.md#the-durable-form-of-this-channel-offline-future).
-The `OperationLog`'s `PendingSync`/`Synced` statuses ([Sync](Sync.md)) are its
+The operation log's `PendingSync`/`Synced` statuses (`OperationStatus` on `OperationLogEntry`) ([Sync](Sync.md)) are its
 already-implemented today-side.

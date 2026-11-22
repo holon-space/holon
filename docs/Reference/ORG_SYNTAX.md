@@ -203,7 +203,7 @@ that reads back with another keyword, cookie, title or tag set than the block
 holds (`TODO buy milk` stored as text with no task state, `[#A] plan` with no
 priority, a title `:t:` with no tags), the render records a loss, and
 write-back raises `WritebackLossy` for that file
-(`models.rs`, `check_headline_reads_back`). The keywords are the ones the file
+(`models.rs`, `check_block_reads_back`). The keywords are the ones the file
 declares in `#+TODO:`, else the defaults.
 
 ### Emphasis borders

@@ -56,15 +56,15 @@ Four rules follow from this table.
 - `holon-engine` is a small Petri-net engine. `Engine::enabled` finds the
   transitions that can fire (`crates/holon-engine/src/engine.rs:49`).
   `Engine::fire` fires one and moves the marking's clock forward by the
-  transition's duration (`engine.rs:122`, clock at `:222-240`).
+  transition's duration (`crates/holon-engine/src/engine.rs`).
 - `Engine::rank` fires each enabled transition once, on a copy of the
   marking. It sorts them by change in score per minute (WSJF, ADR 0017)
-  (`engine.rs:254`). The score is an expression from the net file
+  (`crates/holon-engine/src/engine.rs`). The score is an expression from the net file
   (`ObjectiveDef`, `crates/holon-engine/src/yaml/net.rs:31`).
 - `holon-petri` turns task blocks into a net and a `TaskMarking`
-  (`crates/holon-petri/src/lib.rs:258`, `materialize` at `:1040`).
-  `rank_tasks` ranks them (`lib.rs:1514`). The MCP tool `rank_tasks` calls it
-  (`frontends/mcp/src/tools.rs:3103`). This is a one-step look ahead, not a
+  (`TaskMarking` and `materialize` in `crates/holon-petri/src/lib.rs`).
+  `rank_tasks` in the same file ranks them. The MCP tool `rank_tasks` calls it
+  (`frontends/mcp/src/tools.rs`). This is a one-step look ahead, not a
   search.
 - The `holon-engine` command line has `simulate` (fire the best transition,
   N times) and `whatif` (fire one transition on a copy)

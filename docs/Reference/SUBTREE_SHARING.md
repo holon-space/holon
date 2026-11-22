@@ -68,9 +68,9 @@ callers today**.
 
 ### B1 — `retention="full"` ships the sharer's ENTIRE vault history, and the UI hardcodes it ✅EXP
 
-`frontends/gpui/src/share_ui.rs:300` hardcodes
+`frontends/gpui/src/share_ui.rs` hardcodes
 `params.insert("retention", "full")`. `share_subtree` → `extract_subtree`
-(`shared_tree.rs:156-158`) then exports with `ExportMode::Snapshot`.
+(`shared_tree.rs`) then exports with `ExportMode::Snapshot`.
 
 Fork-and-prune *deletes* the non-shared sibling nodes, but a **full snapshot
 retains the complete oplog** — including every op on those deleted nodes. So
@@ -124,10 +124,10 @@ traversal). Writes split two ways:
 | `create` / `delete` | global | **no, ever** |
 
 Text and property writes resolve the owning shared doc through the mount
-registry (`shared_trees`, `loro_block_operations.rs:67,99`) and replicate
+registry (`shared_trees`, `loro_block_operations.rs`) and replicate
 correctly in both directions.
 
-`create` never consults that registry. `loro_block_operations.rs:747-748`
+`create` never consults that registry. `loro_block_operations.rs`
 pins the global doc outright:
 
 ```rust
@@ -137,7 +137,7 @@ let doc_id = String::new();
 
 That comment does not hold once a subtree is shared. `parent_id` is in hand at
 that point and is exactly the key that identifies the owning shared doc.
-`find_doc_for_block` (`loro_block_operations.rs:106-109`) discards its id
+`find_doc_for_block` (`loro_block_operations.rs`) discards its id
 argument and always returns the global backend, so deletes take the same wrong
 route.
 
@@ -175,7 +175,7 @@ share PBT drives concurrent structural authors on both peers again.
 
 ### B4 — remote-triggered panic + oversized-frame deadlock in the wire framing
 
-`iroh_sync_adapter.rs:86`: `assert!(len <= MAX_MSG_SIZE, ...)`. Any peer can
+`iroh_sync_adapter.rs`: `assert!(len <= MAX_MSG_SIZE, ...)`. Any peer can
 send a 4-byte length `> 10 MiB` and **panic the accept task** — a remote crash
 primitive in an `assert!`, not a `Result`. And `write_framed` never checks
 `MAX_MSG_SIZE` while the fallback path deliberately sends **full snapshots**;
@@ -275,7 +275,7 @@ these keys onto any node and it becomes a "mount" pointing at an arbitrary
 `shared_tree_id`. It cannot re-parent the global root (a mount is a leaf
 reference), but any code that *follows* mounts will chase a forged id. Treat
 mount metadata as untrusted on the read side. Malformed `shared_root` currently
-**vanishes silently** (`.ok()?` / `_ => None`, `shared_tree.rs:407-422,490-495`)
+**vanishes silently** (`.ok()?` / `_ => None`, `shared_tree.rs`)
 instead of surfacing corruption — against the repo's "fail loud" rule.
 
 **A mount is a placement record, not a block** (D198.a, Overlay proposal
@@ -482,7 +482,7 @@ divergent edits.
   also duplicated verbatim between this file and `iroh_sync_adapter.rs`.
 - `frontends/gpui/src/share_ui.rs` — share UI (hardcodes `retention="full"`,
   see B1).
-- `crates/holon/src/sync/loro_module.rs` — DI wiring gated on `iroh-sync`.
+- `crates/holon-loro-wiring/src/loro_module.rs` — DI wiring gated on `iroh-sync`.
 
 ## Known gaps (lower severity, previously tracked)
 

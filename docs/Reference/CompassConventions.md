@@ -105,7 +105,7 @@ Two different modal strengths, two different homes — do not conflate:
   agenda query ("what advances goal X" = reverse closure over
   `block_contributes_to.target_id`).
 - `requires` (the EXISTING typed edge, `Block.requires`,
-  `crates/holon-api/src/block.rs:312`, `block_requires` junction table):
+  `crates/holon-api/src/block.rs`, `block_requires` junction table):
   NECESSITY. Y requires X means missing X blocks Y. Drives
   scheduling/blocking queries. Compass items needing a hard dependency use
   this existing field — never a new drawer key for it.

@@ -61,7 +61,7 @@ by hand.
 | `AutomationsJournalSchemaModule` (`automations_journal`) | `automations_journal` | `block_history` | matview |
 | `JournalDayPagesSchemaModule` (`journal_day_pages`) | `journal_day_pages` | `block`, `block_tags` | matview |
 | `JournalFeedSchemaModule` (`journal_feed`) | `journal_feed` | `journal_day_pages` | chained matview |
-| `LinkSchemaModule` (`links`) | `block_links`, `block_redirects`, `backlinks` | `block_raw` | 2 base tables + matview (`block_links` populated by `LinkEventSubscriber`, not SQL) |
+| `LinkSchemaModule` (`links`) | `block_links`, `block_redirects`, `backlinks` | `block_raw` | 2 base tables + matview (`block_links` written by `SqlOperationProvider::block_link_statements` at the write boundary, not by a SQL view) |
 | `IdentitySchemaModule` (`identity`) | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
 
 **Runtime-defined types**: `DynamicSchemaModule`

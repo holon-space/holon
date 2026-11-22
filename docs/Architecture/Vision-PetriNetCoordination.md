@@ -71,7 +71,7 @@ Four rules make it efficient and safe:
   the wait-for graph (`~/.claude/plans/fluxdi-live-edges.md` §7).
 - **Rank alternatives.** When several transitions can fill a place, rank them.
   ADR 0017's ranking engine supplies the order
-  (`crates/holon-engine/src/engine.rs:254`, `Engine::rank`).
+  (`Engine::rank` in `crates/holon-engine/src/engine.rs`).
 
 ### 2.2 Pseudocode
 
@@ -125,10 +125,10 @@ window shows a session
 ```
 
 The chain is real today. `main.rs` resolves `FrontendSession`
-(`frontends/gpui/src/main.rs:98`). Its factory awaits `BackendEngine`
-(`crates/holon-app/src/wiring.rs:504-515`). That factory awaits the schema
+(`frontends/gpui/src/main.rs`). Its factory awaits `BackendEngine`
+(the `FrontendSession` factory in `crates/holon-app/src/wiring.rs`). That factory awaits the schema
 roots and the `OperationDispatcher`
-(`crates/holon/src/di/registration.rs:786-798`). Today fluxdi does this pull
+(`crates/holon/src/di/registration.rs`). Today fluxdi does this pull
 implicitly, without a plan as output.
 
 Now let `Turso open` hold `Failed(SchemaStepFailed)`. The pull continues:
@@ -194,7 +194,7 @@ The fit for Holon:
   rows), so a validity interval is one more attribute.
 - **A duration on each transition.** Cook = 40 min. `holon-engine` already
   moves its clock forward by the transition's duration when it fires
-  (`crates/holon-engine/src/engine.rs:222-240`).
+  (`Engine::fire` in `crates/holon-engine/src/engine.rs`).
 - **Resources as tokens.** A person's time slot is a token. The transition
   that uses it consumes it, so two plans cannot use the same slot.
 - **Pull with time is backward scheduling.** Start at the goal's deadline.
@@ -237,7 +237,7 @@ reports risk ("buy chicken at lunch, not after work"). It can also compare the
 two or three alternative plans that the pull produced. See
 [Simulation.md](Simulation.md) for the uses of simulation.
 `Engine::rank` today simulates one firing per enabled transition on a clone
-(`crates/holon-engine/src/engine.rs:254`); that is a one-step forward check.
+(`crates/holon-engine/src/engine.rs`); that is a one-step forward check.
 
 The net itself runs on the live path: the planner on boot, pure transitions
 inline (section 4). Simulation does not: it works on a copy and never writes
@@ -305,7 +305,7 @@ instance per color: per scope, per document, per user, per integration. CPN
 Tools calls these page instances. Examples that exist today in other forms:
 
 - one fluxdi set slot per integration
-  (`IntegrationSupervisor`, `crates/holon-app/src/mcp_integrations.rs:348`);
+  (`IntegrationSupervisor`, `crates/holon-app/src/mcp_integrations.rs`);
 - one Loro document per document id;
 - one matview per (query, context params).
 
@@ -329,7 +329,7 @@ meta-transition does this (ADR 0032 §2 anticipates such transitions,
 
 1. Load the subnet declaration.
 2. Validate it before activation: compile, then run conflict and cycle
-   analysis (`crates/holon-net/src/analysis.rs:62`, `:111`).
+   analysis (`conflicts` and `cycles` in `crates/holon-net/src/analysis.rs`).
 3. Activate it, or mark its places `Failed(cause)` and raise a condition.
 
 A failed extension disables only its own subnet. This is the same shape as
@@ -344,12 +344,12 @@ supersedes it.
 | fluxdi `ResolveGuard` (per-task resolve set) | ancestor-path cycle check of a pull |
 | fluxdi wait-for graph (fluxdi note §7) | cycle check across concurrent demands |
 | fluxdi cache and in-flight cells (fluxdi note §15 inc 2) | memo; "marked = solved" |
-| ADR 0017 `Engine::rank` (`crates/holon-engine/src/engine.rs:254`) | ranking of alternative producers; core of plan checking |
+| ADR 0017 `Engine::rank` (`crates/holon-engine/src/engine.rs`) | ranking of alternative producers; core of plan checking |
 | ADR 0032 §1 read-only places (`:70-82`) | interface places of engines |
 | ADR 0032 §2 derived projection, meta-transitions (`:104-171`) | the net as artifact; self-extension |
 | ADR 0032 §3 dispatcher gates (`:183-194`) | the effectful path |
 | ADR 0032 deferred item 6: relational hop, inhibitor (`:496-504`) | also needed by the planner to read guards |
-| `holon_net::evaluate` and `Offer` (`crates/holon-net/src/enabledness.rs:39`, `:62`) | forward enabledness; pull is its backward dual |
+| `holon_net::evaluate` and `Offer` (`crates/holon-net/src/enabledness.rs`) | forward enabledness; pull is its backward dual |
 | `holon_net::Marking` (`crates/holon-net/src/marking.rs:16`) | read side of the planner's marking |
 | ADR 0035 conditions with declared remedies | recovery transitions on the plan frontier |
 | boot-always env places (draft §7) | first engine contract |

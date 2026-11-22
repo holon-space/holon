@@ -10,7 +10,7 @@ The core architectural pattern is **Authority + Projection**: each entity type h
 
 Reads flow `authority → event log → Turso projection → Cell → UI`. Writes flow `chord op / UI → Cell → typed CrudOperations method → authority → event emission → LoroProjection/BlockConsolidator → Turso`. The UI never queries an authority directly; it reads cells, which read the projection.
 
-When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates/holon-core/src/cell.rs`) substitutes the Loro-backed text cell with last-write-wins semantics — same cell interface, different protocol. `LwwScalarBacking` (scalar fields, `crates/holon-core/src/cell.rs:301`) is implemented and wired: the registry resolves scalar SqlOnly cells to a live `LwwScalarBacking` (`crates/holon-loro/src/block_cell_registry.rs:547`).
+When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates/holon-core/src/cell.rs`) substitutes the Loro-backed text cell with last-write-wins semantics — same cell interface, different protocol. `LwwScalarBacking` (scalar fields, `crates/holon-core/src/cell.rs`) is implemented and wired: `SqlOnlyCellRegistry` (`crates/holon-core/src/sql_cell_registry.rs`) resolves scalar SqlOnly cells to a live `LwwScalarBacking`.
 
 ### Loro CRDT Integration Overview
 
@@ -92,7 +92,7 @@ Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 | Component | Env Var | Default |
 |-----------|---------|---------|
 | OrgMode | `HOLON_VAULT_ROOT` (path) | OFF |
-| Loro | `HOLON_CRDT_ENABLED` (truthy) | ON (`crates/holon-frontend/src/config.rs:564-566`, ruling D69.a) |
+| Loro | `HOLON_CRDT_ENABLED` (truthy) | ON (`HolonConfig::crdt_enabled` in `crates/holon-frontend/src/config.rs`, ruling D69.a) |
 | Iroh | (bundled with Loro, future: separate) | OFF |
 
 > **Vault contract (Model.md invariant 11):** the `HOLON_VAULT_ROOT` directory
@@ -140,7 +140,7 @@ Each block contains:
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `LoroModule` | `crates/holon/src/sync/loro_module.rs` | Standalone DI module for Loro services (registers `LoroBlockOperations`, cell backings) |
+| `LoroModule` | `crates/holon-loro-wiring/src/loro_module.rs` | Standalone DI module for Loro services (registers `LoroBlockOperations`, cell backings) |
 | `LoroBlockOperations` | `crates/holon-loro/src/loro_block_operations.rs` | `OperationProvider` for `entity_name="block"` — primary writer; translates set_field/create/delete to Loro mutations |
 | `BlockCellRegistry` | `crates/holon-loro/src/block_cell_registry.rs` | Per-entity cell registry; picks `LoroTextCellBacking` (Full mode, `content` field) or `LwwTextCellBacking` (SqlOnly) per field |
 | `LoroTextCellBacking` | `crates/holon-loro/src/loro_text_cell_backing.rs` | Wraps `LoroText` for `content`; produces TextOps + commit |
@@ -179,14 +179,14 @@ Each block contains:
 ```
   Chord op / UI ──→ Cell<String>.set (content: LwwTextCellBacking)
                     scalar fields: BlockCellRegistry resolves LwwScalarBacking
-                                   (wired SqlOnly; block_cell_registry.rs:547)
+                                   (wired SqlOnly; `SqlOnlyCellRegistry`)
                         ↓
                    CrudOperations::set_field
                         ↓
                    SqlOperationProvider → Turso (LWW) → CDC → UI
 ```
 
-**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter` through the `FormatRegistry`) — the vault registry holds org and `.cook`, and only org is written back (see the `FileFormatAdapter` section below). After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
+**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter` through the `FormatRegistry`) — the vault registry holds org plus the bundled wasm format plugins (`.cook`), and only org is written back (see the `FileFormatAdapter` section below). After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
 
 **P2P Sync Flow (Iroh)**
 
@@ -464,7 +464,7 @@ impl P2POperations for LoroBackend { /* ... */ }
 
 ### FileFormatAdapter (file-backed sync)
 
-File-backed adapters share the parse-watch-write-echo-suppress loop. The format-specific surface is captured as a trait in `crates/holon-core/src/file_format.rs:161`; the shape below is abridged:
+File-backed adapters share the parse-watch-write-echo-suppress loop. The format-specific surface is captured as the `FileFormatAdapter` trait in `crates/holon-core/src/file_format.rs`; the shape below is abridged:
 
 ```rust
 pub trait FileFormatAdapter: Send + Sync {
@@ -480,16 +480,16 @@ pub trait FileFormatAdapter: Send + Sync {
 
 `write_tier` has no default: an adapter that says nothing about its write half would inherit "writable" by silence, and be found out only by overwriting a user's file.
 
-There are four impls. `FileSyncController` holds `formats: Arc<FormatRegistry>` (`crates/holon-filesystem/src/file_sync_controller.rs:682`) and routes parse + render through the trait; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic, so no new sync controller is needed per format.
+There are four impls. `FileSyncController` holds `formats: Arc<FormatRegistry>` (`crates/holon-filesystem/src/file_sync_controller.rs`) and routes parse + render through the trait; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic, so no new sync controller is needed per format.
 
 | Impl | Crate | Extensions | Write tier | In the vault registry |
 |---|---|---|---|---|
-| `OrgFormatAdapter` | `holon-orgmode/src/file_format.rs:44` | `org` | read-write | yes |
-| `CookFormatAdapter` | `holon-kitchen/src/file_format.rs:34` | `cook` | read-only | yes |
-| `LogseqMarkdownAdapter` | `holon-markdown/src/logseq.rs:81` | `md`, `markdown` | read-only | no |
-| `ObsidianMarkdownAdapter` | `holon-markdown/src/obsidian.rs:121` | `md`, `markdown` | read-only | no |
+| `OrgFormatAdapter` | `holon-orgmode/src/file_format.rs` | `org` | read-write | yes |
+| `PluginFormatAdapter` | `holon-plugin-host/src/adapter.rs` | declared by each plugin sidecar (`cook` for the bundled cooklang plugin) | the sidecar's `write_tier` (`read_only` for cooklang) | yes, one per bundled plugin |
+| `LogseqMarkdownAdapter` | `holon-markdown/src/logseq.rs` | `md`, `markdown` | read-only | no |
+| `ObsidianMarkdownAdapter` | `holon-markdown/src/obsidian.rs` | `md`, `markdown` | read-only | no |
 
-`crates/holon-markdown` is a workspace member (`Cargo.toml:19`) and compiles, but the vault `FormatRegistry` is built from the org and `.cook` adapters alone (`crates/holon-app/src/wiring.rs:359-364`). The two markdown adapters are held out deliberately: both claim `md`, and the registry refuses a duplicate extension at construction until a vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`).
+`crates/holon-markdown` is a workspace member and compiles, but the vault `FormatRegistry` is built from `OrgFormatAdapter` and the bundled `PluginFormatAdapter`s alone (`crates/holon-app/src/wiring.rs`). The two markdown adapters are held out deliberately: both claim `md`, and the registry refuses a duplicate extension at construction until a vault-flavor discriminator picks between them (ruling D56.a, comment at the registry construction in `wiring.rs`).
 
 **Cooklang front matter.** Each front-matter key except `title` becomes one document property whose value is one text. A scalar keeps its own text and a list of scalars joins with `", "`. A nested value (a map, or a list holding a map or list) is stored as canonical JSON: source key order, integers and floats kept apart. A value JSON cannot hold losslessly (a non-string map key, a YAML tag, NaN or infinity) inside a nested value refuses the whole recipe by name with the path to the value. At top level a YAML tag and a non-string key are refused the same way, while a scalar or scalar list that holds NaN or infinity is kept as its YAML text. The unclosed-component-brace guard scans the body only, because a wrapped flow map in the front matter legitimately leaves a `{` open at a line end. No `.cook` writer exists. A future writer emits a nested value as block YAML (a small leaf map may use flow style), never as the embedded JSON string, and builds it from `yaml_from_property_text` in `guests/cooklang/src/metadata.rs`. `crates/holon-plugin-host/tests/cook_metadata_pbt.rs` pins the round trip.
 
@@ -554,11 +554,11 @@ keeps only shared vocabulary (re-exports of `EventOrigin`, `PublishErrorTracker`
             ▼              ▼                   ▼
    LiveData<Block>   OrgMode re-render    Cell.signal()
    (BlockFeed)       (FileSyncController,  fires for active
-        │             base-diff suppresses consumers
-        ▼             its own echoes)         │
-   block_link indexer ◄───────────────────────┘
-   (LinkEventSubscriber::start_from_live_data)
+                      base-diff suppresses consumers
+                      its own echoes)
 ```
+
+`block_links` is not fed from this stream: `SqlOperationProvider::block_link_statements` derives its rows from the block's `marks` at the write boundary.
 
 **Loop Prevention:** every write is tagged with an `EventOrigin` (`Loro`, `Org`,
 `Ui`, …) carried on the `_change_origin` CDC column, so provenance is available to
@@ -619,7 +619,7 @@ synced.
 
 `OperationLogStore` and `OperationLogObserver`
 (`crates/holon/src/core/operation_log.rs`, registered in
-`crates/holon/src/di/registration.rs:303,565`) write an `operation` row per
+`crates/holon/src/di/registration.rs`) write an `operation` row per
 executed operation, with its inverse, a status and denormalised display
 columns. This table is real and is written in production.
 

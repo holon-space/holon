@@ -44,7 +44,7 @@ concepts separate even where the config isn't:
 | Axis | Values |
 |------|--------|
 | Storage backend | Loro store on / off |
-| File adapter | org and `.cook` — the two entries of the vault `FormatRegistry` (`crates/holon-app/src/wiring.rs:359-364`). `crates/holon-markdown` is a workspace member (`Cargo.toml:19`) carrying two read-only adapters, LogSeq (`logseq.rs:81`) and Obsidian (`obsidian.rs:121`); neither is in the registry because both claim `md` and the registry refuses that at construction until a vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`) |
+| File adapter | org (`OrgFormatAdapter`) plus the bundled wasm format plugins (`PluginFormatAdapter::bundled`; today the cooklang plugin for `.cook`) — the entries of the vault `FormatRegistry` built in `crates/holon-app/src/wiring.rs`. `crates/holon-markdown` is a workspace member carrying two read-only adapters, LogSeq (`LogseqMarkdownAdapter`) and Obsidian (`ObsidianMarkdownAdapter`); neither is in the registry because both claim `md` and the registry refuses that at construction until a vault-flavor discriminator picks between them (ruling D56.a, comment at the registry construction in `wiring.rs`) |
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
