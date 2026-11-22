@@ -3,6 +3,7 @@
 **Status:** Accepted 2026-07-20 (Martin), following adversarial senior review
 (ENDORSE-WITH-AMENDMENTS; review artifact: orchestrator session 2026-07-20,
 `sharing-synthesis-fable-review.md`).
+**Amended 2026-11-22:** D5 and §9 (threat model).
 **Amends:** ADR 0003 (all-in-LoroTree) — formally reopened for the multi-container
 shape; casualties named in §7.
 **Supersedes (direction):** the extract-prune-mount `share_subtree` mechanism as
@@ -60,6 +61,12 @@ the owner side.
   invite"). Non-owner grants without delegation become pending requests.
   Membership is **lease-based**: grants expire and renew; revocation =
   non-renewal (H8).
+
+- **D5 — a Write holder speaks for its whole payload.** Authorization is per
+  envelope, on the proved capability of the envelope's sender. Loro peer ids are
+  chosen by the writing device and bind to no principal, so a per-change author
+  check proves nothing and a cooperating Write holder can re-author any change
+  under its own peer id.
 
 ### Amendments from review (all ratified)
 
@@ -148,3 +155,55 @@ turso). The same investment reopens live share sync
 - Placeholder-based boundaries (metadata leakage: existence/counts/rhythms).
 - Symmetric CRDT-merged policy (security by tiebreak).
 - Retroactive-removal promises of any kind.
+- Per-change author check against a peer-id roster (peer ids are self-chosen,
+  so re-authoring defeats it).
+- Per-change author signatures (Loro has no per-change signature hook; one
+  signature per change is a size cost).
+
+## 9. Threat model
+
+### Principals and trust
+
+- **Own devices**: full trust, same identity, no policy evaluation (§2, C1).
+- **Share principals**: partial trust, by capability (Read, Write) on a
+  selector, with delegation per D4.
+- "The sender" of an envelope means the terminal grantee of the cert chain the
+  envelope presents, not the transport peer it arrived from.
+
+### Controls that decide what enters a replica
+
+1. **Authenticated sender.** The envelope is bound to its sender, and the
+   sender's chain verifies against the owner public key the recipient pinned at
+   enrollment (H5).
+2. **Lease expiry.** Every cert in the chain must be active on the receiver's
+   clock (D4: revocation = non-renewal).
+3. **Capability for the selector.** An envelope proved for the receiver itself
+   is a read. An envelope whose sender is another principal is that principal
+   writing into the receiver's replica and needs Write.
+
+### What a Write holder can do
+
+- Put any change into the share, including changes authored by others that it
+  relays (D5).
+- Proof of authorship per change is **not a goal**: nothing below the envelope
+  attests who authored a change.
+
+### 9.1 Revocation delay (open question)
+
+A revoked principal's envelopes stay admissible on each receiver until that
+principal's lease expires on that receiver's clock. There is no revoke message.
+Changes admitted before expiry stay (K2, D3). The window is bounded by the lease
+TTL plus clock skew between owner and receiver.
+
+Options, none chosen:
+
+- **(a) Accept the window.** The lease TTL is the knob; the D3 revoke-time UI
+  discloses the window.
+- **(b) Owner-signed revocation notice** in the policy log, checked at
+  admission. The window becomes notice-propagation time; receivers that are
+  offline still lag.
+- **(c) Short leases with frequent renewal.** Bounds the window at the cost of
+  renewal traffic and of locking out a peer that is offline at renewal time.
+
+No option stops a cooperating Write holder from relaying a revoked peer's later
+changes (D5). Revoking that Write holder is the control.

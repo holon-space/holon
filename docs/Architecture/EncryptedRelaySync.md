@@ -52,6 +52,8 @@ durable, blind, outside the trust boundary.
 
 ## Threats encryption does not cover
 
+Share-capability threats (what a Write holder can do, revocation delay) are in ADR 0028 §9.
+
 - **Injection**: covered by blob signing (above).
 - **Withholding / fork attacks**: a malicious relay can serve device A and
   device B different log suffixes, or freeze a device on a stale view. CRDTs
