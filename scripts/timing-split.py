@@ -17,6 +17,7 @@ transition-kind alphabet.
   timing-split.py resolve             # ask nextest what each filter selects
   timing-split.py coverage <log...>   # the latency rung's kind coverage
   timing-split.py p95 [<test>]        # what the ledger says about one capped test, or all; advice only
+  timing-split.py owner <file> <fn>...  # the files whose test fn an OWNER_RECIPES key selects; reads only
 
 nextest has no reusable named filter set, so the timing filter string appears in
 three places (the test group, `[profile.timing]`, `[profile.load-tolerant]`).
@@ -883,6 +884,18 @@ def names_test(selector, crate, rel, name):
     return pkg is not None
 
 
+def cmd_owner(args):
+    """Prints each `<file>` of the `<file> <fn>` pairs in `args` whose test fn
+    some `OWNER_RECIPES` key selects: the rule `check` applies."""
+    if not args or len(args) % 2:
+        die("owner takes one or more <file> <fn> pairs")
+    for rel, name in zip(args[::2], args[1::2]):
+        crate = crate_name(rel)
+        if any(names_test(s, crate, rel, name) for s in OWNER_RECIPES):
+            print(rel)
+    return 0
+
+
 # ── lane-run recipes for gate-owned machinery ────────────────────────
 
 SELECT_TESTS = REPO / "scripts/select-tests.py"
@@ -1204,6 +1217,8 @@ def main(argv):
         return cmd_coverage(args)
     if cmd == "assertions":
         return cmd_assertions(update="--update" in args)
+    if cmd == "owner":
+        return cmd_owner(args)
     if cmd == "p95":
         if len(args) > 1:
             die("p95 takes at most one test name")

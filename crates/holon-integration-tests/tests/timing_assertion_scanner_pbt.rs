@@ -7,6 +7,7 @@
 //! virtual-clock or harness. The same measurement through
 //! `DurationBudget::small`, and a load-insensitive count comparison, pass.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -136,10 +137,24 @@ fn packages(root: &Path, sub: &str) -> Vec<String> {
     v
 }
 
-struct Mirror {
-    dir: tempfile::TempDir,
+/// The packages a probe path can name.
+struct Layout {
     crates: Vec<String>,
     frontends: Vec<String>,
+}
+
+impl Layout {
+    fn of(root: &Path) -> Self {
+        Layout {
+            crates: packages(root, "crates"),
+            frontends: packages(root, "frontends"),
+        }
+    }
+}
+
+struct Mirror {
+    dir: tempfile::TempDir,
+    layout: Layout,
     baseline: String,
 }
 
@@ -149,14 +164,12 @@ impl Mirror {
         for part in MIRRORED {
             copy_tree(&root.join(part), &dir.path().join(part));
         }
-        let crates = packages(dir.path(), "crates");
-        let frontends = packages(dir.path(), "frontends");
+        let layout = Layout::of(dir.path());
         let baseline = std::fs::read_to_string(dir.path().join(BASELINE))
             .expect("the mirror has the baseline");
         Mirror {
             dir,
-            crates,
-            frontends,
+            layout,
             baseline,
         }
     }
@@ -190,7 +203,7 @@ impl Mirror {
         let mut files = Vec::new();
         let mut shown = String::new();
         for probe in probes {
-            let rel = probe.path(self);
+            let rel = probe.path(&self.layout);
             let file = self.dir.path().join(&rel);
             assert!(
                 !file.exists(),
@@ -300,18 +313,22 @@ struct Probe {
 }
 
 impl Probe {
-    fn path(&self, m: &Mirror) -> String {
-        let file = format!("scan_probe_{}.rs", self.stem);
+    fn name(&self) -> String {
+        format!("scan_probe_{}", self.stem)
+    }
+
+    fn path(&self, l: &Layout) -> String {
+        let file = format!("{}.rs", self.name());
         let krate = |names: &[String]| names[self.pick % names.len()].clone();
         match self.place {
-            Place::CrateTests => format!("crates/{}/tests/{file}", krate(&m.crates)),
+            Place::CrateTests => format!("crates/{}/tests/{file}", krate(&l.crates)),
             Place::CrateTestsSubdir => {
-                format!("crates/{}/tests/scan_probe_dir/{file}", krate(&m.crates))
+                format!("crates/{}/tests/scan_probe_dir/{file}", krate(&l.crates))
             }
             Place::CrateSrcTestModule | Place::CrateSrcHelper => {
-                format!("crates/{}/src/{file}", krate(&m.crates))
+                format!("crates/{}/src/{file}", krate(&l.crates))
             }
-            Place::FrontendTests => format!("frontends/{}/tests/{file}", krate(&m.frontends)),
+            Place::FrontendTests => format!("frontends/{}/tests/{file}", krate(&l.frontends)),
         }
     }
 
@@ -384,8 +401,8 @@ impl Probe {
             }
         };
         let fun = format!(
-            "fn scan_probe_{}() {{\n    let start = std::time::Instant::now();\n    {body}\n}}\n",
-            self.stem
+            "fn {}() {{\n    let start = std::time::Instant::now();\n    {body}\n}}\n",
+            self.name()
         );
         let source = match self.place {
             Place::CrateSrcTestModule => format!(
@@ -400,15 +417,15 @@ impl Probe {
 
     /// The one expected verdict: a raw small-duration comparison is refused
     /// with no row or a `timing` row; a `small` call is refused unless its row
-    /// is `timing` and an owner selects it or it sits outside a test fn. The
-    /// owner table selects the whole `holon-gpui` package and no other probe.
-    fn refused(&self, m: &Mirror) -> bool {
+    /// is `timing` and an owner selects it or it sits outside a test fn.
+    /// `owned` holds the probe paths the scanner's owner rule selects.
+    fn refused(&self, l: &Layout, owned: &HashSet<String>) -> bool {
         match self.measure {
             Measure::Raw { .. } => matches!(self.row, None | Some(RowClass::Timing)),
             Measure::Budget { .. } => {
-                let owned = self.path(m).starts_with("frontends/gpui/");
                 self.row != Some(RowClass::Timing)
-                    || !(owned || matches!(self.place, Place::CrateSrcHelper))
+                    || !(owned.contains(&self.path(l))
+                        || matches!(self.place, Place::CrateSrcHelper))
             }
             Measure::Count { .. } => false,
         }
@@ -456,6 +473,9 @@ const COUNT_LHS: &[&str] = &["rows.len()", "sql_count", "statements", "n_queries
 const COUNT_RHS: &[&str] = &["MAX_ROWS", "10_000", "limit", "STATEMENT_CAP"];
 const OPS: &[&str] = &["<", "<=", ">", ">="];
 
+/// What a `small` budget is checked against.
+const BUDGET_VALUES: &[&str] = &["start.elapsed()", "from_ms(p95)", "from_ms(gated)"];
+
 fn pick(xs: &'static [&'static str]) -> impl Strategy<Value = String> {
     proptest::sample::select(xs).prop_map(str::to_string)
 }
@@ -470,19 +490,21 @@ fn place() -> impl Strategy<Value = Place> {
     ]
 }
 
+const FORMS: &[Form] = &[
+    Form::Assert,
+    Form::AssertWithMessage,
+    Form::AssertMultiLine,
+    Form::AssertAfterComments,
+    Form::PropAssert,
+    Form::DebugAssert,
+    Form::AssertEqTrue,
+    Form::IfPanic,
+    Form::LetThenAssert,
+    Form::InvariantFail,
+];
+
 fn form() -> impl Strategy<Value = Form> {
-    prop_oneof![
-        Just(Form::Assert),
-        Just(Form::AssertWithMessage),
-        Just(Form::AssertMultiLine),
-        Just(Form::AssertAfterComments),
-        Just(Form::PropAssert),
-        Just(Form::DebugAssert),
-        Just(Form::AssertEqTrue),
-        Just(Form::IfPanic),
-        Just(Form::LetThenAssert),
-        Just(Form::InvariantFail),
-    ]
+    proptest::sample::select(FORMS)
 }
 
 fn measure() -> impl Strategy<Value = Measure> {
@@ -502,12 +524,7 @@ fn measure() -> impl Strategy<Value = Measure> {
         pick(COUNT_RHS),
     )
         .prop_map(|(lhs, op, rhs)| Measure::Count { lhs, op, rhs });
-    let budget = prop_oneof![
-        Just("start.elapsed()".to_string()),
-        Just("from_ms(p95)".to_string()),
-        Just("from_ms(gated)".to_string()),
-    ]
-    .prop_map(|value| Measure::Budget { value });
+    let budget = pick(BUDGET_VALUES).prop_map(|value| Measure::Budget { value });
     prop_oneof![3 => raw, 1 => count, 1 => budget]
 }
 
@@ -573,22 +590,56 @@ fn known_escapes() -> Vec<Probe> {
     ]
 }
 
-/// A `timing` row on a `small` call in a package the owner table selects as a
-/// whole: the scanner accepts it.
-fn owned_by_package(frontends: &[String]) -> Probe {
-    Probe {
-        place: Place::FrontendTests,
-        pick: frontends
-            .iter()
-            .position(|n| n == "gpui")
-            .expect("the gpui frontend exists"),
-        stem: "owned_package".into(),
-        form: Form::AssertEqTrue,
-        measure: Measure::Budget {
-            value: "from_ms(gated)".into(),
-        },
-        row: Some(RowClass::Timing),
-    }
+/// A `timing` row on a `small` call in the `gpui` frontend, which the owner
+/// table selects as a whole package: the scanner accepts it, in every form
+/// and for every budgeted value.
+fn owned_by_package(frontends: &[String]) -> Vec<Probe> {
+    let pick = frontends
+        .iter()
+        .position(|n| n == "gpui")
+        .expect("the gpui frontend exists");
+    FORMS
+        .iter()
+        .flat_map(|&form| {
+            BUDGET_VALUES.iter().map(move |value| Probe {
+                place: Place::FrontendTests,
+                pick,
+                stem: "owned_package".into(),
+                form,
+                measure: Measure::Budget {
+                    value: value.to_string(),
+                },
+                row: Some(RowClass::Timing),
+            })
+        })
+        .collect()
+}
+
+/// The probe paths of `probes` whose test fn the scanner's own owner rule
+/// selects, asked of the rule itself in one process.
+fn owned_files<'a>(
+    root: &Path,
+    layout: &Layout,
+    probes: impl Iterator<Item = &'a Probe>,
+) -> HashSet<String> {
+    let args: Vec<String> = probes.flat_map(|p| [p.path(layout), p.name()]).collect();
+    let out = Command::new("python3")
+        .arg("scripts/timing-split.py")
+        .arg("owner")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .expect("python3 runs the owner rule");
+    assert!(
+        out.status.success(),
+        "scripts/timing-split.py owner failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .expect("the owner rule prints UTF-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Gives each probe of one scan its own file name.
@@ -605,16 +656,20 @@ fn numbered(probes: Vec<Probe>) -> Vec<Probe> {
 
 /// One scan judges each probe by its own file: a refused site is named, an
 /// accepted one is not, and the exit is 1 iff some site is refused.
-fn judge(m: &Mirror, probes: &[Probe]) -> Result<(), TestCaseError> {
+fn judge(m: &Mirror, owned: &HashSet<String>, probes: &[Probe]) -> Result<(), TestCaseError> {
     let (code, out, shown) = m.scan_with(probes);
     let wrong: Vec<String> = probes
         .iter()
-        .filter(|p| out.contains(&p.path(m)) != p.refused(m))
+        .filter(|p| out.contains(&p.path(&m.layout)) != p.refused(&m.layout, owned))
         .map(|p| {
-            let verdict = if p.refused(m) { "refuse" } else { "accept" };
+            let verdict = if p.refused(&m.layout, owned) {
+                "refuse"
+            } else {
+                "accept"
+            };
             format!(
                 "must {verdict} {} (row {:?}):\n{}",
-                p.path(m),
+                p.path(&m.layout),
                 p.row,
                 p.source().0
             )
@@ -627,7 +682,7 @@ fn judge(m: &Mirror, probes: &[Probe]) -> Result<(), TestCaseError> {
         code,
         out
     );
-    let want = i32::from(probes.iter().any(|p| p.refused(m)));
+    let want = i32::from(probes.iter().any(|p| p.refused(&m.layout, owned)));
     prop_assert_eq!(
         code,
         want,
@@ -647,7 +702,8 @@ fn a_small_duration_comparison_outside_the_budget_type_is_refused_in_every_shape
     let mut runner = TestRunner::default();
     let strategy = proptest::collection::vec(probe(), 8..=40).prop_map(numbered);
     let mut fixed = known_escapes();
-    fixed.push(owned_by_package(&packages(&root, "frontends")));
+    let layout = Layout::of(&root);
+    fixed.extend(owned_by_package(&layout.frontends));
     let mut sets = vec![numbered(fixed)];
     for _ in 0..2 {
         sets.push(
@@ -657,15 +713,16 @@ fn a_small_duration_comparison_outside_the_budget_type_is_refused_in_every_shape
                 .current(),
         );
     }
+    let owned = owned_files(&root, &layout, sets.iter().flatten());
     let (reads, verdicts) = std::thread::scope(|s| {
         let reads = s.spawn(|| scanner_reads(&root));
         let judged: Vec<_> = sets
             .iter()
             .map(|probes| {
-                let root = &root;
+                let (root, owned) = (&root, &owned);
                 s.spawn(move || {
                     let m = Mirror::new(root);
-                    let verdict = judge(&m, probes);
+                    let verdict = judge(&m, owned, probes);
                     (m, verdict)
                 })
             })
