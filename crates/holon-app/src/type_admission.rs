@@ -200,22 +200,31 @@ pub async fn redeclare_stored_types(
         .stored_definitions()
         .await
         .map_err(|e| format!("reading the stored type definitions failed: {e}"))?;
-    let mut refused = Vec::new();
-    for type_def in &stored {
+    let mut refused: Vec<(String, String)> = stored
+        .unreadable
+        .into_iter()
+        .map(|u| (u.key, u.error))
+        .collect();
+    for type_def in &stored.readable {
         if let Err(e) = declare_admitted(
             profiles, type_def, authority, db_handle, registry, dispatcher,
         )
         .await
         {
-            refused.push(format!("'{}': {e}", type_def.name));
+            refused.push((type_def.name.clone(), e.to_string()));
         }
     }
     if refused.is_empty() {
         return Ok(());
     }
+    refused.sort();
+    let refused: Vec<String> = refused
+        .into_iter()
+        .map(|(key, why)| format!("'{key}': {why}"))
+        .collect();
     Err(format!(
-        "{} stored type declaration(s) were not declared again; their rows stay stored but \
-         take no writes:\n  - {}",
+        "{} stored type declaration(s) were not declared again; their rows stay stored, \
+         unchanged, but take no writes:\n  - {}",
         refused.len(),
         refused.join("\n  - ")
     ))

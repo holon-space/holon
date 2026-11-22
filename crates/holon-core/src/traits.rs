@@ -912,8 +912,25 @@ pub trait TypeWriteAuthority: MaybeSendSync {
     /// definition.
     async fn store_definition(&self, type_def: &holon_api::TypeDefinition) -> Result<()>;
 
-    /// Every definition [`Self::store_definition`] kept, by name.
-    async fn stored_definitions(&self) -> Result<Vec<holon_api::TypeDefinition>>;
+    /// Every entry the store holds, by key: the definitions that parse, and
+    /// the entries that do not. An `Err` means the store itself cannot be
+    /// enumerated.
+    async fn stored_definitions(&self) -> Result<StoredDefinitions>;
+}
+
+/// What [`TypeWriteAuthority::stored_definitions`] found, both lists in key
+/// order.
+#[derive(Debug, Default)]
+pub struct StoredDefinitions {
+    pub readable: Vec<holon_api::TypeDefinition>,
+    pub unreadable: Vec<UnreadableDefinition>,
+}
+
+/// A stored entry that is not a `TypeDefinition`. It stays stored.
+#[derive(Debug)]
+pub struct UnreadableDefinition {
+    pub key: String,
+    pub error: String,
 }
 
 /// The facts a guard may only learn from whatever ACCEPTED a write.

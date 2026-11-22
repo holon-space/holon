@@ -33,7 +33,9 @@ use holon_api::ColumnValueKind;
 use holon_api::TypeDefinition;
 use holon_core::OperationProvider;
 use holon_core::Result;
+use holon_core::StoredDefinitions;
 use holon_core::TypeWriteAuthority;
+use holon_core::UnreadableDefinition;
 use holon_profiles::TypeRegistry;
 use holon_turso::turso_adapter::TursoAdapter;
 use holon_turso::turso_adapter::TursoArtifacts;
@@ -266,7 +268,7 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
         Ok(())
     }
 
-    async fn stored_definitions(&self) -> Result<Vec<TypeDefinition>> {
+    async fn stored_definitions(&self) -> Result<StoredDefinitions> {
         let rows = self
             .0
             .query(
@@ -275,18 +277,24 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
             )
             .await
             .map_err(|e| format!("reading type_declaration: {e}"))?;
-        rows.iter()
-            .map(|row| {
-                let name = row.get("name").and_then(|v| v.as_string());
-                let definition = row
-                    .get("definition")
-                    .and_then(|v| v.as_string())
-                    .ok_or_else(|| format!("type_declaration row {name:?} has no definition"))?;
-                Ok(serde_json::from_str(definition).map_err(|e| {
-                    format!("type_declaration row {name:?} is not a TypeDefinition: {e}")
-                })?)
-            })
-            .collect()
+        let mut stored = StoredDefinitions::default();
+        for row in &rows {
+            let key = row
+                .get("name")
+                .and_then(|v| v.as_string())
+                .ok_or("type_declaration holds a row without a name")?
+                .to_string();
+            let parsed = match row.get("definition").and_then(|v| v.as_string()) {
+                Some(definition) => serde_json::from_str::<TypeDefinition>(definition)
+                    .map_err(|e| format!("not a TypeDefinition: {e}")),
+                None => Err("has no definition".to_string()),
+            };
+            match parsed {
+                Ok(definition) => stored.readable.push(definition),
+                Err(error) => stored.unreadable.push(UnreadableDefinition { key, error }),
+            }
+        }
+        Ok(stored)
     }
 }
 

@@ -8,6 +8,11 @@
 //! again after a restart, with its rows kept, under the Loro write authority
 //! @pbt covers refused-stored-type-disclosed — a stored definition the seat
 //! refuses at boot is a failed boot step naming the type and the refusal
+//! @pbt covers unreadable-stored-type-refused-alone — one stored entry that is
+//! not a TypeDefinition (SQL row or Loro map value) is one named refusal in the
+//! boot report, merged with the seat's refusals in key order; every readable
+//! type the seat admits is still declared and takes writes, and the entry stays
+//! stored, under both write authorities
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone cannot store a
 //! definition the seat refuses, and its typed reboot cases draw SQL authority
 
@@ -28,6 +33,7 @@ use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
 use holon_frontend::platform::BootStep;
+use proptest::prelude::*;
 
 struct Booted {
     engine: Arc<BackendEngine>,
@@ -35,8 +41,12 @@ struct Booted {
     session: Arc<FrontendSession>,
 }
 
-async fn boot(dir: &Path) -> Booted {
+async fn boot(dir: &Path, crdt: bool) -> Booted {
     let config = HolonConfig {
+        crdt: holon_frontend::config::CrdtPreferences {
+            enabled: Some(crdt),
+            ..Default::default()
+        },
         db_path: Some(dir.join("holon.db")),
         vault: VaultConfig {
             root: Some(dir.to_path_buf()),
@@ -96,8 +106,12 @@ async fn authority(booted: &Booted) -> Arc<dyn holon_core::TypeWriteAuthority> {
 }
 
 fn kept_type() -> TypeDefinition {
+    named_type("gen_kept")
+}
+
+fn named_type(name: &str) -> TypeDefinition {
     TypeDefinition::new(
-        "gen_kept",
+        name,
         [
             FieldSchema::new("id", "TEXT").primary_key(),
             FieldSchema::new("title", "TEXT"),
@@ -106,6 +120,382 @@ fn kept_type() -> TypeDefinition {
         .chain(FieldSchema::overflow_pair())
         .collect(),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Corruption {
+    InvalidJson,
+    /// Valid JSON of a TypeDefinition that lost a required field.
+    OldShape,
+    Empty,
+    /// A Loro map value that is not a string.
+    NonString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Home {
+    SqlTable,
+    LoroMap,
+}
+
+#[derive(Clone, Debug)]
+struct Case {
+    crdt: bool,
+    valid: usize,
+    unreadable: Vec<(Corruption, Home)>,
+    /// Readable definitions stored past the seat that the seat refuses at boot.
+    seat_refused: usize,
+}
+
+fn corrupt_text(corruption: Corruption) -> String {
+    match corruption {
+        Corruption::InvalidJson => "{not json".to_string(),
+        Corruption::OldShape => {
+            let mut json = serde_json::to_value(kept_type()).expect("serialize");
+            json.as_object_mut().expect("an object").remove("name");
+            let text = json.to_string();
+            assert!(
+                serde_json::from_str::<TypeDefinition>(&text).is_err(),
+                "the old shape must stay unreadable: {text}"
+            );
+            text
+        }
+        Corruption::Empty => String::new(),
+        Corruption::NonString => unreachable!("not text"),
+    }
+}
+
+fn valid_name(i: usize) -> String {
+    format!("gen_valid{i}")
+}
+
+fn row_id(i: usize, n: usize) -> String {
+    format!("{}:k{n}", valid_name(i).replace('_', "-"))
+}
+
+fn bad_name(i: usize) -> String {
+    format!("gen_bad{i}")
+}
+
+/// Sorts before every `bad_name`, so an unsorted merge of the two refusal
+/// kinds is out of key order.
+fn seat_name(i: usize) -> String {
+    format!("gen_aseat{i}")
+}
+
+fn seat_refused_type(i: usize) -> TypeDefinition {
+    let mut def = named_type(&seat_name(i));
+    def.home = Some(HomeProfileId::parse("holon-nativ").expect("well-formed, merely wrong"));
+    def
+}
+
+async fn plant(booted: &Booted, key: &str, corruption: Corruption, home: Home) {
+    match home {
+        Home::SqlTable => {
+            let db = booted
+                .injector
+                .resolve::<dyn holon::di::DbHandleProvider>()
+                .handle();
+            db.execute_values(
+                "INSERT OR REPLACE INTO type_declaration (name, definition) VALUES (?, ?)",
+                vec![
+                    Value::String(key.to_string()),
+                    Value::String(corrupt_text(corruption)),
+                ],
+            )
+            .await
+            .expect("insert an unreadable type_declaration row");
+        }
+        Home::LoroMap => {
+            let doc = booted
+                .injector
+                .try_resolve::<holon_loro::LoroDocumentStore>()
+                .expect("a CRDT session registers a LoroDocumentStore")
+                .get_doc(holon_loro::loro_document_store::DocScope::Global)
+                .await
+                .expect("the Global doc");
+            doc.with_write(holon_loro::write_origin::WriteOrigin::BlockOps, |txn| {
+                let map = txn.get_map(holon_loro::loro_entity_operations::TYPE_DECLARATIONS_ROOT);
+                match corruption {
+                    Corruption::NonString => map.insert(key, 7i64)?,
+                    other => map.insert(key, corrupt_text(other))?,
+                };
+                Ok(())
+            })
+            .expect("write an unreadable type-declaration entry");
+        }
+    }
+}
+
+async fn check_case(case: &Case) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    {
+        let first = boot(dir.path(), case.crdt).await;
+        for i in 0..case.valid {
+            let def = named_type(&valid_name(i));
+            dispatch(
+                &first,
+                holon_app::type_admission::TYPE_ENTITY,
+                holon_app::type_admission::DECLARE_TYPE_OP,
+                params(&[(
+                    "definition",
+                    &serde_json::to_string(&def).expect("a TypeDefinition serializes"),
+                )]),
+            )
+            .await
+            .expect("declare a valid type");
+            dispatch(
+                &first,
+                &valid_name(i),
+                "create",
+                params(&[("id", &row_id(i, 1)), ("title", "one")]),
+            )
+            .await
+            .expect("create a row");
+        }
+        for (i, (corruption, home)) in case.unreadable.iter().enumerate() {
+            plant(&first, &bad_name(i), *corruption, *home).await;
+        }
+        for i in 0..case.seat_refused {
+            authority(&first)
+                .await
+                .store_definition(&seat_refused_type(i))
+                .await
+                .expect("store a definition the seat refuses");
+        }
+        holon_app::shutdown_session(&first.injector)
+            .await
+            .expect("shut the first session down");
+    }
+
+    let mut reports = Vec::new();
+    for round in 0..2usize {
+        let booted = boot(dir.path(), case.crdt).await;
+        let failed = booted.session.boot_report().failed();
+        let refusals = case.unreadable.len() + case.seat_refused;
+        if refusals == 0 {
+            assert!(failed.is_empty(), "nothing is unreadable: {failed:?}");
+        } else {
+            assert_eq!(
+                failed.iter().map(|(step, _)| *step).collect::<Vec<_>>(),
+                vec![BootStep::RedeclareStoredTypes],
+                "only the redeclaration step fails: {failed:?}"
+            );
+            let why = &failed[0].1;
+            assert!(
+                why.starts_with(&format!("{refusals} stored type declaration(s)")),
+                "the count is the number of refused entries of both kinds: {why}"
+            );
+            let keys: Vec<&str> = why
+                .lines()
+                .filter_map(|l| l.strip_prefix("  - '")?.split("':").next())
+                .collect();
+            assert_eq!(keys.len(), refusals, "one line per refused entry: {why}");
+            assert!(
+                keys.windows(2).all(|w| w[0] < w[1]),
+                "the lines are in key order, each key once: {why}"
+            );
+            for i in 0..case.seat_refused {
+                let line = why
+                    .lines()
+                    .find(|l| l.contains(&format!("'{}':", seat_name(i))))
+                    .unwrap_or_else(|| panic!("{} is named: {why}", seat_name(i)));
+                assert!(
+                    line.contains("holon-nativ"),
+                    "the line carries the seat's refusal: {line}"
+                );
+            }
+            for (i, (corruption, _)) in case.unreadable.iter().enumerate() {
+                let line = why
+                    .lines()
+                    .find(|l| l.contains(&format!("'{}':", bad_name(i))))
+                    .unwrap_or_else(|| panic!("{} is named: {why}", bad_name(i)));
+                let expected = if *corruption == Corruption::NonString {
+                    "not a JSON string"
+                } else {
+                    "not a TypeDefinition"
+                };
+                assert!(
+                    line.contains(expected),
+                    "the line carries the error: {line}"
+                );
+            }
+            assert!(
+                (0..case.valid).all(|i| !why.contains(&valid_name(i))),
+                "no readable type is named: {why}"
+            );
+            reports.push(why.clone());
+        }
+        for i in 0..case.valid {
+            let name = valid_name(i);
+            dispatch(
+                &booted,
+                &name,
+                "set_field",
+                params(&[("id", &row_id(i, 1)), ("field", "title"), ("value", "uno")]),
+            )
+            .await
+            .expect("a readable type takes writes on its stored row");
+            dispatch(
+                &booted,
+                &name,
+                "create",
+                params(&[("id", &row_id(i, 2 + round)), ("title", "two")]),
+            )
+            .await
+            .expect("a readable type takes new rows");
+        }
+        let refused_keys = (0..case.unreadable.len())
+            .map(bad_name)
+            .chain((0..case.seat_refused).map(seat_name));
+        for key in refused_keys {
+            assert!(
+                dispatch(&booted, &key, "create", params(&[("id", "x:1")]))
+                    .await
+                    .is_err(),
+                "a refused entry takes no writes"
+            );
+        }
+        holon_app::shutdown_session(&booted.injector)
+            .await
+            .expect("shut the session down");
+    }
+    if let [a, b] = reports.as_slice() {
+        assert_eq!(
+            a, b,
+            "the unreadable entries stay stored: the next boot reports the same"
+        );
+    }
+}
+
+fn case_strategy() -> impl Strategy<Value = Case> {
+    let corruption = prop_oneof![
+        Just(Corruption::InvalidJson),
+        Just(Corruption::OldShape),
+        Just(Corruption::Empty),
+        Just(Corruption::NonString),
+    ];
+    (
+        any::<bool>(),
+        1usize..=4,
+        proptest::collection::vec((corruption, any::<bool>()), 0..=3),
+        0usize..=2,
+    )
+        .prop_map(|(crdt, valid, rows, seat_refused)| Case {
+            crdt,
+            valid,
+            seat_refused,
+            unreadable: rows
+                .into_iter()
+                .map(|(corruption, in_loro)| {
+                    // A Loro map exists only under the CRDT authority, and a
+                    // non-string value only fits a map.
+                    let home = if crdt && (in_loro || corruption == Corruption::NonString) {
+                        Home::LoroMap
+                    } else {
+                        Home::SqlTable
+                    };
+                    let corruption =
+                        if home == Home::SqlTable && corruption == Corruption::NonString {
+                            Corruption::InvalidJson
+                        } else {
+                            corruption
+                        };
+                    (corruption, home)
+                })
+                .collect(),
+        })
+}
+
+fn run(case: &Case) {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build a runtime")
+        .block_on(check_case(case));
+}
+
+fn fixed(crdt: bool, valid: usize, unreadable: &[(Corruption, Home)], seat_refused: usize) -> Case {
+    Case {
+        crdt,
+        valid,
+        unreadable: unreadable.to_vec(),
+        seat_refused,
+    }
+}
+
+fn fixed_examples() -> [Case; 5] {
+    [
+        fixed(false, 1, &[(Corruption::OldShape, Home::SqlTable)], 0),
+        fixed(true, 2, &[(Corruption::OldShape, Home::SqlTable)], 0),
+        fixed(true, 1, &[(Corruption::NonString, Home::LoroMap)], 0),
+        fixed(
+            true,
+            2,
+            &[
+                (Corruption::InvalidJson, Home::LoroMap),
+                (Corruption::Empty, Home::SqlTable),
+            ],
+            0,
+        ),
+        fixed(
+            false,
+            1,
+            &[
+                (Corruption::InvalidJson, Home::SqlTable),
+                (Corruption::Empty, Home::SqlTable),
+            ],
+            2,
+        ),
+    ]
+}
+
+/// Each fixed example also runs alone, so the first red does not hide the
+/// others; the property below runs all of them first, then random cases.
+#[test]
+fn example_old_shape_row_in_sql() {
+    run(&fixed_examples()[0]);
+}
+
+#[test]
+fn example_old_shape_row_with_a_loro_authority() {
+    run(&fixed_examples()[1]);
+}
+
+#[test]
+fn example_loro_non_string_value() {
+    run(&fixed_examples()[2]);
+}
+
+#[test]
+fn example_two_unreadable_entries_in_two_homes() {
+    run(&fixed_examples()[3]);
+}
+
+#[test]
+fn example_unreadable_and_seat_refused_entries_merge_in_key_order() {
+    run(&fixed_examples()[4]);
+}
+
+/// The SQL `definition` column is NOT NULL, so a row without a definition
+/// cannot be stored; its Loro analogue is the non-string value below.
+#[test]
+fn one_unreadable_stored_type_is_refused_alone() {
+    // Fixed cases run through the same property before the random ones.
+    for case in fixed_examples() {
+        run(&case);
+    }
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+        cases: 6,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    runner
+        .run(&case_strategy(), |case| {
+            run(&case);
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -127,7 +517,7 @@ fn a_declared_type_takes_writes_after_a_restart_and_a_refused_one_is_disclosed()
         refused.home =
             Some(HomeProfileId::parse("holon-nativ").expect("well-formed, merely wrong"));
         {
-            let first = boot(dir.path()).await;
+            let first = boot(dir.path(), true).await;
             dispatch(
                 &first,
                 holon_app::type_admission::TYPE_ENTITY,
@@ -159,7 +549,7 @@ fn a_declared_type_takes_writes_after_a_restart_and_a_refused_one_is_disclosed()
                 .expect("shut the first session down");
         }
 
-        let second = boot(dir.path()).await;
+        let second = boot(dir.path(), true).await;
         let failed = second.session.boot_report().failed();
         assert_eq!(
             failed.iter().map(|(step, _)| *step).collect::<Vec<_>>(),

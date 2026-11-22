@@ -23,6 +23,8 @@ use holon_core::FieldDelta;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;
+use holon_core::StoredDefinitions;
+use holon_core::UnreadableDefinition;
 use holon_core::storage::types::StorageEntity;
 use holon_core::type_write_rule::CrudDeclarations;
 use holon_core::type_write_rule::ScopeReplacement;
@@ -683,38 +685,39 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
         Ok(())
     }
 
-    async fn stored_definitions(&self) -> Result<Vec<TypeDefinition>> {
-        let stored: Vec<(String, String)> = self.doc.with_read(|doc| {
-            let mut stored = Vec::new();
-            if let Some(root) = held_root(doc, TYPE_DECLARATIONS_ROOT) {
-                root.for_each(|name, value| {
-                    let definition = match value {
-                        ValueOrContainer::Value(LoroValue::String(json)) => json.to_string(),
-                        other => panic!(
-                            "{TYPE_DECLARATIONS_ROOT}[{name:?}] holds {other:?}, not a JSON string"
-                        ),
-                    };
-                    stored.push((name.to_string(), definition));
-                });
-            }
-            Ok(stored)
-        })?;
-        let mut definitions = match &self.mirrors {
+    async fn stored_definitions(&self) -> Result<StoredDefinitions> {
+        let held: Vec<(String, std::result::Result<String, String>)> =
+            self.doc.with_read(|doc| {
+                let mut held = Vec::new();
+                if let Some(root) = held_root(doc, TYPE_DECLARATIONS_ROOT) {
+                    root.for_each(|key, value| {
+                        let json = match value {
+                            ValueOrContainer::Value(LoroValue::String(json)) => {
+                                Ok(json.to_string())
+                            }
+                            other => Err(format!("holds {other:?}, not a JSON string")),
+                        };
+                        held.push((key.to_string(), json));
+                    });
+                }
+                Ok(held)
+            })?;
+        let mut stored = match &self.mirrors {
             Some(mirrors) => mirrors.stored_definitions().await?,
-            None => Vec::new(),
+            None => StoredDefinitions::default(),
         };
-        definitions.extend(
-            stored
-                .into_iter()
-                .map(|(name, definition)| {
-                    serde_json::from_str::<TypeDefinition>(&definition).map_err(|e| {
-                        format!("{TYPE_DECLARATIONS_ROOT}[{name:?}] is not a TypeDefinition: {e}")
-                    })
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-        );
-        definitions.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(definitions)
+        for (key, json) in held {
+            match json.and_then(|json| {
+                serde_json::from_str::<TypeDefinition>(&json)
+                    .map_err(|e| format!("not a TypeDefinition: {e}"))
+            }) {
+                Ok(definition) => stored.readable.push(definition),
+                Err(error) => stored.unreadable.push(UnreadableDefinition { key, error }),
+            }
+        }
+        stored.readable.sort_by(|a, b| a.name.cmp(&b.name));
+        stored.unreadable.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(stored)
     }
 }
 
