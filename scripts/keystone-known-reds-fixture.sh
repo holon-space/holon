@@ -1229,19 +1229,19 @@ replay_site=crates/holon-integration-tests/src/pbt/composed/harness.rs:2231:5 \
     replay_log renamed hand-authored-renamed-recipe-refusal-not-disclosed-load "$renamed_payload" >"$work/replay-renamed-recipe.log"
 expect_outcome any-line/renamed-recipe 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/replay-renamed-recipe.log"
-cat >"$work/tui-stderr-write.log" <<'EOF'
-        FAIL [  33.210s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_stderr_write_while_the_tui_draws_lands_in_the_log
+cat >"$work/tui-refused-write-back.log" <<'EOF'
+        FAIL [   2.915s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_refused_write_back_is_in_the_log_after_the_terminal_hung_up
   stderr ───
 
-    thread 'a_stderr_write_while_the_tui_draws_lands_in_the_log' (156066076) panicked at frontends/tui/tests/stop_signals_quit_through_the_session_shutdown.rs:156:5:
-    `[chord] indent:` is not in the TUI log after the shutdown: it never arrived, or a later log write overwrote it; on the terminal: false; log:
+    thread 'a_refused_write_back_is_in_the_log_after_the_terminal_hung_up' (156066076) panicked at frontends/tui/tests/stop_signals_quit_through_the_session_shutdown.rs:101:5:
+    the log, the only record once the terminal is gone, must name the document the shutdown did not write; log:
 ────────────
-     Summary [  33.214s] 1 test run: 0 passed, 1 failed, 20 skipped
-        FAIL [  33.210s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_stderr_write_while_the_tui_draws_lands_in_the_log
+     Summary [   2.920s] 1 test run: 0 passed, 1 failed, 20 skipped
+        FAIL [   2.915s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_refused_write_back_is_in_the_log_after_the_terminal_hung_up
 error: test run failed
 EOF
-expect_outcome any-line/tui-stderr-write 0 '^PRIMARY: \[known-red:tui-stderr-write-missing-from-log-load\]' \
-    "$work/tui-stderr-write.log"
+expect_outcome any-line/tui-refused-write-back 0 '^PRIMARY: \[known-red:tui-refused-write-back-missing-from-log\]' \
+    "$work/tui-refused-write-back.log"
 
 # The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
 # payload at that exact site is no failure; anything else stays a signature.

@@ -799,6 +799,19 @@ fn dispatch_navigation_op(state: &mut TuiState, op_name: &str, label: &str) {
     state.status_message = label.to_string();
 }
 
+/// Under `HOLON_DEBUG_CHORD`, writes `[chord] <op_name>: <detail>` to stderr as
+/// one `write(2)`, so a concurrent log writer cannot split the line.
+fn chord_debug(op_name: &str, detail: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    if std::env::var("HOLON_DEBUG_CHORD").is_err() {
+        return;
+    }
+    let line = format!("[chord] {op_name}: {detail}\n");
+    if let Err(e) = std::io::stderr().lock().write_all(line.as_bytes()) {
+        tracing::error!("chord debug write failed: {e}; line: {line:?}");
+    }
+}
+
 /// Dispatch a `block.<op_name>` intent (only an `id` param — no `value`,
 /// `position`, etc.) against the currently focused `Block` region's entity
 /// id. Used by the Ctrl+T / Alt+Right / Alt+Left shortcuts. Returns `true`
@@ -810,32 +823,24 @@ fn dispatch_block_op_on_focused(state: &TuiState, op_name: &str) -> bool {
     let registry = state.last_registry.lock();
     let idx = state.focus_index.load(Ordering::Acquire);
     if idx == NO_FOCUS {
-        if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
-            eprintln!("[chord] {op_name}: no focus");
-        }
+        chord_debug(op_name, format_args!("no focus"));
         return false;
     }
     let Some(region) = registry.selectables.get(idx) else {
-        if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
-            eprintln!("[chord] {op_name}: focus_index {idx} out of bounds");
-        }
+        chord_debug(op_name, format_args!("focus_index {idx} out of bounds"));
         return false;
     };
     if region.kind != SelectableKind::Block {
-        if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
-            eprintln!(
-                "[chord] {op_name}: focused region is {:?}, not Block",
-                region.kind
-            );
-        }
+        chord_debug(
+            op_name,
+            format_args!("focused region is {:?}, not Block", region.kind),
+        );
         return false;
     }
     let block_id = region.entity_id.clone();
     drop(registry);
 
-    if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
-        eprintln!("[chord] {op_name}: dispatching on block {block_id}");
-    }
+    chord_debug(op_name, format_args!("dispatching on block {block_id}"));
 
     let op = op_name.to_string();
     let mut params = std::collections::HashMap::new();

@@ -451,7 +451,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `tui-dead-terminal-shutdown-over-60s-load`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
-- `tui-stderr-write-missing-from-log-load`
 - `turso-block-query-source-round-trip`
 - `two-instance-loro-docs-no-common-state`
 - `two-instance-one-way-share-receiver-org-missing`
