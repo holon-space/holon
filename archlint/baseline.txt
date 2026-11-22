@@ -78,7 +78,6 @@ no-underscore-params	crates/holon-markdown/src/obsidian.rs	_source: &str,
 no-underscore-params	frontends/gpui/src/render/builders/divider.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;
-ok	crates/holon-markdown/src/logseq.rs	path.strip_prefix(root)
 ok	frontends/gpui/src/render/builders/render_entity.rs	any.clone()
 physical_time	crates/holon-api/src/block.rs	executed_at: crate::clock::now_millis(),
 physical_time	crates/holon-api/src/block.rs	executed_at: crate::clock::now_millis(),
