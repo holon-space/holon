@@ -11,10 +11,11 @@
 //! disclosure for *whole-block* unsupported constructs (callouts, embeds,
 //! queries) happens one layer up in the block parsers.
 
-use holon_api::EntityUri;
 use holon_api::inline_mark::EntityRef;
 use holon_api::inline_mark::InlineMark;
 use holon_api::inline_mark::MarkSpan;
+
+use crate::build::block_id;
 
 /// Result of scanning one block's inline text.
 pub struct InlineParse {
@@ -24,17 +25,60 @@ pub struct InlineParse {
     pub tags: Vec<String>,
 }
 
+/// Answers "next occurrence of this needle at or after `from`" in O(1) after
+/// one O(n) pass per distinct needle, so a line of unmatched openers costs
+/// O(n), not O(n^2).
+#[derive(Default)]
+pub struct NextIndex {
+    tables: Vec<(Vec<char>, Vec<usize>)>,
+}
+
+impl NextIndex {
+    /// `src` must be the same text on every call of one index.
+    pub fn find(&mut self, src: &[char], needle: &[char], from: usize) -> Option<usize> {
+        assert!(!needle.is_empty(), "an empty needle matches everywhere");
+        let table = match self.tables.iter().position(|(n, _)| n == needle) {
+            Some(t) => &self.tables[t].1,
+            None => {
+                let mut next = vec![NONE; src.len() + 1];
+                for p in (0..src.len()).rev() {
+                    next[p] = if src[p..].starts_with(needle) {
+                        p
+                    } else {
+                        next[p + 1]
+                    };
+                }
+                self.tables.push((needle.to_vec(), next));
+                &self.tables.last().expect("just pushed").1
+            }
+        };
+        table.get(from).copied().filter(|&p| p != NONE)
+    }
+}
+
+const NONE: usize = usize::MAX;
+
 struct Scanner {
     src: Vec<char>,
+    next: NextIndex,
     i: usize,
     out: String,
     /// Char length of `out` so far (marks index into this space).
     out_len: usize,
     marks: Vec<MarkSpan>,
     tags: Vec<String>,
+    seen_tags: std::collections::HashSet<String>,
 }
 
 impl Scanner {
+    /// Keeps first-seen order; membership is O(1) so a line of distinct tags
+    /// stays linear.
+    fn push_tag(&mut self, name: &str) {
+        if self.seen_tags.insert(name.to_string()) {
+            self.tags.push(name.to_string());
+        }
+    }
+
     fn push_str(&mut self, s: &str) {
         for c in s.chars() {
             self.out.push(c);
@@ -44,18 +88,8 @@ impl Scanner {
 
     /// Find the char index of the next occurrence of `needle` at or after
     /// `from`.
-    fn find(&self, needle: &[char], from: usize) -> Option<usize> {
-        if needle.is_empty() || from + needle.len() > self.src.len() {
-            return None;
-        }
-        let mut j = from;
-        while j + needle.len() <= self.src.len() {
-            if self.src[j..j + needle.len()] == *needle {
-                return Some(j);
-            }
-            j += 1;
-        }
-        None
+    fn find(&mut self, needle: &[char], from: usize) -> Option<usize> {
+        self.next.find(&self.src, needle, from)
     }
 
     fn starts_with(&self, needle: &[char]) -> bool {
@@ -103,11 +137,13 @@ const EMPHASIS: &[EmphasisPair] = &[
 pub fn scan_inline(text: &str) -> InlineParse {
     let mut s = Scanner {
         src: text.chars().collect(),
+        next: NextIndex::default(),
         i: 0,
         out: String::new(),
         out_len: 0,
         marks: Vec::new(),
         tags: Vec::new(),
+        seen_tags: Default::default(),
     };
 
     while s.i < s.src.len() {
@@ -137,21 +173,23 @@ pub fn scan_inline(text: &str) -> InlineParse {
             }
         }
 
-        // --- Block ref `((uuid))`
+        // --- Block ref `((uuid))`; an inner that is no block id stays text.
         if s.starts_with(&['(', '(']) {
             if let Some(close) = s.find(&[')', ')'], s.i + 2) {
-                let inner: String = s.src[s.i + 2..close].iter().collect();
-                let inner = inner.trim().to_string();
+                let raw: String = s.src[s.i + 2..close].iter().collect();
+                let inner = raw.trim();
                 if !inner.is_empty() {
-                    let target = EntityRef::from_uri(&EntityUri::block(&inner));
                     let label = format!("(({inner}))");
-                    s.emit_marked(
-                        &label,
-                        InlineMark::Link {
-                            target,
-                            label: label.clone(),
-                        },
-                    );
+                    match block_id(inner) {
+                        Ok(id) => s.emit_marked(
+                            &label,
+                            InlineMark::Link {
+                                target: EntityRef::from_uri(&id),
+                                label: label.clone(),
+                            },
+                        ),
+                        Err(_) => s.push_str(&format!("(({raw}))")),
+                    }
                     s.i = close + 2;
                     continue;
                 }
@@ -186,7 +224,7 @@ pub fn scan_inline(text: &str) -> InlineParse {
                 if let Some(close) = s.find(&[']', ']'], s.i + 3) {
                     let name: String = s.src[s.i + 3..close].iter().collect();
                     if !name.trim().is_empty() {
-                        push_tag(&mut s.tags, name.trim());
+                        s.push_tag(name.trim());
                         // Preserve the literal source so the display text is
                         // lossless.
                         let lit: String = s.src[s.i..close + 2].iter().collect();
@@ -203,7 +241,7 @@ pub fn scan_inline(text: &str) -> InlineParse {
             }
             let name: String = s.src[s.i + 1..j].iter().collect();
             if is_valid_tag(&name) {
-                push_tag(&mut s.tags, &name);
+                s.push_tag(&name);
                 let lit: String = s.src[s.i..j].iter().collect();
                 s.push_str(&lit);
                 s.i = j;
@@ -290,11 +328,4 @@ fn is_tag_char(c: char) -> bool {
 fn is_valid_tag(name: &str) -> bool {
     // Obsidian rule: non-empty and contains at least one non-numeric char.
     !name.is_empty() && name.chars().any(|c| !c.is_ascii_digit())
-}
-
-fn push_tag(tags: &mut Vec<String>, name: &str) {
-    let n = name.to_string();
-    if !tags.contains(&n) {
-        tags.push(n);
-    }
 }

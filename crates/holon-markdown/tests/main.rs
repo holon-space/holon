@@ -5,6 +5,8 @@ mod logseq_ingest;
 mod obsidian_ingest;
 mod planning_property_reingest;
 mod reingest_support;
+mod scan_lookup;
 mod store_params_contract;
 mod task_marker_reingest;
+mod total_parse;
 mod write_guard;
