@@ -3039,7 +3039,6 @@ dependencies = [
  "holon-core",
  "rhai",
  "serde",
- "serde_json",
  "serde_yaml",
  "thiserror 2.0.21",
  "tokio",
