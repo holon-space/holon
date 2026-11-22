@@ -137,7 +137,7 @@ impl RemoteListReconciler {
                     id: remote.id.clone(),
                     columns: mirrored_columns(&self.compiled, remote, snapshot.fetched_at())?,
                 }),
-                Some(row) => match row.timestamp(tombstone_column) {
+                Some(row) => match row.timestamp(tombstone_column)? {
                     // A live tombstone means WE deleted it and the peer has not
                     // been told yet; the pull must not undo our own delete.
                     Some(deleted_at)
@@ -202,10 +202,18 @@ impl RemoteListReconciler {
                             });
                         }
                         for column in &spec.latch_columns {
-                            let set = truthy(remote.columns.get(column));
-                            let held = truthy(row.column(column));
-                            let unset_by_peer =
-                                truthy(served_before(base.as_ref(), column).as_ref());
+                            let set = truthy(
+                                remote.columns.get(column),
+                                column,
+                                &format!("the peer's row {}", remote.id),
+                            )?;
+                            let held =
+                                truthy(row.column(column), column, &format!("row {}", row.id))?;
+                            let unset_by_peer = truthy(
+                                served_before(base.as_ref(), column).as_ref(),
+                                column,
+                                &format!("the merge base of row {}", row.id),
+                            )?;
                             let value = match (set, held) {
                                 (true, false) => Value::Integer(1),
                                 (false, true) if unset_by_peer => Value::Integer(0),
@@ -246,8 +254,8 @@ impl RemoteListReconciler {
             if seen.contains(key) {
                 continue;
             }
-            let tombstoned = row.timestamp(tombstone_column).is_some();
-            let ever_seen = row.timestamp(&spec.watermark_column).is_some();
+            let tombstoned = row.timestamp(tombstone_column)?.is_some();
+            let ever_seen = row.timestamp(&spec.watermark_column)?.is_some();
             match (tombstoned, ever_seen) {
                 (true, _) => outcome
                     .local
@@ -394,14 +402,20 @@ fn same_value(local: Option<&Value>, incoming: &Value) -> bool {
 }
 
 /// Whether a latch column is set. A latch is stored as `INTEGER` and arrives
-/// from a mapping as either a boolean or a number, so both spellings of "on"
-/// count and nothing else does.
-fn truthy(value: Option<&Value>) -> bool {
+/// from a mapping as either a boolean or a number, so those spellings of "on"
+/// and "off" count, as does an empty cell for "off". Any other spelling is an
+/// error naming where it was read: text such as `"1"` read as "off" would drop
+/// the peer's set.
+fn truthy(value: Option<&Value>, column: &str, whose: &str) -> Result<bool> {
     match value {
-        Some(Value::Boolean(b)) => *b,
-        Some(Value::Integer(n)) => *n != 0,
-        Some(Value::Float(f)) => *f != 0.0,
-        _ => false,
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Boolean(b)) => Ok(*b),
+        Some(Value::Integer(n)) => Ok(*n != 0),
+        Some(Value::Float(f)) => Ok(*f != 0.0),
+        Some(other) => anyhow::bail!(
+            "the latch `{column}` of {whose} is {other:?}, which is neither a boolean nor a \
+             number; the peer's mapping must serve a typed latch"
+        ),
     }
 }
 

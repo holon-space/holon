@@ -6,6 +6,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use anyhow::Result;
 use chrono::Duration;
+use holon_api::computation::FieldKind;
+use holon_api::entity::FieldSchema;
 use holon_rows::RowMapper;
 use serde::Deserialize;
 use serde::Serialize;
@@ -244,18 +246,36 @@ impl CompiledListSync {
              overwrite the row's identity or the version cursor",
             spec.base_column
         );
-        anyhow::ensure!(
-            !key_reads(&key, &declared_columns, &spec.base_column).with_context(|| {
-                format!(
-                    "connection '{connection}': probing whether `list_sync.key` reads the merge \
-                     base '{}'",
-                    spec.base_column
-                )
-            })?,
-            "connection '{connection}' keeps its merge base in '{}', which its `list_sync.key` \
-             expression reads; every pull rewrites the base, so the row's key would change under it",
-            spec.base_column
-        );
+        // Only Holon holds these columns and a round writes them, so a key
+        // reading one would change under a row every round.
+        for (role, column, why) in [
+            (
+                "merge base",
+                spec.base_column.as_str(),
+                "every pull rewrites the base",
+            ),
+            (
+                "watermark",
+                spec.watermark_column.as_str(),
+                "every pull rewrites the watermark",
+            ),
+            (
+                "tombstone",
+                soft_delete.tombstone_field.as_str(),
+                "a local delete writes the tombstone",
+            ),
+        ] {
+            anyhow::ensure!(
+                !key_reads(&key, &declared.fields, column).with_context(|| {
+                    format!(
+                        "connection '{connection}': probing whether `list_sync.key` reads the \
+                         {role} '{column}'"
+                    )
+                })?,
+                "connection '{connection}' keeps its {role} in '{column}', which its \
+                 `list_sync.key` expression reads; {why}, so the row's key would change under it"
+            );
+        }
 
         Ok(Arc::new(Self {
             tombstone_column: soft_delete.tombstone_field.to_string(),
@@ -355,24 +375,43 @@ impl CompiledListSync {
 }
 
 /// Whether `key` derives another identity for a row holding every declared
-/// column once only `column` changes.
-fn key_reads(key: &RowMapper, columns: &BTreeSet<String>, column: &str) -> Result<bool> {
-    let row = |changed: &str| {
-        serde_json::Value::Object(
-            columns
-                .iter()
-                .map(|name| {
-                    let value = if name == column {
-                        format!("{name}{changed}")
-                    } else {
-                        name.clone()
-                    };
-                    (name.clone(), serde_json::Value::String(value))
-                })
-                .collect(),
-        )
+/// column once only `column` changes. Each column holds a value of its declared
+/// type, so a key that converts or compares one is probed with what it will
+/// see.
+fn key_reads(key: &RowMapper, fields: &[FieldSchema], column: &str) -> Result<bool> {
+    let row = |changed: bool| -> Result<serde_json::Value> {
+        fields
+            .iter()
+            .map(|field| {
+                let value = probe_value(field, field.name == column && changed)?;
+                Ok((field.name.clone(), value))
+            })
+            .collect::<Result<_>>()
+            .map(serde_json::Value::Object)
     };
-    Ok(key.map(&row(""))? != key.map(&row("'"))?)
+    Ok(key.map(&row(false)?)? != key.map(&row(true)?)?)
+}
+
+/// One of two distinct values of `field`'s declared type.
+fn probe_value(field: &FieldSchema, second: bool) -> Result<serde_json::Value> {
+    let upper = field.sql_type.to_ascii_uppercase();
+    let n = u8::from(second);
+    if upper.contains("DATE") || upper.contains("TIME") {
+        return Ok(format!("2026-01-0{}T00:00:00+00:00", n + 1).into());
+    }
+    match FieldKind::of_sql_type(&field.sql_type) {
+        Some(FieldKind::Text) if second => Ok(format!("{}'", field.name).into()),
+        Some(FieldKind::Text) => Ok(field.name.clone().into()),
+        Some(FieldKind::Boolean) => Ok(second.into()),
+        Some(FieldKind::Numeric) if upper.contains("INT") => Ok(i64::from(n).into()),
+        Some(FieldKind::Numeric) => Ok((f64::from(n) + 0.5).into()),
+        None => anyhow::bail!(
+            "the column '{}' has the type '{}', which the `list_sync.key` probe cannot build a \
+             value for",
+            field.name,
+            field.sql_type
+        ),
+    }
 }
 
 /// One row's identity, as its connection derives it.

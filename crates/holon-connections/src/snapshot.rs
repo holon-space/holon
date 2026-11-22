@@ -44,12 +44,19 @@ impl LocalRow {
         self.columns.get(name)
     }
 
-    /// The RFC 3339 text of a nullable timestamp column, or `None` when the
-    /// column is absent or NULL.
-    pub fn timestamp(&self, column: &str) -> Option<&str> {
+    /// The RFC 3339 text of a nullable timestamp column, whether the storage
+    /// reader typed it as text or as a date-time. An absent, NULL or blank
+    /// cell is `None`; a cell of any other type is an error, because reading
+    /// it as "no timestamp" would undo a deletion or forget a sighting.
+    pub fn timestamp(&self, column: &str) -> Result<Option<&str>> {
         match self.columns.get(column) {
-            Some(Value::String(s)) if !s.trim().is_empty() => Some(s),
-            _ => None,
+            Some(Value::String(s) | Value::DateTime(s)) if !s.trim().is_empty() => Ok(Some(s)),
+            None | Some(Value::Null | Value::String(_) | Value::DateTime(_)) => Ok(None),
+            Some(other) => anyhow::bail!(
+                "the `{column}` of the local row '{}' is neither text nor a date-time ({other:?}); \
+                 a tombstone or watermark that cannot be read would be taken for an absent one",
+                self.id
+            ),
         }
     }
 }

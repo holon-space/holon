@@ -330,8 +330,12 @@ fn served_json(conn: &Conn, v: i64) -> serde_json::Value {
     }
 }
 
-/// The scenario as the two sides the reconciler reads.
-fn sides(conn: &Conn, scenario: &Scenario) -> (Vec<LocalRow>, ListSnapshot) {
+/// The scenario as the raw rows of both sides, every timestamp as text and
+/// every flag as an integer.
+fn rows_of(
+    conn: &Conn,
+    scenario: &Scenario,
+) -> (Vec<LocalRow>, Vec<holon_api::entity::StorageEntity>) {
     let mut local = Vec::new();
     let mut remote = Vec::new();
     for (index, placement) in scenario.0.iter().enumerate() {
@@ -353,6 +357,12 @@ fn sides(conn: &Conn, scenario: &Scenario) -> (Vec<LocalRow>, ListSnapshot) {
             }
         }
     }
+    (local, remote)
+}
+
+/// The scenario as the two sides the reconciler reads.
+fn sides(conn: &Conn, scenario: &Scenario) -> (Vec<LocalRow>, ListSnapshot) {
+    let (local, remote) = rows_of(conn, scenario);
     (local, snapshot_of(conn, remote, 7))
 }
 
@@ -813,6 +823,414 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Every spelling of a typed timestamp and latch
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+enum TimeSpelling {
+    Text,
+    DateTime,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EmptySpelling {
+    Null,
+    Absent,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FlagSpelling {
+    Integer,
+    Boolean,
+    Float,
+}
+
+/// How a storage reader may hand back the columns a round reads as typed
+/// values: a timestamp as text or a date-time, an empty cell as NULL or no
+/// cell, a flag as an integer, a boolean or a float.
+#[derive(Debug, Clone, Copy)]
+struct Respelling {
+    time: TimeSpelling,
+    empty: EmptySpelling,
+    flag: FlagSpelling,
+    /// An unset flag spelled as an empty cell instead of its typed zero.
+    empty_flag: bool,
+}
+
+impl Respelling {
+    fn time(&self, canonical: Option<&Value>) -> Option<Value> {
+        match canonical {
+            Some(Value::String(text)) => Some(match self.time {
+                TimeSpelling::Text => Value::String(text.clone()),
+                TimeSpelling::DateTime => Value::DateTime(text.clone()),
+            }),
+            Some(Value::Null) | None => match self.empty {
+                EmptySpelling::Null => Some(Value::Null),
+                EmptySpelling::Absent => None,
+            },
+            Some(other) => panic!("a canonical timestamp is text or empty, got {other:?}"),
+        }
+    }
+
+    fn flag(&self, on: bool) -> Option<Value> {
+        if !on && self.empty_flag {
+            return match self.empty {
+                EmptySpelling::Null => Some(Value::Null),
+                EmptySpelling::Absent => None,
+            };
+        }
+        Some(match self.flag {
+            FlagSpelling::Integer => Value::Integer(i64::from(on)),
+            FlagSpelling::Boolean => Value::Boolean(on),
+            FlagSpelling::Float => Value::Float(f64::from(u8::from(on))),
+        })
+    }
+
+    fn local(&self, conn: &Conn, mut row: LocalRow) -> LocalRow {
+        for column in [conn.tombstone_column, conn.watermark_column] {
+            let spelled = self.time(row.columns.get(column));
+            set_cell(&mut row.columns, column, spelled);
+        }
+        let on = row.columns.get("checked") == Some(&Value::Integer(1));
+        set_cell(&mut row.columns, "checked", self.flag(on));
+        row
+    }
+
+    fn remote(
+        &self,
+        mut row: holon_api::entity::StorageEntity,
+    ) -> holon_api::entity::StorageEntity {
+        let on = row.get("checked") == Some(&Value::Integer(1));
+        match self.flag(on) {
+            Some(value) => {
+                row.insert("checked".into(), value);
+            }
+            None => {
+                row.remove("checked");
+            }
+        }
+        row
+    }
+}
+
+fn set_cell(columns: &mut BTreeMap<String, Value>, column: &str, value: Option<Value>) {
+    match value {
+        Some(value) => {
+            columns.insert(column.into(), value);
+        }
+        None => {
+            columns.remove(column);
+        }
+    }
+}
+
+fn respelling() -> impl Strategy<Value = Respelling> {
+    (
+        prop_oneof![Just(TimeSpelling::Text), Just(TimeSpelling::DateTime)],
+        prop_oneof![Just(EmptySpelling::Null), Just(EmptySpelling::Absent)],
+        prop_oneof![
+            Just(FlagSpelling::Integer),
+            Just(FlagSpelling::Boolean),
+            Just(FlagSpelling::Float)
+        ],
+        any::<bool>(),
+    )
+        .prop_map(|(time, empty, flag, empty_flag)| Respelling {
+            time,
+            empty,
+            flag,
+            empty_flag,
+        })
+}
+
+fn sides_spelled(
+    conn: &Conn,
+    scenario: &Scenario,
+    spelling: &Respelling,
+) -> (Vec<LocalRow>, ListSnapshot) {
+    let (local, remote) = rows_of(conn, scenario);
+    (
+        local
+            .into_iter()
+            .map(|row| spelling.local(conn, row))
+            .collect(),
+        snapshot_of(
+            conn,
+            remote.into_iter().map(|row| spelling.remote(row)).collect(),
+            7,
+        ),
+    )
+}
+
+/// What a round decided, without the cell spellings its intents carry along:
+/// the decision is which rows are written, deleted or pushed and which flag
+/// values are set.
+fn decisions(outcome: &ReconcileOutcome) -> Vec<String> {
+    let mut shape: Vec<String> = outcome
+        .local
+        .iter()
+        .map(|intent| match intent {
+            LocalIntent::Insert { id, .. } => format!("insert {id}"),
+            LocalIntent::SetColumn { id, column, value } if column == "checked" => {
+                let on = match value {
+                    Value::Integer(n) => *n != 0,
+                    Value::Boolean(b) => *b,
+                    other => panic!("a latch was set to {other:?}"),
+                };
+                format!("set {id} {column} {on}")
+            }
+            LocalIntent::SetColumn { id, column, .. } => format!("set {id} {column}"),
+            LocalIntent::TouchWatermark { id, .. } => format!("touch {id}"),
+            LocalIntent::Delete { id } => format!("delete {id}"),
+            LocalIntent::ReapTombstone { id } => format!("reap {id}"),
+        })
+        .collect();
+    shape.extend(outcome.push.iter().map(|push| match push {
+        PushIntent::Add { row, .. } => format!("add {}", row.id),
+        PushIntent::Update { row, .. } => format!("update {}", row.id),
+        PushIntent::Remove { row, .. } => format!("remove {}", row.id),
+    }));
+    shape.extend(outcome.overwritten.iter().cloned());
+    shape.extend(outcome.withheld.iter().cloned());
+    shape.sort();
+    shape
+}
+
+fn check_spellings_read_alike(
+    scenario: &Scenario,
+    spelling: &Respelling,
+) -> Result<(), TestCaseError> {
+    for conn in connections() {
+        let reconciler = RemoteListReconciler::new(conn.compiled.clone());
+        let (local, snapshot) = sides(&conn, scenario);
+        let canonical = reconciler.reconcile(&local, &snapshot).expect("the round");
+        let (local, snapshot) = sides_spelled(&conn, scenario, spelling);
+        let respelled = reconciler
+            .reconcile(&local, &snapshot)
+            .unwrap_or_else(|e| panic!("{}: {spelling:?} was refused: {e:#}", conn.label));
+        prop_assert_eq!(
+            decisions(&canonical),
+            decisions(&respelled),
+            "{}: {:?} changed what the round decided for {:?}",
+            conn.label,
+            spelling,
+            scenario
+        );
+    }
+    Ok(())
+}
+
+/// The cases a generator once had to find, run through the same property
+/// before the random ones: a date-time tombstone and a date-time watermark.
+fn spelling_examples() -> Vec<(Scenario, Respelling)> {
+    let date_time = Respelling {
+        time: TimeSpelling::DateTime,
+        empty: EmptySpelling::Null,
+        flag: FlagSpelling::Integer,
+        empty_flag: false,
+    };
+    vec![
+        (
+            Scenario(vec![Placement::Both {
+                tomb: Tombstone::Fresh,
+                local_count: 1,
+                remote_count: 1,
+                local_checked: false,
+                remote_checked: false,
+            }]),
+            date_time,
+        ),
+        (
+            Scenario(vec![Placement::LocalOnly {
+                ever_seen: true,
+                tomb: Tombstone::None,
+            }]),
+            date_time,
+        ),
+    ]
+}
+
+#[test]
+fn the_fixed_spelling_cases_read_alike() {
+    for (scenario, spelling) in spelling_examples() {
+        check_spellings_read_alike(&scenario, &spelling).expect("the fixed case");
+    }
+}
+
+/// The two fixed cases, stated as the outcome a person needs: a deletion the
+/// peer is told about, and a row the peer dropped removed.
+#[test]
+fn a_date_time_tombstone_is_pushed_and_a_date_time_watermark_is_deleted() {
+    let spelling = spelling_examples()[0].1;
+    for conn in connections() {
+        let reconciler = RemoteListReconciler::new(conn.compiled.clone());
+        let (scenario, _) = &spelling_examples()[0];
+        let (local, snapshot) = sides_spelled(&conn, scenario, &spelling);
+        let outcome = reconciler.reconcile(&local, &snapshot).expect("the round");
+        assert!(
+            outcome
+                .push
+                .iter()
+                .any(|push| matches!(push, PushIntent::Remove { .. })),
+            "{}: a date-time tombstone was not pushed: {outcome:?}",
+            conn.label
+        );
+        let (scenario, _) = &spelling_examples()[1];
+        let (local, snapshot) = sides_spelled(&conn, scenario, &spelling);
+        let outcome = reconciler.reconcile(&local, &snapshot).expect("the round");
+        assert_eq!(
+            deleted_ids(&outcome),
+            BTreeSet::from([(conn.row_id)(0)]),
+            "{}: a row with a date-time watermark was not deleted: {outcome:?}",
+            conn.label
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Refusal {
+    Tombstone,
+    Watermark,
+    LocalLatch,
+    RemoteLatch,
+    BaseLatch,
+}
+
+impl Refusal {
+    fn column(self, conn: &Conn) -> &'static str {
+        match self {
+            Refusal::Tombstone => conn.tombstone_column,
+            Refusal::Watermark => conn.watermark_column,
+            Refusal::LocalLatch | Refusal::RemoteLatch | Refusal::BaseLatch => "checked",
+        }
+    }
+
+    fn bad_value(self) -> BoxedStrategy<Value> {
+        match self {
+            Refusal::Tombstone | Refusal::Watermark => prop_oneof![
+                any::<i64>().prop_map(Value::Integer),
+                any::<bool>().prop_map(Value::Boolean),
+                (-1.0e6..1.0e6f64).prop_map(Value::Float),
+            ]
+            .boxed(),
+            Refusal::LocalLatch | Refusal::RemoteLatch | Refusal::BaseLatch => {
+                prop::sample::select(vec!["1", "0", "true", "false", "yes", ""])
+                    .prop_map(|text| Value::String(text.into()))
+                    .boxed()
+            }
+        }
+    }
+}
+
+fn refusal() -> impl Strategy<Value = Refusal> {
+    prop::sample::select(vec![
+        Refusal::Tombstone,
+        Refusal::Watermark,
+        Refusal::LocalLatch,
+        Refusal::RemoteLatch,
+        Refusal::BaseLatch,
+    ])
+}
+
+/// One more row after the drawn scenario, whose one cell is spelled in a way
+/// the column's type cannot hold. Its row is the only one that can fail.
+fn check_unreadable_spelling_is_refused(
+    scenario: &Scenario,
+    refusal: Refusal,
+    bad: &Value,
+) -> Result<(), TestCaseError> {
+    for conn in connections() {
+        let mut placements = scenario.0.clone();
+        placements.push(match refusal {
+            Refusal::Tombstone | Refusal::Watermark => Placement::LocalOnly {
+                ever_seen: false,
+                tomb: Tombstone::None,
+            },
+            Refusal::LocalLatch | Refusal::RemoteLatch | Refusal::BaseLatch => Placement::Both {
+                tomb: Tombstone::None,
+                local_count: 1,
+                remote_count: 1,
+                local_checked: false,
+                remote_checked: false,
+            },
+        });
+        let victim = (placements.len() - 1) as u8;
+        let (mut local, mut remote) = rows_of(&conn, &Scenario(placements));
+        let column = refusal.column(&conn);
+        let row = local.last_mut().expect("the victim has a local row");
+        match refusal {
+            Refusal::Tombstone | Refusal::Watermark | Refusal::LocalLatch => {
+                row.columns.insert(column.into(), bad.clone());
+            }
+            Refusal::RemoteLatch => {
+                remote
+                    .last_mut()
+                    .expect("the victim has a remote row")
+                    .insert(column.into(), bad.clone());
+            }
+            Refusal::BaseLatch => {
+                let Value::String(text) = bad else {
+                    panic!("a latch refusal is drawn as text")
+                };
+                row.columns.insert(
+                    conn.compiled.spec().base_column.clone(),
+                    Value::String(serde_json::json!({ "checked": text }).to_string()),
+                );
+            }
+        }
+        let message = RemoteListReconciler::new(conn.compiled.clone())
+            .reconcile(&local, &snapshot_of(&conn, remote, 7))
+            .expect_err(&format!("{}: {refusal:?} {bad:?} was read", conn.label));
+        let message = format!("{message:#}");
+        prop_assert!(
+            message.contains(&format!("`{column}`")) && message.contains(&(conn.row_id)(victim)),
+            "{}: the refusal of {refusal:?} {bad:?} does not name the column and the row: {message}",
+            conn.label
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_fixed_unreadable_spellings_are_refused() {
+    for (refusal, bad) in [
+        (Refusal::Tombstone, Value::Integer(1)),
+        (Refusal::Watermark, Value::Boolean(true)),
+        (Refusal::LocalLatch, Value::String("1".into())),
+        (Refusal::RemoteLatch, Value::String("true".into())),
+        (Refusal::BaseLatch, Value::String("1".into())),
+    ] {
+        check_unreadable_spelling_is_refused(&Scenario(vec![]), refusal, &bad)
+            .expect("the fixed case");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// A round decides the same whichever way a storage reader spells the
+    /// tombstone, the watermark and the latch: a deletion is not forgotten, a
+    /// dropped row is not pushed back and a peer's set flag is not lost.
+    #[test]
+    fn a_round_reads_every_spelling_of_a_timestamp_and_latch_alike(
+        scenario in scenario(),
+        spelling in respelling(),
+    ) {
+        check_spellings_read_alike(&scenario, &spelling)?;
+    }
+
+    /// A spelling the column cannot hold is an error that names the column
+    /// and the row, never an absent tombstone or an unset flag.
+    #[test]
+    fn an_unreadable_spelling_is_refused_by_name(
+        scenario in scenario(),
+        (refusal, bad) in refusal().prop_flat_map(|r| (Just(r), r.bad_value())),
+    ) {
+        check_unreadable_spelling_is_refused(&scenario, refusal, &bad)?;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One whole round against an OFFLINE fixture peer, for both connections. No
 // transport: the peer is a trait, so a list that lives in a `Mutex` is as valid
 // a peer as an HTTP endpoint — which is the property that keeps the round, the
@@ -1040,6 +1458,81 @@ fn a_base_column_carrying_identity_or_the_version_is_refused() {
             "the refusal of a base kept in {what} does not name it: {message}"
         );
     }
+}
+
+const SHOPPING_COLUMNS: [&str; 8] = [
+    "id",
+    "name",
+    "cat",
+    "count",
+    "checked",
+    "deleted_at",
+    "last_seen_remote",
+    "remote_base",
+];
+
+fn compile_shopping_with_key(type_yaml: &str, key: &str) -> anyhow::Result<Arc<CompiledListSync>> {
+    let declared: TypeDefinition = serde_yaml::from_str(type_yaml).expect("the declared type");
+    let spec_yaml =
+        SHOPPING_LIST_SYNC.replace("key: \"[.name, .cat]\"", &format!("key: \"{key}\""));
+    let spec: ListSyncSpec = serde_yaml::from_str(&spec_yaml).expect("the list_sync block");
+    CompiledListSync::compile("shopping", spec, &declared)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// A key may read a column the peer mirrors (`name`, `count`, ...) and
+    /// must not read one only Holon holds and a round writes: the merge base,
+    /// the watermark and the tombstone. Otherwise the key changes under a row
+    /// every round and the row is deleted and inserted forever.
+    #[test]
+    fn a_key_reading_a_column_only_holon_holds_is_refused(
+        column in prop::sample::select(SHOPPING_COLUMNS.to_vec()),
+    ) {
+        let outcome = compile_shopping_with_key(SHOPPING_TYPE, &format!("[.name, .cat, .{column}]"));
+        let held = ["deleted_at", "last_seen_remote", "remote_base"].contains(&column);
+        if held {
+            let message = format!("{:#}", outcome.expect_err("a key reading a Holon-only column was accepted"));
+            prop_assert!(
+                message.contains(&format!("'{column}'")),
+                "the refusal does not name '{column}': {message}"
+            );
+        } else {
+            prop_assert!(outcome.is_ok(), "a key reading '{column}' was refused: {:#}", outcome.err().unwrap());
+        }
+    }
+}
+
+/// One fixed input and no input space beyond it: a numeric column is probed
+/// with numbers, so a key that converts it compiles.
+#[test]
+fn a_key_converting_a_numeric_column_compiles() {
+    let typed = SHOPPING_TYPE.replace(
+        "  - { name: checked, sql_type: INTEGER }",
+        "  - { name: checked, sql_type: INTEGER }\n  - { name: qty, sql_type: INTEGER }",
+    );
+    compile_shopping_with_key(&typed, "[.name, (.qty | tonumber)]")
+        .unwrap_or_else(|e| panic!("a valid key was refused: {e:#}"));
+}
+
+/// A column type the probe has no spelling for is refused by name, not probed
+/// as text.
+#[test]
+fn a_column_type_the_probe_cannot_spell_is_refused_by_name() {
+    let typed = SHOPPING_TYPE.replace(
+        "  - { name: checked, sql_type: INTEGER }",
+        "  - { name: checked, sql_type: INTEGER }\n  - { name: blob, sql_type: BLOB }",
+    );
+    let message = format!(
+        "{:#}",
+        compile_shopping_with_key(&typed, "[.name, .cat]")
+            .expect_err("a column the probe cannot spell was accepted")
+    );
+    assert!(
+        message.contains("blob") && message.contains("BLOB"),
+        "the refusal does not name the column and its type: {message}"
+    );
 }
 
 /// The common case costs nothing to declare: a sidecar that says nothing about
