@@ -607,17 +607,23 @@ fn texts_of(d: &Decision) -> Vec<String> {
     texts
 }
 
-/// A refusal is legal only for a decision with hazardous text, and it names
-/// one of that decision's texts.
+/// A refusal is legal for a decision with hazardous text, and for a keyword
+/// line inside a drawer or block of any text; it names a text of the decision
+/// or one line of it.
 fn check_refusal(e: &BlockDecisionError, d: &Decision, hazard: bool) -> Result<(), TestCaseError> {
-    prop_assert!(hazard, "a decision of plain text was refused: {}", e);
-    let BlockDecisionError::Unencodable { text, .. } = e else {
+    let BlockDecisionError::Unencodable { text, reason, .. } = e else {
         return Err(TestCaseError::fail(format!(
             "not an Unencodable refusal: {e}"
         )));
     };
+    let keyword_line = reason.contains("#+KEY: line") && text.trim_start().starts_with("#+");
     prop_assert!(
-        texts_of(d).contains(text),
+        hazard || keyword_line,
+        "a decision of plain text was refused: {}",
+        e
+    );
+    prop_assert!(
+        texts_of(d).iter().any(|t| t.contains(text.as_str())),
         "the refusal names {:?}, no text of the decision",
         text
     );
@@ -992,6 +998,35 @@ fn a_rationale_keeps_drawer_lines_indentation_and_inner_blank_lines() {
     answered("Because\n:PROPERTIES:\n:ID: x\n:END:\n\n  indented").expect("encodable");
 }
 
+/// Fixed case: org lifts a keyword line out of a drawer or block, so the
+/// rationale is refused and the refusal names that line.
+#[test]
+fn a_keyword_line_inside_a_drawer_or_block_is_refused_naming_the_line() {
+    for (rationale, line) in [
+        (":PROPERTIES:\n#+TITLE: x\n:END:", "#+TITLE: x"),
+        (":LOGBOOK:\n  #+TITLE: x\n:END:", "  #+TITLE: x"),
+        ("#+begin_quote\n#+TITLE: x\n#+end_quote", "#+TITLE: x"),
+    ] {
+        match answered(rationale) {
+            Err(BlockDecisionError::Unencodable { text, .. }) => assert_eq!(text, line),
+            other => panic!("{rationale:?}: {other:?}"),
+        }
+    }
+}
+
+/// Outside a drawer or block, and inside a source block, such a line is text.
+#[test]
+fn a_keyword_line_outside_a_drawer_or_in_a_source_block_reads_back_equal() {
+    for rationale in [
+        "#+TITLE: x",
+        "a\n#+TITLE: x\n:END:",
+        ":PROPERTIES:\n#+TITLE: x",
+        "#+begin_src\n#+TITLE: x\n#+end_src",
+    ] {
+        answered(rationale).expect("encodable");
+    }
+}
+
 #[test]
 fn a_rationale_with_heading_and_keyword_lines_round_trips() {
     answered("Because\n* not a heading\n#+TITLE: nor a title\n#+begin_src\nfn\n#+end_src")
@@ -1129,4 +1164,55 @@ proptest! {
             "{masked} of {n} breach draws are masked"
         );
     }
+}
+
+/// Fixed case of the state the random draws reach only sometimes: a withdrawn
+/// decision, whose headline keyword is CANCELLED and whose withdrawer and
+/// withdrawn drawer keys carry an agent and a timestamp. `stored` asserts
+/// that its org render is a fixed point.
+#[test]
+fn a_withdrawn_decision_stores_as_a_fixed_point_and_reads_back_equal() {
+    for question in ["Jansg", "Eansg", "Cansg"] {
+        for millis in [0, 7, 120, 999] {
+            let d = asking(question);
+            let change = d
+                .apply(
+                    Command::Withdraw {
+                        by: Answerer::parse("agent:orch").unwrap(),
+                    },
+                    instant(3, millis),
+                    &allowed(),
+                )
+                .unwrap();
+            let withdrawn = d.commit(change).unwrap();
+            assert!(matches!(withdrawn.status(), Status::Withdrawn { .. }));
+            assert_eq!(stored(&withdrawn).read(), Ok(withdrawn));
+        }
+    }
+}
+
+/// The generators must keep drawing the withdrawn state, or a green run says
+/// nothing about it. Fixed seed: this measures the strategy, not the code.
+#[test]
+fn the_generator_draws_withdrawn_decisions() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::Config;
+    use proptest::test_runner::RngAlgorithm;
+    use proptest::test_runner::TestRng;
+    use proptest::test_runner::TestRunner;
+    let mut runner = TestRunner::new_with_rng(
+        Config::default(),
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[7u8; 32]),
+    );
+    let strategy = decision_with(false);
+    let withdrawn = (0..2_000)
+        .filter(|_| {
+            let (d, _) = strategy.new_tree(&mut runner).unwrap().current();
+            matches!(d.status(), Status::Withdrawn { .. })
+        })
+        .count();
+    assert!(
+        withdrawn >= 100,
+        "only {withdrawn} of 2000 draws are withdrawn"
+    );
 }

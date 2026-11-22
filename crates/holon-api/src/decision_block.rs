@@ -642,7 +642,102 @@ fn body(field: &'static str, text: &str) -> Result<(), BlockDecisionError> {
             return refuse("org reads a SCHEDULED: or DEADLINE: line as the heading's planning");
         }
     }
+    if let Some(line) = keyword_line_in_container(&lines) {
+        return Err(unencodable(
+            field,
+            line,
+            "org reads a #+KEY: line inside a drawer or block as a keyword, not as text",
+        ));
+    }
     Ok(())
+}
+
+/// How a drawer or block closes, and whether org reads the lines in it raw.
+struct Container {
+    closer: String,
+    raw: bool,
+}
+
+impl Container {
+    fn opened_by(line: &str) -> Option<Self> {
+        let lower = line.trim().to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("#+begin_") {
+            let name = rest.split_whitespace().next().filter(|n| !n.is_empty())?;
+            return Some(Container {
+                closer: format!("#+end_{name}"),
+                raw: ["example", "export", "src"].contains(&name),
+            });
+        }
+        if lower.starts_with("#+begin:") {
+            return Some(Container {
+                closer: "#+end:".to_string(),
+                raw: false,
+            });
+        }
+        let name = lower.strip_prefix(':')?.strip_suffix(':')?;
+        let is_name = !name.is_empty()
+            && name != "end"
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        is_name.then(|| Container {
+            closer: ":end:".to_string(),
+            raw: false,
+        })
+    }
+
+    fn closes(&self, line: &str) -> bool {
+        let lower = line.trim().to_ascii_lowercase();
+        lower == self.closer
+            || (self.closer.starts_with("#+end_") && {
+                lower
+                    .strip_prefix("#+end_")
+                    .and_then(|r| r.split_whitespace().next())
+                    == self.closer.strip_prefix("#+end_")
+            })
+    }
+}
+
+/// The first `#+KEY:` line that stands inside a drawer or a block org reads
+/// as text: the parser lifts it out as a keyword, so it does not read back.
+/// Example, export and source blocks keep their lines raw.
+fn keyword_line_in_container<'l>(lines: &[&'l str]) -> Option<&'l str> {
+    let mut open: Vec<Container> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(top) = open.last() {
+            if top.closes(line) {
+                open.pop();
+                continue;
+            }
+            if top.raw {
+                continue;
+            }
+            if is_keyword(line) {
+                return Some(line);
+            }
+        }
+        if let Some(c) =
+            Container::opened_by(line).filter(|c| lines[i + 1..].iter().any(|l| c.closes(l)))
+        {
+            open.push(c);
+        }
+    }
+    None
+}
+
+fn is_keyword(line: &str) -> bool {
+    let Some((key, _)) = line
+        .trim_start()
+        .strip_prefix("#+")
+        .and_then(|l| l.split_once(':'))
+    else {
+        return false;
+    };
+    let key = key.to_ascii_lowercase();
+    !key.is_empty()
+        && !key.contains(char::is_whitespace)
+        && !key.starts_with("begin")
+        && !key.starts_with("end")
 }
 
 /// Org keeps a `SCHEDULED:` / `DEADLINE:` line as text only as the first,
