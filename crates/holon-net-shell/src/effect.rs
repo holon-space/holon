@@ -187,7 +187,9 @@ impl Runner {
         // on this file is read, and never lands after this runner's own write.
         let write = write_lock(&pid_file);
         let held = lock_write(&write);
-        let mut recorded = match fs::read_to_string(&pid_file) {
+        let read = tracing::debug_span!("pid_file_read", path = %pid_file.display())
+            .in_scope(|| fs::read_to_string(&pid_file));
+        let mut recorded = match read {
             Ok(text) => parse_groups(&text, &pid_file)?,
             Err(source) if source.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(source) => {
@@ -517,8 +519,10 @@ impl Groups {
             path: path.to_owned(),
             source,
         };
-        fs::write(&temp, text).map_err(|source| failed(&temp, source))?;
-        fs::rename(&temp, &self.pid_file).map_err(|source| failed(&self.pid_file, source))?;
+        tracing::debug_span!("pid_file_write", path = %temp.display()).in_scope(|| {
+            fs::write(&temp, text).map_err(|source| failed(&temp, source))?;
+            fs::rename(&temp, &self.pid_file).map_err(|source| failed(&self.pid_file, source))
+        })?;
         let mut live = self.live();
         for (attempt, abandon) in written {
             // A run with the same attempt id may have replaced the entry since.

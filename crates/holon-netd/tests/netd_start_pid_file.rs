@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -166,6 +167,9 @@ struct HoldPlan {
     beat: Beat,
     /// A second start on the same state directory while the write is held.
     second: bool,
+    /// How long the test holds the held net's `.lock` before the start: the
+    /// start reaches the held access only once the lock is let go.
+    lock: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +291,20 @@ fn beat() -> impl Strategy<Value = Beat> {
     prop_oneof![Just(Beat::Outside), Just(Beat::SameTask)]
 }
 
+/// The start waits at most one second for a `.lock`; the longest hold leaves
+/// it 400 ms to take the lock once let go.
+const LOCK_MAX: Duration = Duration::from_millis(600);
+
+/// None, or a hold that ends before or after [`WINDOW`].
+fn lock() -> impl Strategy<Value = Duration> {
+    let window = WINDOW.as_millis() as u64;
+    prop_oneof![
+        Just(Duration::ZERO),
+        (1..window).prop_map(Duration::from_millis),
+        (window..=LOCK_MAX.as_millis() as u64).prop_map(Duration::from_millis),
+    ]
+}
+
 fn held_case() -> impl Strategy<Value = Case> {
     (
         flavor(),
@@ -304,6 +322,7 @@ fn held_case() -> impl Strategy<Value = Case> {
         ],
         beat(),
         any::<bool>(),
+        lock(),
     )
         // netd asserts on such a pgid; a start that panics
         // holds no write, and the unheld case draws it.
@@ -318,25 +337,29 @@ fn held_case() -> impl Strategy<Value = Case> {
                 )
             })
         })
-        .prop_map(|(flavor, mut nets, held, (point, end), beat, second)| {
-            let net = held.index(nets.len());
-            // The held write's temporary path is the test's FIFO.
-            if let (Point::Write, Prior::Written { stale_temp, .. }) = (point, &mut nets[net].prior)
-            {
-                *stale_temp = None;
-            }
-            Case {
-                flavor,
-                nets,
-                hold: Some(HoldPlan {
-                    net,
-                    point,
-                    end,
-                    beat,
-                    second,
-                }),
-            }
-        })
+        .prop_map(
+            |(flavor, mut nets, held, (point, end), beat, second, lock)| {
+                let net = held.index(nets.len());
+                // The held write's temporary path is the test's FIFO.
+                if let (Point::Write, Prior::Written { stale_temp, .. }) =
+                    (point, &mut nets[net].prior)
+                {
+                    *stale_temp = None;
+                }
+                Case {
+                    flavor,
+                    nets,
+                    hold: Some(HoldPlan {
+                        net,
+                        point,
+                        end,
+                        beat,
+                        second,
+                        lock,
+                    }),
+                }
+            },
+        )
 }
 
 fn unheld_case() -> impl Strategy<Value = Case> {
@@ -356,6 +379,10 @@ enum Want {
         line: String,
     },
     Unreadable {
+        net: usize,
+    },
+    /// The held write went through and its rename was refused.
+    RenameRefused {
         net: usize,
     },
     /// The read finds no file, and the write of the temporary file fails.
@@ -380,6 +407,7 @@ impl Want {
         match self {
             Want::Line { net, .. }
             | Want::Unreadable { net }
+            | Want::RenameRefused { net }
             | Want::Unwritable { net }
             | Want::Duplicate { net }
             | Want::Panic { net }
@@ -431,7 +459,7 @@ fn want_of(case: &Case, with_hold: bool) -> Want {
                 .as_ref()
                 .is_some_and(|h| h.net == i && h.end == End::FailRename)
         {
-            return Want::Unreadable { net: i };
+            return Want::RenameRefused { net: i };
         }
     }
     Want::Started
@@ -603,16 +631,77 @@ impl io::Write for Capture {
     }
 }
 
+/// The pid-file accesses a start began, as span name and path, from every
+/// thread.
+static ACCESSES: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+
+const READ: &str = "pid_file_read";
+const WRITE: &str = "pid_file_write";
+
+struct Accesses;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Accesses {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _: &tracing::span::Id,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut path = PathField(None);
+        attrs.record(&mut path);
+        let path = path.0.expect("a pid-file span names its path");
+        ACCESSES
+            .lock()
+            .unwrap()
+            .push((attrs.metadata().name(), path));
+    }
+}
+
+struct PathField(Option<String>);
+
+impl tracing::field::Visit for PathField {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "path" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+}
+
+/// Waits until a start began the pid-file access `span` on `path`.
+fn began(span: &str, path: &Path) -> Result<(), String> {
+    let path = path.display().to_string();
+    eventually(|| {
+        match ACCESSES
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, p)| *name == span && *p == path)
+        {
+            true => Ok(()),
+            false => Err(format!("no start began `{span}` on {path:?}")),
+        }
+    })
+}
+
 /// netd reports a leftover group by a warning only; every thread's warnings
-/// land in one buffer.
+/// land in one buffer. The pid-file access spans land in [`ACCESSES`].
 fn capture_warnings() {
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(|| Capture)
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(|| Capture)
+                    .with_ansi(false)
+                    .with_filter(tracing_subscriber::filter::LevelFilter::WARN),
+            )
+            .with(
+                Accesses.with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                    meta.is_span() && [READ, WRITE].contains(&meta.name())
+                })),
+            );
         tracing::subscriber::set_global_default(subscriber).expect("one global subscriber");
     });
 }
@@ -965,7 +1054,7 @@ fn mismatch(lab: &Lab, want: &Want, outcome: &Outcome, which: &str) -> Option<St
             }),
         ) => *named == lab.names[*net] && *path == lab.pid(*net) && refused == line,
         (
-            Want::Unreadable { net },
+            Want::Unreadable { net } | Want::RenameRefused { net },
             Err(NetdError::Shell {
                 net: named,
                 source: ShellError::PidFile { path, .. },
@@ -1155,6 +1244,26 @@ fn reaches_the_held_access(case: &Case) -> bool {
         .is_none_or(|refused| refused > hold.net || (refused == hold.net && read_refuses))
 }
 
+/// Holds `<pid file>.lock` as a runner of another process would, and lets go
+/// of it after `hold`.
+fn hold_lock(pid: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+    let mut path = pid.as_os_str().to_owned();
+    path.push(".lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    // SAFETY: `file` is an open descriptor.
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(locked, 0, "flock {path:?}: {}", io::Error::last_os_error());
+    std::thread::spawn(move || {
+        std::thread::sleep(hold);
+        drop(file);
+    })
+}
+
 fn play(case: &Case) -> Vec<String> {
     capture_warnings();
     let lab = lab(case);
@@ -1200,16 +1309,23 @@ fn play(case: &Case) -> Vec<String> {
                 })
                 .expect("an idle runtime runs a task");
             }
+            let lock =
+                (plan.lock > Duration::ZERO).then(|| hold_lock(&lab.pid(plan.net), plan.lock));
             let from = Instant::now();
             let first = rt.start(
                 lab.config(),
                 (plan.beat == Beat::SameTask).then(|| Arc::clone(&beats)),
             );
+            let held_at = match plan.point {
+                Point::Read => (READ, lab.pid(plan.net)),
+                Point::Write => (WRITE, lab.temp(plan.net)),
+            };
+            failures.extend(began(held_at.0, &held_at.1).err());
             // The second start comes once the first holds the access, so the
             // first holds every pid file up to the held one.
-            std::thread::sleep(WINDOW / 2);
             let second = plan.second.then(|| rt.start(lab.config(), None));
-            std::thread::sleep(WINDOW / 2);
+            // Load, not evidence: the bound is checked over this hold.
+            std::thread::sleep(WINDOW);
             let to = Instant::now();
             let gap = largest_gap(from, to, &beats.lock().unwrap());
             if let Err(e) = holon_api::duration_budget::DurationBudget::small(
@@ -1272,6 +1388,24 @@ fn play(case: &Case) -> Vec<String> {
             } else {
                 ("start", first.outcome())
             };
+            // The read is the one access before the held write that refuses
+            // the pid file by its own path.
+            if plan.end == End::FailRename
+                && drained.is_none()
+                && let (
+                    _,
+                    Outcome::Answered(Err(NetdError::Shell {
+                        source: ShellError::PidFile { path, .. },
+                        ..
+                    })),
+                ) = &main
+                && *path == lab.pid(plan.net)
+            {
+                failures.push(format!(
+                    "{}: start refused the pid file {path:?} at its read, before any held write; wanted its rename refused after the held write",
+                    main.0
+                ));
+            }
             let second = second.map(|s| ("the second start", s.outcome()));
             // A start that succeeds holds its pid files: a second start that
             // waits for them while it lives is refused at the first net.
@@ -1294,8 +1428,11 @@ fn play(case: &Case) -> Vec<String> {
                     outcomes.extend([main.1, second.1]);
                 }
                 (_, second) => {
+                    // A second start reads the pid file that a refused rename
+                    // left a directory.
                     let second_want = match want {
                         Want::Started => in_use.clone(),
+                        Want::RenameRefused { net } => Want::Unreadable { net },
                         _ => want.clone(),
                     };
                     failures.extend(mismatch(&lab, &want, &main.1, main.0));
@@ -1305,6 +1442,9 @@ fn play(case: &Case) -> Vec<String> {
                         outcomes.push(outcome);
                     }
                 }
+            }
+            if let Some(lock) = lock {
+                lock.join().expect("the lock holder does not panic");
             }
             drained_bytes = drained.as_ref().map(|d| d.first.clone());
             fifo_read = _feeder
@@ -1352,19 +1492,55 @@ fn play(case: &Case) -> Vec<String> {
     failures
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 48, failure_persistence: None, ..ProptestConfig::default() })]
-
-    #[test]
-    fn a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write(
-        case in held_case()
-    ) {
-        // A start that refuses before the held net holds nothing; the unheld
-        // property draws those starts.
-        prop_assume!(reaches_the_held_access(&case), "the start reaches the held access");
-        let failures = play(&case);
-        prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+/// One net with no pid file whose write is held and whose rename then fails.
+fn failed_rename_case(suffix: &str, lock: Duration) -> Case {
+    Case {
+        flavor: Flavor::MultiThread(2),
+        nets: vec![NetPlan {
+            suffix: suffix.to_owned(),
+            prior: Prior::Absent,
+            same_name_as: None,
+        }],
+        hold: Some(HoldPlan {
+            net: 0,
+            point: Point::Write,
+            end: End::FailRename,
+            beat: Beat::Outside,
+            second: false,
+            lock,
+        }),
     }
+}
+
+/// Held cases that went red, run before the drawn ones. The second reaches
+/// its pid-file read only after the hold has begun.
+fn kept_held_cases() -> Vec<Case> {
+    vec![
+        failed_rename_case("\u{feff}U{1\u{10a6d1}Mu<", Duration::ZERO),
+        failed_rename_case("", WINDOW + BOUND / 2),
+    ]
+}
+
+#[test]
+fn a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write() {
+    for case in kept_held_cases() {
+        assert!(
+            reaches_the_held_access(&case),
+            "{case:?} reaches the held access"
+        );
+        let failures = play(&case);
+        assert!(failures.is_empty(), "{case:?}:\n{}", failures.join("\n"));
+    }
+    proptest!(
+        ProptestConfig { cases: 48, failure_persistence: None, ..ProptestConfig::default() },
+        |(case in held_case())| {
+            // A start that refuses before the held net holds nothing; the
+            // unheld property draws those starts.
+            prop_assume!(reaches_the_held_access(&case), "the start reaches the held access");
+            let failures = play(&case);
+            prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    );
 }
 
 proptest! {

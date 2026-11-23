@@ -5936,6 +5936,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "workspace-hack 0.1.0",
 ]
 
