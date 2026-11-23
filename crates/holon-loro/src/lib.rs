@@ -51,6 +51,8 @@ pub mod device_pairing_op;
 mod doc_lock;
 pub mod event_bus;
 pub mod event_ring;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod foreign_root;
 
 #[cfg(all(
     feature = "iroh-sync",

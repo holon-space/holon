@@ -33,6 +33,10 @@ use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
 use holon_frontend::platform::BootStep;
+use holon_loro::foreign_root::ForeignRootKind;
+use holon_loro::foreign_root::ForeignRootValue;
+use holon_loro::foreign_root::foreign_root_kind;
+use holon_loro::loro_entity_operations::TYPE_DECLARATIONS_ROOT;
 use proptest::prelude::*;
 
 struct Booted {
@@ -130,6 +134,9 @@ enum Corruption {
     Empty,
     /// A Loro map value that is not a string.
     NonString,
+    /// A non-empty root of another kind under the name of the type
+    /// declarations map, as a peer may write one.
+    ForeignRoot(ForeignRootKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,7 +168,7 @@ fn corrupt_text(corruption: Corruption) -> String {
             text
         }
         Corruption::Empty => String::new(),
-        Corruption::NonString => unreachable!("not text"),
+        Corruption::NonString | Corruption::ForeignRoot(_) => unreachable!("not text"),
     }
 }
 
@@ -207,28 +214,65 @@ async fn plant(booted: &Booted, key: &str, corruption: Corruption, home: Home) {
             .expect("insert an unreadable type_declaration row");
         }
         Home::LoroMap => {
-            let doc = booted
-                .injector
-                .try_resolve::<holon_loro::LoroDocumentStore>()
-                .expect("a CRDT session registers a LoroDocumentStore")
-                .get_doc(holon_loro::loro_document_store::DocScope::Global)
+            global_doc(booted)
                 .await
-                .expect("the Global doc");
-            doc.with_write(holon_loro::write_origin::WriteOrigin::BlockOps, |txn| {
-                let map = txn.get_map(holon_loro::loro_entity_operations::TYPE_DECLARATIONS_ROOT);
-                match corruption {
-                    Corruption::NonString => map.insert(key, 7i64)?,
-                    other => map.insert(key, corrupt_text(other))?,
-                };
-                Ok(())
-            })
-            .expect("write an unreadable type-declaration entry");
+                .with_write(holon_loro::write_origin::WriteOrigin::BlockOps, |txn| {
+                    let map = txn.get_map(TYPE_DECLARATIONS_ROOT);
+                    match corruption {
+                        Corruption::NonString => map.insert(key, 7i64)?,
+                        Corruption::ForeignRoot(kind) => {
+                            kind.plant(txn.doc(), TYPE_DECLARATIONS_ROOT)?
+                        }
+                        other => map.insert(key, corrupt_text(other))?,
+                    };
+                    Ok(())
+                })
+                .expect("write an unreadable type-declaration entry");
         }
     }
 }
 
+async fn global_doc(booted: &Booted) -> Arc<holon_loro::loro_document::LoroDocument> {
+    booted
+        .injector
+        .try_resolve::<holon_loro::LoroDocumentStore>()
+        .expect("a CRDT session registers a LoroDocumentStore")
+        .get_doc(holon_loro::loro_document_store::DocScope::Global)
+        .await
+        .expect("the Global doc")
+}
+
+fn foreign_roots(case: &Case) -> impl Iterator<Item = (usize, ForeignRootKind)> + '_ {
+    case.unreadable
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (corruption, _))| match corruption {
+            Corruption::ForeignRoot(kind) => Some((i, *kind)),
+            _ => None,
+        })
+}
+
+async fn foreign_root_values(
+    booted: &Booted,
+    case: &Case,
+) -> Vec<(ForeignRootKind, ForeignRootValue)> {
+    if foreign_roots(case).next().is_none() {
+        return Vec::new();
+    }
+    let doc = global_doc(booted).await;
+    foreign_roots(case)
+        .map(|(_, kind)| {
+            let value = doc
+                .with_read(|doc| Ok(kind.value(doc, TYPE_DECLARATIONS_ROOT)))
+                .expect("read the foreign root");
+            (kind, value)
+        })
+        .collect()
+}
+
 async fn check_case(case: &Case) {
     let dir = tempfile::tempdir().expect("create tempdir");
+    let planted;
     {
         let first = boot(dir.path(), case.crdt).await;
         for i in 0..case.valid {
@@ -254,7 +298,9 @@ async fn check_case(case: &Case) {
             .expect("create a row");
         }
         for (i, (corruption, home)) in case.unreadable.iter().enumerate() {
-            plant(&first, &bad_name(i), *corruption, *home).await;
+            if !matches!(corruption, Corruption::ForeignRoot(_)) {
+                plant(&first, &bad_name(i), *corruption, *home).await;
+            }
         }
         for i in 0..case.seat_refused {
             authority(&first)
@@ -263,6 +309,18 @@ async fn check_case(case: &Case) {
                 .await
                 .expect("store a definition the seat refuses");
         }
+        // Last, so the name resolves to it: a foreign root that a later map
+        // write hides is passed over by every read.
+        for (i, kind) in foreign_roots(case) {
+            plant(
+                &first,
+                &bad_name(i),
+                Corruption::ForeignRoot(kind),
+                Home::LoroMap,
+            )
+            .await;
+        }
+        planted = foreign_root_values(&first, case).await;
         holon_app::shutdown_session(&first.injector)
             .await
             .expect("shut the first session down");
@@ -306,14 +364,20 @@ async fn check_case(case: &Case) {
                 );
             }
             for (i, (corruption, _)) in case.unreadable.iter().enumerate() {
+                let key = match corruption {
+                    Corruption::ForeignRoot(kind) => {
+                        kind.root_id(TYPE_DECLARATIONS_ROOT).to_string()
+                    }
+                    _ => bad_name(i),
+                };
                 let line = why
                     .lines()
-                    .find(|l| l.contains(&format!("'{}':", bad_name(i))))
-                    .unwrap_or_else(|| panic!("{} is named: {why}", bad_name(i)));
-                let expected = if *corruption == Corruption::NonString {
-                    "not a JSON string"
-                } else {
-                    "not a TypeDefinition"
+                    .find(|l| l.contains(&format!("'{key}':")))
+                    .unwrap_or_else(|| panic!("{key} is named: {why}"));
+                let expected = match corruption {
+                    Corruption::NonString => "not a JSON string",
+                    Corruption::ForeignRoot(_) => "unread",
+                    _ => "not a TypeDefinition",
                 };
                 assert!(
                     line.contains(expected),
@@ -326,6 +390,11 @@ async fn check_case(case: &Case) {
             );
             reports.push(why.clone());
         }
+        assert_eq!(
+            foreign_root_values(&booted, case).await,
+            planted,
+            "the boot leaves the foreign root as the peer wrote it"
+        );
         for i in 0..case.valid {
             let name = valid_name(i);
             dispatch(
@@ -374,36 +443,52 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         Just(Corruption::OldShape),
         Just(Corruption::Empty),
         Just(Corruption::NonString),
+        foreign_root_kind().prop_map(Corruption::ForeignRoot),
     ];
     (
         any::<bool>(),
-        1usize..=4,
+        // Zero leaves the type declarations map empty or absent.
+        0usize..=4,
         proptest::collection::vec((corruption, any::<bool>()), 0..=3),
         0usize..=2,
     )
-        .prop_map(|(crdt, valid, rows, seat_refused)| Case {
-            crdt,
-            valid,
-            seat_refused,
-            unreadable: rows
-                .into_iter()
-                .map(|(corruption, in_loro)| {
-                    // A Loro map exists only under the CRDT authority, and a
-                    // non-string value only fits a map.
-                    let home = if crdt && (in_loro || corruption == Corruption::NonString) {
-                        Home::LoroMap
-                    } else {
-                        Home::SqlTable
-                    };
-                    let corruption =
-                        if home == Home::SqlTable && corruption == Corruption::NonString {
+        .prop_map(|(crdt, valid, rows, seat_refused)| {
+            let mut foreign_drawn = false;
+            Case {
+                crdt,
+                valid,
+                seat_refused,
+                unreadable: rows
+                    .into_iter()
+                    // One foreign root per doc: a second one hides
+                    // behind the first, and no read sees it.
+                    .filter(|(corruption, _)| {
+                        let foreign = matches!(corruption, Corruption::ForeignRoot(_));
+                        let keep = !(foreign && foreign_drawn);
+                        foreign_drawn |= foreign;
+                        keep
+                    })
+                    .map(|(corruption, in_loro)| {
+                        // A Loro map exists only under the CRDT authority, and
+                        // a non-string value or a foreign root only fits a doc.
+                        let doc_only = matches!(
+                            corruption,
+                            Corruption::NonString | Corruption::ForeignRoot(_)
+                        );
+                        let home = if crdt && (in_loro || doc_only) {
+                            Home::LoroMap
+                        } else {
+                            Home::SqlTable
+                        };
+                        let corruption = if home == Home::SqlTable && doc_only {
                             Corruption::InvalidJson
                         } else {
                             corruption
                         };
-                    (corruption, home)
-                })
-                .collect(),
+                        (corruption, home)
+                    })
+                    .collect(),
+            }
         })
 }
 
@@ -424,7 +509,7 @@ fn fixed(crdt: bool, valid: usize, unreadable: &[(Corruption, Home)], seat_refus
     }
 }
 
-fn fixed_examples() -> [Case; 5] {
+fn fixed_examples() -> [Case; 7] {
     [
         fixed(false, 1, &[(Corruption::OldShape, Home::SqlTable)], 0),
         fixed(true, 2, &[(Corruption::OldShape, Home::SqlTable)], 0),
@@ -446,6 +531,24 @@ fn fixed_examples() -> [Case; 5] {
                 (Corruption::Empty, Home::SqlTable),
             ],
             2,
+        ),
+        fixed(
+            true,
+            2,
+            &[(
+                Corruption::ForeignRoot(ForeignRootKind::List),
+                Home::LoroMap,
+            )],
+            0,
+        ),
+        fixed(
+            true,
+            0,
+            &[(
+                Corruption::ForeignRoot(ForeignRootKind::Counter),
+                Home::LoroMap,
+            )],
+            0,
         ),
     ]
 }
@@ -475,6 +578,17 @@ fn example_two_unreadable_entries_in_two_homes() {
 #[test]
 fn example_unreadable_and_seat_refused_entries_merge_in_key_order() {
     run(&fixed_examples()[4]);
+}
+
+#[test]
+fn example_list_root_under_the_type_declarations_name() {
+    run(&fixed_examples()[5]);
+}
+
+/// A counter root is never empty to name resolution, and no map root exists.
+#[test]
+fn example_counter_root_and_no_type_declarations_map() {
+    run(&fixed_examples()[6]);
 }
 
 /// The SQL `definition` column is NOT NULL, so a row without a definition

@@ -1,0 +1,71 @@
+//! A root of a non-map kind under the name of a root map, as a peer may write
+//! one: Loro types a root by name and kind, so both roots coexist.
+
+use loro::ContainerID;
+use loro::ContainerType;
+use loro::LoroDoc;
+use loro::LoroResult;
+use loro::LoroValue;
+use loro::ValueOrContainer;
+use proptest::prelude::Strategy;
+
+/// What [`ForeignRootKind::value`] reads, for a crate that does not name
+/// `loro`.
+pub type ForeignRootValue = LoroValue;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignRootKind {
+    List,
+    MovableList,
+    Text,
+    Tree,
+    Counter,
+}
+
+impl ForeignRootKind {
+    pub const ALL: [Self; 5] = [
+        Self::List,
+        Self::MovableList,
+        Self::Text,
+        Self::Tree,
+        Self::Counter,
+    ];
+
+    pub fn container_type(self) -> ContainerType {
+        match self {
+            Self::List => ContainerType::List,
+            Self::MovableList => ContainerType::MovableList,
+            Self::Text => ContainerType::Text,
+            Self::Tree => ContainerType::Tree,
+            Self::Counter => ContainerType::Counter,
+        }
+    }
+
+    pub fn root_id(self, name: &str) -> ContainerID {
+        ContainerID::new_root(name, self.container_type())
+    }
+
+    /// The value of the root `name` of this kind.
+    pub fn value(self, doc: &LoroDoc, name: &str) -> LoroValue {
+        let root = doc
+            .get_container(self.root_id(name))
+            .expect("a root id names a container");
+        ValueOrContainer::Container(root).get_deep_value()
+    }
+
+    /// Writes one element into the root `name` of this kind, so name
+    /// resolution sees a non-empty root.
+    pub fn plant(self, doc: &LoroDoc, name: &str) -> LoroResult<()> {
+        match self {
+            Self::List => doc.get_list(name).push("foreign").map(drop),
+            Self::MovableList => doc.get_movable_list(name).push("foreign").map(drop),
+            Self::Text => doc.get_text(name).insert(0, "foreign"),
+            Self::Tree => doc.get_tree(name).create(None).map(drop),
+            Self::Counter => doc.get_counter(name).increment(1.0),
+        }
+    }
+}
+
+pub fn foreign_root_kind() -> impl Strategy<Value = ForeignRootKind> {
+    proptest::sample::select(ForeignRootKind::ALL.to_vec())
+}
