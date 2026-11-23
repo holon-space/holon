@@ -27,11 +27,12 @@ use holon_api::decision::Prose;
 use holon_api::decision::Rule;
 use holon_api::decision::Status;
 use holon_api::decision::TextSite;
-use holon_api::decision_block;
+use holon_api::decision_block::ANSWER_TITLE;
 use holon_api::decision_block::BlockDecisionError;
 use holon_api::types::TaskState;
 use holon_org_format::OrgBlockExt;
 use holon_org_format::OrgRenderer;
+use holon_org_format::decision_block;
 use holon_org_format::parse_org_file;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
@@ -206,7 +207,7 @@ impl Vault {
 
     fn read(&self) -> Result<Decision, BlockDecisionError> {
         let (block, children) = self.decision();
-        decision_block::parse(&block, &children)
+        holon_api::decision_block::parse(&block, &children)
     }
 }
 
@@ -608,19 +609,24 @@ fn texts_of(d: &Decision) -> Vec<String> {
     texts
 }
 
-/// A refusal is legal for a decision with hazardous text, and for a keyword
-/// line inside a drawer or block of any text; it names a text of the decision
-/// or one line of it.
+/// A refusal is legal for a decision with hazardous text, and for one with a
+/// rationale org does not give back as written; it names a text of the
+/// decision or one line of it.
 fn check_refusal(e: &BlockDecisionError, d: &Decision, hazard: bool) -> Result<(), TestCaseError> {
-    let BlockDecisionError::Unencodable { text, reason, .. } = e else {
+    let BlockDecisionError::Unencodable { text, .. } = e else {
         return Err(TestCaseError::fail(format!(
             "not an Unencodable refusal: {e}"
         )));
     };
-    let keyword_line = reason.contains("#+KEY: line") && text.trim_start().starts_with("#+");
+    let org_changes_a_rationale = || {
+        d.answers()
+            .iter()
+            .filter_map(|a| a.rationale())
+            .any(|r| !org_keeps(r.as_str()))
+    };
     prop_assert!(
-        hazard || keyword_line,
-        "a decision of plain text was refused: {}",
+        hazard || org_changes_a_rationale(),
+        "a decision org keeps as written was refused: {}",
         e
     );
     prop_assert!(
@@ -990,21 +996,33 @@ fn answer_change(d: &Decision, rationale: &str) -> Change {
     .unwrap()
 }
 
-/// The operations that store `rationale` as an answer, before any org check.
-fn answer_ops(rationale: &str) -> (Vault, Vec<Operation>, Decision) {
+/// The operations that store `rationale` as an answer with no org check in
+/// the way: the adapter's operations for a plain rationale, with the answer
+/// text swapped in.
+fn unchecked_answer_ops(rationale: &str) -> (Vault, Vec<Operation>, Decision) {
+    let d = open_decision();
+    let mut vault = stored(&d);
+    let (_, children) = vault.decision();
+    let mint = vault.mint();
+    let mut ops = decision_block::change_ops(&answer_change(&d, "x"), &children, || mint)
+        .expect("a plain rationale encodes");
+    assert_eq!(ops.len(), 1, "an answer is stored by one create: {ops:?}");
+    ops[0].params.insert(
+        "content".to_string(),
+        Value::String(format!("{ANSWER_TITLE}\n{rationale}")),
+    );
+    let next = d.commit(answer_change(&d, rationale)).unwrap();
+    (vault, ops, next)
+}
+
+fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
     let d = open_decision();
     let change = answer_change(&d, rationale);
     let mut vault = stored(&d);
     let (_, children) = vault.decision();
     let mint = vault.mint();
-    let ops = decision_block::change_ops(&change, &children, || mint).expect("adapter accepts");
+    let ops = decision_block::change_ops(&change, &children, || mint)?;
     let next = d.commit(change).unwrap();
-    (vault, ops, next)
-}
-
-fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
-    let (mut vault, ops, next) = answer_ops(rationale);
-    holon_org_format::refuse_unreadable_content(&ops)?;
     vault.apply(&ops);
     vault.round_trip_org();
     assert_eq!(vault.read(), Ok(next.clone()));
@@ -1014,7 +1032,7 @@ fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
 /// Whether org gives the stored answer back unchanged with no refusal in the
 /// way: the ground truth the refusal must agree with.
 fn org_keeps(rationale: &str) -> bool {
-    let (mut vault, ops, next) = answer_ops(rationale);
+    let (mut vault, ops, next) = unchecked_answer_ops(rationale);
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vault.apply(&ops);
         vault.round_trip_org();
@@ -1373,4 +1391,44 @@ fn the_generator_draws_withdrawn_decisions() {
         withdrawn >= 100,
         "only {withdrawn} of 2000 draws are withdrawn"
     );
+}
+
+/// The adapter's own write path, as the stored-decision and change properties
+/// drive it: a write reads back equal, or is refused naming a line.
+fn change_path_equal_or_refused(rationale: &str) -> Result<(), TestCaseError> {
+    let d = open_decision();
+    let change = answer_change(&d, rationale);
+    let mut vault = stored(&d);
+    let (_, children) = vault.decision();
+    let mint = vault.mint();
+    let next = d.commit(change.clone()).unwrap();
+    match decision_block::change_ops(&change, &children, || mint) {
+        Ok(ops) => {
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                vault.apply(&ops);
+                vault.round_trip_org();
+                vault.read()
+            }));
+            prop_assert!(
+                matches!(&read, Ok(Ok(r)) if *r == next),
+                "{rationale:?}: change_ops accepted it, and org changes it"
+            );
+        }
+        Err(BlockDecisionError::Unencodable { text, .. }) => prop_assert!(
+            rationale.split('\n').any(|l| l == text),
+            "{rationale:?}: the refusal names {text:?}, no line of it"
+        ),
+        Err(e) => prop_assert!(false, "{rationale:?}: {e}"),
+    }
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn a_change_of_any_rationale_reads_back_or_is_refused(rationale in nested_rationale()) {
+        for fixed in [":PROPERTIES:\n#+TITLE: x\n:END:", ":LOGBOOK:\n#+BEGINX: x\n:END:"] {
+            change_path_equal_or_refused(fixed)?;
+        }
+        change_path_equal_or_refused(&rationale)?;
+    }
 }

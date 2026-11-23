@@ -18,6 +18,7 @@
 //! crate so older import paths keep resolving.
 
 mod comma_escape;
+pub mod decision_block;
 pub mod dense;
 pub mod drawer;
 mod encodable;
@@ -53,7 +54,6 @@ pub use drawer::TypedDrawerKey;
 pub use drawer::UnrepresentableId;
 pub use drawer::UnrepresentableKey;
 pub use drawer::ValueCarrier;
-pub use encodable::refuse_unreadable_content;
 pub use inline_marks::SourceContentOffsets;
 pub use inline_marks::expected_reparse;
 pub use inline_marks::extract_block_marks;

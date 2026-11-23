@@ -90,14 +90,16 @@ fn check(content: &str) -> Result<(), BlockDecisionError> {
 
 /// Refuses `ops` that create a block whose multi-line content org would not
 /// read back as written.
-pub fn refuse_unreadable_content(ops: &[Operation]) -> Result<(), BlockDecisionError> {
+pub(crate) fn refuse_unreadable_content(ops: &[Operation]) -> Result<(), BlockDecisionError> {
     for op in ops.iter().filter(|op| op.op_name.as_str() == "create") {
         let content = op
             .params
             .get("content")
             .and_then(|v| v.as_string())
             .unwrap_or_else(|| panic!("a create operation carries text content: {op:?}"));
-        check(content)?;
+        if content.contains('\n') {
+            check(content)?;
+        }
     }
     Ok(())
 }
