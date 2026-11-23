@@ -64,6 +64,42 @@ impl ForeignRootKind {
             Self::Counter => doc.get_counter(name).increment(1.0),
         }
     }
+
+    /// Deletes every element of the root `name` of this kind, so name
+    /// resolution passes over it unless it is a counter.
+    pub fn empty(self, doc: &LoroDoc, name: &str) -> LoroResult<()> {
+        match self {
+            Self::List => {
+                let list = doc.get_list(name);
+                list.delete(0, list.len())
+            }
+            Self::MovableList => {
+                let list = doc.get_movable_list(name);
+                list.delete(0, list.len())
+            }
+            Self::Text => {
+                let text = doc.get_text(name);
+                text.delete(0, text.len_unicode())
+            }
+            Self::Tree => {
+                let tree = doc.get_tree(name);
+                tree.roots()
+                    .into_iter()
+                    .try_for_each(|node| tree.delete(node))
+            }
+            Self::Counter => {
+                let counter = doc.get_counter(name);
+                counter.decrement(counter.get_value())
+            }
+        }?;
+        let value = self.value(doc, name);
+        assert_eq!(
+            value,
+            self.container_type().default_value(),
+            "{self:?} root emptied"
+        );
+        Ok(())
+    }
 }
 
 pub fn foreign_root_kind() -> impl Strategy<Value = ForeignRootKind> {

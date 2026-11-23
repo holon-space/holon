@@ -134,9 +134,14 @@ enum Corruption {
     Empty,
     /// A Loro map value that is not a string.
     NonString,
-    /// A non-empty root of another kind under the name of the type
-    /// declarations map, as a peer may write one.
-    ForeignRoot(ForeignRootKind),
+    /// A root of another kind under the name of the type declarations map, as
+    /// a peer may write one: emptied or not, written before or after the
+    /// map's entries.
+    ForeignRoot {
+        kind: ForeignRootKind,
+        emptied: bool,
+        first: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,7 +173,7 @@ fn corrupt_text(corruption: Corruption) -> String {
             text
         }
         Corruption::Empty => String::new(),
-        Corruption::NonString | Corruption::ForeignRoot(_) => unreachable!("not text"),
+        Corruption::NonString | Corruption::ForeignRoot { .. } => unreachable!("not text"),
     }
 }
 
@@ -220,8 +225,11 @@ async fn plant(booted: &Booted, key: &str, corruption: Corruption, home: Home) {
                     let map = txn.get_map(TYPE_DECLARATIONS_ROOT);
                     match corruption {
                         Corruption::NonString => map.insert(key, 7i64)?,
-                        Corruption::ForeignRoot(kind) => {
-                            kind.plant(txn.doc(), TYPE_DECLARATIONS_ROOT)?
+                        Corruption::ForeignRoot { kind, emptied, .. } => {
+                            kind.plant(txn.doc(), TYPE_DECLARATIONS_ROOT)?;
+                            if emptied {
+                                kind.empty(txn.doc(), TYPE_DECLARATIONS_ROOT)?;
+                            }
                         }
                         other => map.insert(key, corrupt_text(other))?,
                     };
@@ -242,14 +250,20 @@ async fn global_doc(booted: &Booted) -> Arc<holon_loro::loro_document::LoroDocum
         .expect("the Global doc")
 }
 
-fn foreign_roots(case: &Case) -> impl Iterator<Item = (usize, ForeignRootKind)> + '_ {
+fn foreign_roots(case: &Case) -> impl Iterator<Item = (usize, Corruption)> + '_ {
     case.unreadable
         .iter()
         .enumerate()
-        .filter_map(|(i, (corruption, _))| match corruption {
-            Corruption::ForeignRoot(kind) => Some((i, *kind)),
-            _ => None,
-        })
+        .filter(|(_, (corruption, _))| matches!(corruption, Corruption::ForeignRoot { .. }))
+        .map(|(i, (corruption, _))| (i, *corruption))
+}
+
+async fn plant_foreign_roots(booted: &Booted, case: &Case, first: bool) {
+    for (i, corruption) in foreign_roots(case) {
+        if matches!(corruption, Corruption::ForeignRoot { first: f, .. } if f == first) {
+            plant(booted, &bad_name(i), corruption, Home::LoroMap).await;
+        }
+    }
 }
 
 async fn foreign_root_values(
@@ -261,7 +275,10 @@ async fn foreign_root_values(
     }
     let doc = global_doc(booted).await;
     foreign_roots(case)
-        .map(|(_, kind)| {
+        .map(|(_, corruption)| {
+            let Corruption::ForeignRoot { kind, .. } = corruption else {
+                unreachable!("foreign_roots yields foreign roots")
+            };
             let value = doc
                 .with_read(|doc| Ok(kind.value(doc, TYPE_DECLARATIONS_ROOT)))
                 .expect("read the foreign root");
@@ -275,6 +292,7 @@ async fn check_case(case: &Case) {
     let planted;
     {
         let first = boot(dir.path(), case.crdt).await;
+        plant_foreign_roots(&first, case, true).await;
         for i in 0..case.valid {
             let def = named_type(&valid_name(i));
             dispatch(
@@ -298,7 +316,7 @@ async fn check_case(case: &Case) {
             .expect("create a row");
         }
         for (i, (corruption, home)) in case.unreadable.iter().enumerate() {
-            if !matches!(corruption, Corruption::ForeignRoot(_)) {
+            if !matches!(corruption, Corruption::ForeignRoot { .. }) {
                 plant(&first, &bad_name(i), *corruption, *home).await;
             }
         }
@@ -309,17 +327,7 @@ async fn check_case(case: &Case) {
                 .await
                 .expect("store a definition the seat refuses");
         }
-        // Last, so the name resolves to it: a foreign root that a later map
-        // write hides is passed over by every read.
-        for (i, kind) in foreign_roots(case) {
-            plant(
-                &first,
-                &bad_name(i),
-                Corruption::ForeignRoot(kind),
-                Home::LoroMap,
-            )
-            .await;
-        }
+        plant_foreign_roots(&first, case, false).await;
         planted = foreign_root_values(&first, case).await;
         holon_app::shutdown_session(&first.injector)
             .await
@@ -365,7 +373,7 @@ async fn check_case(case: &Case) {
             }
             for (i, (corruption, _)) in case.unreadable.iter().enumerate() {
                 let key = match corruption {
-                    Corruption::ForeignRoot(kind) => {
+                    Corruption::ForeignRoot { kind, .. } => {
                         kind.root_id(TYPE_DECLARATIONS_ROOT).to_string()
                     }
                     _ => bad_name(i),
@@ -376,7 +384,7 @@ async fn check_case(case: &Case) {
                     .unwrap_or_else(|| panic!("{key} is named: {why}"));
                 let expected = match corruption {
                     Corruption::NonString => "not a JSON string",
-                    Corruption::ForeignRoot(_) => "unread",
+                    Corruption::ForeignRoot { .. } => "unread",
                     _ => "not a TypeDefinition",
                 };
                 assert!(
@@ -443,7 +451,13 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         Just(Corruption::OldShape),
         Just(Corruption::Empty),
         Just(Corruption::NonString),
-        foreign_root_kind().prop_map(Corruption::ForeignRoot),
+        (foreign_root_kind(), any::<bool>(), any::<bool>()).prop_map(|(kind, emptied, first)| {
+            Corruption::ForeignRoot {
+                kind,
+                emptied,
+                first,
+            }
+        }),
     ];
     (
         any::<bool>(),
@@ -453,27 +467,28 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         0usize..=2,
     )
         .prop_map(|(crdt, valid, rows, seat_refused)| {
-            let mut foreign_drawn = false;
+            let mut kinds_drawn = Vec::new();
             Case {
                 crdt,
                 valid,
                 seat_refused,
                 unreadable: rows
                     .into_iter()
-                    // One foreign root per doc: a second one hides
-                    // behind the first, and no read sees it.
-                    .filter(|(corruption, _)| {
-                        let foreign = matches!(corruption, Corruption::ForeignRoot(_));
-                        let keep = !(foreign && foreign_drawn);
-                        foreign_drawn |= foreign;
-                        keep
+                    // A doc holds one root per name and kind.
+                    .filter(|(corruption, _)| match corruption {
+                        Corruption::ForeignRoot { kind, .. } if kinds_drawn.contains(kind) => false,
+                        Corruption::ForeignRoot { kind, .. } => {
+                            kinds_drawn.push(*kind);
+                            true
+                        }
+                        _ => true,
                     })
                     .map(|(corruption, in_loro)| {
                         // A Loro map exists only under the CRDT authority, and
                         // a non-string value or a foreign root only fits a doc.
                         let doc_only = matches!(
                             corruption,
-                            Corruption::NonString | Corruption::ForeignRoot(_)
+                            Corruption::NonString | Corruption::ForeignRoot { .. }
                         );
                         let home = if crdt && (in_loro || doc_only) {
                             Home::LoroMap
@@ -509,7 +524,7 @@ fn fixed(crdt: bool, valid: usize, unreadable: &[(Corruption, Home)], seat_refus
     }
 }
 
-fn fixed_examples() -> [Case; 7] {
+fn fixed_examples() -> [Case; 8] {
     [
         fixed(false, 1, &[(Corruption::OldShape, Home::SqlTable)], 0),
         fixed(true, 2, &[(Corruption::OldShape, Home::SqlTable)], 0),
@@ -536,7 +551,11 @@ fn fixed_examples() -> [Case; 7] {
             true,
             2,
             &[(
-                Corruption::ForeignRoot(ForeignRootKind::List),
+                Corruption::ForeignRoot {
+                    kind: ForeignRootKind::List,
+                    emptied: false,
+                    first: false,
+                },
                 Home::LoroMap,
             )],
             0,
@@ -545,9 +564,36 @@ fn fixed_examples() -> [Case; 7] {
             true,
             0,
             &[(
-                Corruption::ForeignRoot(ForeignRootKind::Counter),
+                Corruption::ForeignRoot {
+                    kind: ForeignRootKind::Counter,
+                    emptied: false,
+                    first: false,
+                },
                 Home::LoroMap,
             )],
+            0,
+        ),
+        fixed(
+            true,
+            2,
+            &[
+                (
+                    Corruption::ForeignRoot {
+                        kind: ForeignRootKind::List,
+                        emptied: false,
+                        first: true,
+                    },
+                    Home::LoroMap,
+                ),
+                (
+                    Corruption::ForeignRoot {
+                        kind: ForeignRootKind::Text,
+                        emptied: true,
+                        first: false,
+                    },
+                    Home::LoroMap,
+                ),
+            ],
             0,
         ),
     ]
@@ -589,6 +635,13 @@ fn example_list_root_under_the_type_declarations_name() {
 #[test]
 fn example_counter_root_and_no_type_declarations_map() {
     run(&fixed_examples()[6]);
+}
+
+/// The map wins the name over both roots: one written before the map's
+/// entries, one emptied after them.
+#[test]
+fn example_roots_the_type_declarations_map_hides() {
+    run(&fixed_examples()[7]);
 }
 
 /// The SQL `definition` column is NOT NULL, so a row without a definition

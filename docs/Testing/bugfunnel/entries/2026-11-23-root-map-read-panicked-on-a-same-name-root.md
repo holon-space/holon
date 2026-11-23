@@ -26,8 +26,10 @@ No generator drew a doc with a same-name root of another kind: the stored-type
 restart PBT planted only map values, and no holon-loro test imported such a doc.
 
 ## Remedy
-`resolve_root` reads the map by its typed id when a non-empty root of another
-kind wins the name; the boot report names that root once and leaves it as it
-is. Pinned by
-`loro_entity_operations::tests::an_imported_root_of_another_kind_leaves_the_map_rows_readable`
+`held_root` reads the map by its typed id when a non-empty root of another
+kind wins the name. The boot read of stored types lists the roots in the doc's
+state and names each root of another kind under the type declarations name
+once, whichever root wins the name; it leaves that root as it is. Pinned by
+`loro_entity_operations::tests::an_imported_root_of_another_kind_leaves_the_map_rows_readable`,
+`loro_entity_operations::tests::the_boot_report_names_every_root_of_another_kind_once`
 and the `ForeignRoot` cases of `crates/holon-app/tests/runtime_type_survives_restart.rs`.

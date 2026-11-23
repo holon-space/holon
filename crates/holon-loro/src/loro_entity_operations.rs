@@ -470,46 +470,37 @@ impl LoroEntityOperations {
 }
 
 /// The root map `root` once the doc holds it. `LoroDoc::get_map` would
-/// register an empty root that shows in this peer's state alone.
+/// register an empty root that shows in this peer's state alone, so only a
+/// non-empty root of another kind, which wins the name, makes the read take
+/// the map by its typed id.
 fn held_root(doc: &LoroDoc, root: &str) -> Option<LoroMap> {
-    resolve_root(doc, root).map
-}
-
-/// What the name of a root map resolves to: the map, and the kind of a
-/// same-name root of another kind when the name resolves to that root.
-struct ResolvedRoot {
-    map: Option<LoroMap>,
-    foreign: Option<ContainerType>,
-}
-
-/// A peer may write a root of another kind under a map's name, and the name
-/// resolves to the last non-empty one, so the map is read by its typed id.
-/// That lookup registers an absent map root, empty in every read value; it
-/// runs only behind a non-empty foreign root.
-fn resolve_root(doc: &LoroDoc, root: &str) -> ResolvedRoot {
     match doc.get_by_path(&[loro::Index::Key(root.into())]) {
-        None => ResolvedRoot {
-            map: None,
-            foreign: None,
-        },
-        Some(ValueOrContainer::Container(loro::Container::Map(m))) => ResolvedRoot {
-            map: Some(m),
-            foreign: None,
-        },
-        Some(ValueOrContainer::Container(foreign)) => ResolvedRoot {
-            // An empty root never hides a non-empty one, so the map is empty
-            // too.
-            map: if resolves_as_empty(&foreign) {
-                None
-            } else {
-                Some(doc.get_map(ContainerID::new_root(root, ContainerType::Map)))
-            },
-            foreign: Some(foreign.get_type()),
-        },
+        None => None,
+        Some(ValueOrContainer::Container(loro::Container::Map(m))) => Some(m),
+        // An empty root never hides a non-empty one, so the map is empty too.
+        Some(ValueOrContainer::Container(foreign)) if resolves_as_empty(&foreign) => None,
+        Some(ValueOrContainer::Container(_)) => {
+            Some(doc.get_map(ContainerID::new_root(root, ContainerType::Map)))
+        }
         Some(ValueOrContainer::Value(v)) => {
             unreachable!("the root name {root:?} resolves to the value {v:?}, not a container")
         }
     }
+}
+
+/// The roots of a kind other than Map under the name `root`, whichever root
+/// the name resolves to. Lists the doc's state, so it decodes every container.
+fn roots_of_another_kind(doc: &LoroDoc, root: &str) -> Vec<ContainerID> {
+    let LoroValue::Map(flat) = doc.with_state(|s| s.get_all_container_value_flat()) else {
+        unreachable!("the flat state of a doc is a map")
+    };
+    // Every kind byte, so a kind this Loro version does not know is named too.
+    (0..=u8::MAX)
+        .map(|byte| ContainerType::try_from_u8(byte).expect("every byte names a container kind"))
+        .filter(|kind| *kind != ContainerType::Map)
+        .map(|kind| ContainerID::new_root(root, kind))
+        .filter(|id| flat.contains_key(id.to_string().as_str()))
+        .collect()
 }
 
 /// Loro's test for a root that name resolution passes over for a non-empty one.
@@ -738,17 +729,17 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
         let held: Vec<(String, std::result::Result<String, String>)> =
             self.doc.with_read(|doc| {
                 let mut held = Vec::new();
-                let resolved = resolve_root(doc, TYPE_DECLARATIONS_ROOT);
-                if let Some(kind) = resolved.foreign {
+                for foreign in roots_of_another_kind(doc, TYPE_DECLARATIONS_ROOT) {
+                    let kind = foreign.container_type();
                     held.push((
-                        ContainerID::new_root(TYPE_DECLARATIONS_ROOT, kind).to_string(),
+                        foreign.to_string(),
                         Err(format!(
                             "a {kind} root under the name of the type declarations map; \
                              it stays, unread"
                         )),
                     ));
                 }
-                if let Some(root) = resolved.map {
+                if let Some(root) = held_root(doc, TYPE_DECLARATIONS_ROOT) {
                     root.for_each(|key, value| {
                         let json = match value {
                             ValueOrContainer::Value(LoroValue::String(json)) => {
@@ -885,10 +876,19 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    enum Import {
+        Snapshot,
+        Updates,
+    }
+
+    /// A peer doc that holds a map root and, under the same name, maybe a root
+    /// of another kind (emptied or not), written before or after the map.
+    #[derive(Clone, Copy, Debug)]
     struct PeerDoc {
         map: MapRoot,
         foreign: Option<(ForeignRootKind, bool)>,
         foreign_first: bool,
+        import: Import,
     }
 
     fn peer_doc() -> impl Strategy<Value = PeerDoc> {
@@ -896,12 +896,48 @@ mod tests {
             proptest::sample::select(vec![MapRoot::Absent, MapRoot::Emptied, MapRoot::Holds]),
             proptest::option::of((foreign_root_kind(), proptest::bool::ANY)),
             proptest::bool::ANY,
+            proptest::sample::select(vec![Import::Snapshot, Import::Updates]),
         )
-            .prop_map(|(map, foreign, foreign_first)| PeerDoc {
+            .prop_map(|(map, foreign, foreign_first, import)| PeerDoc {
                 map,
                 foreign,
                 foreign_first,
+                import,
             })
+    }
+
+    /// The peer doc of `case` with its roots under the name `root`;
+    /// `write_map` writes the map root.
+    fn write_peer(root: &str, case: PeerDoc, write_map: fn(&LoroDoc, MapRoot)) -> LoroDoc {
+        let peer = LoroDoc::new();
+        let foreign = |doc: &LoroDoc| {
+            if let Some((kind, emptied)) = case.foreign {
+                kind.plant(doc, root).unwrap();
+                if emptied {
+                    doc.commit();
+                    kind.empty(doc, root).unwrap();
+                }
+            }
+        };
+        if case.foreign_first {
+            foreign(&peer);
+            peer.commit();
+        }
+        write_map(&peer, case.map);
+        peer.commit();
+        if !case.foreign_first {
+            foreign(&peer);
+        }
+        peer.commit();
+        peer
+    }
+
+    fn import(local: &LoroDoc, peer: &LoroDoc, import: Import) {
+        let mode = match import {
+            Import::Snapshot => loro::ExportMode::Snapshot,
+            Import::Updates => loro::ExportMode::all_updates(),
+        };
+        local.import(&peer.export(mode).unwrap()).unwrap();
     }
 
     fn write_map(doc: &LoroDoc, map: MapRoot) {
@@ -919,25 +955,6 @@ mod tests {
         }
     }
 
-    /// Plants the foreign root; an emptied one loses its element again.
-    fn write_foreign(doc: &LoroDoc, kind: ForeignRootKind, emptied: bool) {
-        kind.plant(doc, ROOT).unwrap();
-        if !emptied {
-            return;
-        }
-        doc.commit();
-        match kind {
-            ForeignRootKind::List => doc.get_list(ROOT).delete(0, 1).unwrap(),
-            ForeignRootKind::MovableList => doc.get_movable_list(ROOT).delete(0, 1).unwrap(),
-            ForeignRootKind::Text => doc.get_text(ROOT).delete(0, 1).unwrap(),
-            ForeignRootKind::Tree => {
-                let tree = doc.get_tree(ROOT);
-                tree.delete(tree.roots()[0]).unwrap()
-            }
-            ForeignRootKind::Counter => doc.get_counter(ROOT).decrement(1.0).unwrap(),
-        }
-    }
-
     fn store_roots(doc: &LoroDoc) -> BTreeSet<String> {
         let LoroValue::Map(flat) = doc.with_state(|s| s.get_all_container_value_flat()) else {
             unreachable!("the flat state of a doc is a map")
@@ -951,32 +968,14 @@ mod tests {
     /// A peer doc as the sync controller meets it: imported into this peer's
     /// doc, its changed entities read from the import event.
     fn check_import(case: PeerDoc) {
-        let peer = LoroDoc::new();
-        let foreign = |doc: &LoroDoc| {
-            if let Some((kind, emptied)) = case.foreign {
-                write_foreign(doc, kind, emptied);
-            }
-        };
-        if case.foreign_first {
-            foreign(&peer);
-            peer.commit();
-        }
-        write_map(&peer, case.map);
-        peer.commit();
-        if !case.foreign_first {
-            foreign(&peer);
-        }
-        peer.commit();
-
+        let peer = write_peer(ROOT, case, write_map);
         let local = LoroDoc::new();
         let changed = Arc::new(Mutex::new(BTreeSet::new()));
         let sink = changed.clone();
         let _sub = local.subscribe_root(Arc::new(move |event| {
             sink.lock().unwrap().extend(changed_entities(&event));
         }));
-        local
-            .import(&peer.export(loro::ExportMode::Snapshot).unwrap())
-            .unwrap();
+        import(&local, &peer, case.import);
         let changed = changed.lock().unwrap().clone();
 
         let roots_before = store_roots(&local);
@@ -1046,6 +1045,7 @@ mod tests {
             map: MapRoot::Holds,
             foreign: Some((ForeignRootKind::List, false)),
             foreign_first: false,
+            import: Import::Snapshot,
         });
     }
 
@@ -1053,6 +1053,107 @@ mod tests {
         #[test]
         fn an_imported_root_of_another_kind_leaves_the_map_rows_readable(case in peer_doc()) {
             check_import(case);
+        }
+    }
+
+    fn write_type_map(doc: &LoroDoc, map: MapRoot) {
+        if let MapRoot::Absent = map {
+            return;
+        }
+        let root = doc.get_map(TYPE_DECLARATIONS_ROOT);
+        root.insert("e0", "not json").unwrap();
+        if let MapRoot::Emptied = map {
+            doc.commit();
+            root.delete("e0").unwrap();
+        }
+    }
+
+    /// The boot read of a doc imported from a peer: the report names every
+    /// root of another kind under the type declarations name once, whichever
+    /// root the name resolves to, beside the map's own entries.
+    fn check_boot_report(case: PeerDoc) {
+        use holon_core::TypeWriteAuthority;
+
+        let peer = write_peer(TYPE_DECLARATIONS_ROOT, case, write_type_map);
+        let doc = Arc::new(LoroDocument::new("boot".to_string()).unwrap());
+        // ALLOW(loro_doc_escape): one thread; the import precedes every read,
+        // and the checks commit first.
+        let local = doc.doc();
+        import(&local, &peer, case.import);
+        let version_before = local.oplog_vv();
+        let deep_before = local.get_deep_value();
+
+        let authority = LoroTypeWriteAuthority::new(doc.clone(), None);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let keys = |stored: &StoredDefinitions| -> Vec<String> {
+            stored.unreadable.iter().map(|u| u.key.clone()).collect()
+        };
+        let first = runtime.block_on(authority.stored_definitions()).unwrap();
+        let second = runtime.block_on(authority.stored_definitions()).unwrap();
+
+        let mut expected = Vec::new();
+        if let Some((kind, emptied)) = case.foreign {
+            let id = kind.root_id(TYPE_DECLARATIONS_ROOT).to_string();
+            let named = first.unreadable.iter().find(|u| u.key == id);
+            // The report names the roots the doc's state holds; an update
+            // import whose ops on a root net to its empty value leaves no
+            // state for a List, Text or Counter root.
+            let held = !emptied || matches!(case.import, Import::Snapshot);
+            if held || named.is_some() {
+                let kind_name = format!("a {} root", kind.container_type());
+                assert!(
+                    named.is_some_and(|u| u.error.contains(&kind_name)),
+                    "{id} is named as {kind_name}: {:?}",
+                    first.unreadable
+                );
+                expected.push(id);
+            }
+        }
+        if let MapRoot::Holds = case.map {
+            expected.push("e0".to_string());
+        }
+        expected.sort();
+        assert_eq!(keys(&first), expected, "{:?}", first.unreadable);
+        assert_eq!(keys(&second), expected, "a second boot read names the same");
+        assert!(first.readable.is_empty(), "{:?}", first.readable);
+
+        local.commit();
+        assert_eq!(
+            local.oplog_vv(),
+            version_before,
+            "the boot read writes nothing"
+        );
+        assert_eq!(
+            local.get_deep_value(),
+            deep_before,
+            "the boot read changes no value"
+        );
+    }
+
+    // Fixed cases: the map wins the name over a list root written before it,
+    // or over an emptied one written after it; a counter arrives as updates.
+    #[test]
+    fn the_boot_report_names_a_root_of_another_kind_that_the_map_hides() {
+        for (foreign, foreign_first, import) in [
+            ((ForeignRootKind::List, false), true, Import::Snapshot),
+            ((ForeignRootKind::List, true), false, Import::Snapshot),
+            ((ForeignRootKind::Counter, false), true, Import::Updates),
+        ] {
+            check_boot_report(PeerDoc {
+                map: MapRoot::Holds,
+                foreign: Some(foreign),
+                foreign_first,
+                import,
+            });
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_boot_report_names_every_root_of_another_kind_once(case in peer_doc()) {
+            check_boot_report(case);
         }
     }
 
