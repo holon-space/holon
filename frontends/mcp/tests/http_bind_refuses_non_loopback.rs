@@ -24,7 +24,8 @@ fn http_on_a_non_loopback_address_exits_without_listening() {
         .port();
 
     // HOME points into the state dir, so the config dir the binary resolves is
-    // a throwaway one and never the developer's own.
+    // a throwaway one and never the developer's own. The binary holds the
+    // keychain grant, so its secrets stay in memory, off the login keychain.
     let mut child = Command::new(env!("CARGO_BIN_EXE_holon-mcp"))
         .arg("--http")
         .arg(format!("0.0.0.0:{port}"))
@@ -32,6 +33,7 @@ fn http_on_a_non_loopback_address_exits_without_listening() {
         .arg(&vault)
         .arg(state.path().join("holon.db"))
         .env("HOME", state.path())
+        .env(holon_secrets::BACKEND_ENV, "memory")
         .env("HOLON_MCP_LOG_FILE", state.path().join("holon-mcp.log"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())

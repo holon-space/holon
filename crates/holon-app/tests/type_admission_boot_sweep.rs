@@ -92,7 +92,7 @@ async fn boot(
         },
         ..Default::default()
     };
-    holon_app::new_from_config_with_di(
+    crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

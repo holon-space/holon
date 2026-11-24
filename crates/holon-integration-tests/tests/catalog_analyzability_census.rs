@@ -54,6 +54,8 @@ const EXPECTED_ANALYZABLE: &[&str] = &[
     "op:block.restore_split",
     "op:block.set_field",
     "op:block.split_block",
+    "op:device.create_device_key",
+    "op:device.load_device_key",
     "op:type-table.drop_refused_table",
     "op:type.declare_type",
     "op:writeback.accept_removal",

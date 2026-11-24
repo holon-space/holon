@@ -71,7 +71,7 @@ async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_conditions::Condition> 
         },
         ..Default::default()
     };
-    let (session, _engine, bus) = holon_app::new_from_config_with_di(
+    let (session, _engine, bus) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

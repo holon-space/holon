@@ -54,7 +54,7 @@ async fn boot(dir: &Path) -> Booted {
         },
         ..Default::default()
     };
-    let (session, engine, bus) = holon_app::new_from_config_with_di(
+    let (session, engine, bus) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

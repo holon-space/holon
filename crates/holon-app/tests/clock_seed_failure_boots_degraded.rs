@@ -52,7 +52,7 @@ async fn boot(dir: &Path) -> (Vec<Condition>, i64) {
         ..Default::default()
     };
     let bus = Arc::new(ConditionBus::new());
-    let (session, engine, ()) = holon_app::new_from_config_with_di(
+    let (session, engine, ()) = crate::isolated_boot::new_from_config_with_di(
         config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

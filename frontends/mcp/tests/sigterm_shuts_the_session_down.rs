@@ -28,12 +28,14 @@ const SHUT_DOWN: &str = "session shut down";
 
 fn spawn_on(vault: &std::path::Path, state: &std::path::Path) -> std::process::Child {
     // HOME points into the state dir, so the config dir the binary resolves is
-    // a throwaway one and never the developer's own.
+    // a throwaway one and never the developer's own. The binary holds the
+    // keychain grant, so its secrets stay in memory, off the login keychain.
     Command::new(env!("CARGO_BIN_EXE_holon-mcp"))
         .arg("--orgmode-root")
         .arg(vault)
         .arg(state.join("holon.db"))
         .env("HOME", state)
+        .env(holon_secrets::BACKEND_ENV, "memory")
         .env("HOLON_MCP_LOG_FILE", state.join("holon-mcp.log"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

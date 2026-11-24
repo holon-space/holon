@@ -40,7 +40,7 @@ async fn boot(vault: &Path, state: &Path) -> anyhow::Result<Booted> {
         },
         ..Default::default()
     };
-    let (session, _engine, injector) = holon_app::new_from_config_with_di(
+    let (session, _engine, injector) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

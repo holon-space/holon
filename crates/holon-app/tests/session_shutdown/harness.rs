@@ -140,43 +140,44 @@ pub async fn boot_a_working_session() -> Booted {
         ..Default::default()
     };
 
-    let (session, engine, (shutdown, reactive, injector)) = holon_app::new_from_config_with_di(
-        holon_config,
-        SessionConfig::new(
-            holon_api::UiInfo::permissive(),
-            std::sync::Arc::new(holon_api::SystemClock),
-        ),
-        dir.path().to_path_buf(),
-        HashSet::new(),
-        conditions.clone(),
-        |injector| {
-            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
-            // The render stack the gpui frontend installs. Without it the
-            // `ReactiveEngine` provider does not resolve, so this boot would
-            // have no UI watcher to orphan.
-            use holon_frontend::reactive::RenderInterpreterInjectorExt;
-            let slot = injector.resolve::<holon_frontend::reactive::BuilderServicesSlot>();
-            injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
-                slot.0.clone(),
-            ));
-            Ok(())
-        },
-        |injector| {
-            let reactive = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
-            // Break the engine↔interpreter cycle by publishing the ONE engine
-            // instance the interpreter renders through.
-            let slot = injector.resolve::<holon_frontend::reactive::BuilderServicesSlot>();
-            let services: Arc<dyn holon_frontend::reactive::BuilderServices> = reactive.clone();
-            let _ = slot.0.set(services);
-            (
-                injector.resolve::<SessionShutdown>(),
-                reactive,
-                injector.clone(),
-            )
-        },
-    )
-    .await
-    .expect("the shared wiring must boot a session");
+    let (session, engine, (shutdown, reactive, injector)) =
+        crate::isolated_boot::new_from_config_with_di(
+            holon_config,
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
+            dir.path().to_path_buf(),
+            HashSet::new(),
+            conditions.clone(),
+            |injector| {
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                // The render stack the gpui frontend installs. Without it the
+                // `ReactiveEngine` provider does not resolve, so this boot
+                // would have no UI watcher to orphan.
+                use holon_frontend::reactive::RenderInterpreterInjectorExt;
+                let slot = injector.resolve::<holon_frontend::reactive::BuilderServicesSlot>();
+                injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(
+                    slot.0.clone(),
+                ));
+                Ok(())
+            },
+            |injector| {
+                let reactive = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
+                // Break the engine↔interpreter cycle by publishing the ONE
+                // engine instance the interpreter renders through.
+                let slot = injector.resolve::<holon_frontend::reactive::BuilderServicesSlot>();
+                let services: Arc<dyn holon_frontend::reactive::BuilderServices> = reactive.clone();
+                let _ = slot.0.set(services);
+                (
+                    injector.resolve::<SessionShutdown>(),
+                    reactive,
+                    injector.clone(),
+                )
+            },
+        )
+        .await
+        .expect("the shared wiring must boot a session");
     holon::testing::clock_guard::assert_clock_running(&conditions);
 
     // Put the render path to work: a live UI watch is what subscribes the

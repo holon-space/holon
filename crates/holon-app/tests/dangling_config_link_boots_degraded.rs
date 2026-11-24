@@ -37,7 +37,7 @@ fn a_dangling_holon_toml_link_boots_and_raises_the_config_condition() {
         .build()
         .expect("build test runtime");
     let (_session, _engine, bus) = runtime
-        .block_on(holon_app::new_from_config_with_di(
+        .block_on(crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),

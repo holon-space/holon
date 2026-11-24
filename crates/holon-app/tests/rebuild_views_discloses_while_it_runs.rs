@@ -29,7 +29,7 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
         },
         ..Default::default()
     };
-    let (_session, engine, injector) = holon_app::new_from_config_with_di(
+    let (_session, engine, injector) = crate::isolated_boot::new_from_config_with_di(
         config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

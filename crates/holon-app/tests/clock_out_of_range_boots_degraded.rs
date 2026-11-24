@@ -44,7 +44,7 @@ async fn boot_with_clock(clock: Arc<dyn Clock>) -> Vec<holon_conditions::Conditi
         },
         ..Default::default()
     };
-    let (session, _engine, bus) = holon_app::new_from_config_with_di(
+    let (session, _engine, bus) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(holon_api::UiInfo::permissive(), clock).without_wait(),
         dir.path().to_path_buf(),

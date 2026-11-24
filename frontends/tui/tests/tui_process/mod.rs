@@ -150,11 +150,7 @@ impl Launch {
                 (command, Some(input))
             }
         };
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("HOLON_") || key == "MCP_SERVER_PORT" {
-                command.env_remove(key);
-            }
-        }
+        isolate(&mut command, self.envs);
         let process = command
             .arg("--config-dir")
             .arg(state.path().join("config"))
@@ -166,7 +162,6 @@ impl Launch {
             .env("HOME", &home)
             .env("MCP_SERVER_PORT", mcp_port.to_string())
             .env("TERM", "xterm-256color")
-            .envs(self.envs)
             .spawn()
             .expect("spawn holon-tui");
         Tui {
@@ -180,6 +175,24 @@ impl Launch {
             state,
         }
     }
+}
+
+/// The environment `holon-tui` starts with: none of the developer's `HOLON_*`
+/// settings, the test's own, and secrets held in memory. The binary holds the
+/// keychain grant, so a boot without the in-memory backend asks the login
+/// keychain for its device key.
+fn isolate(command: &mut Command, envs: Vec<(String, String)>) {
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("HOLON_") || key == "MCP_SERVER_PORT" {
+            command.env_remove(key);
+        }
+    }
+    assert!(
+        envs.iter()
+            .all(|(key, _)| key != holon_secrets::BACKEND_ENV),
+        "a TUI test may not choose the secrets backend: holon-tui holds the keychain grant"
+    );
+    command.envs(envs).env(holon_secrets::BACKEND_ENV, "memory");
 }
 
 /// A port that no listener holds now, so never one that another run's

@@ -118,7 +118,7 @@ fn a_sidecar_entity_its_home_cannot_carry_refuses_the_integration_and_builds_not
             },
             ..Default::default()
         };
-        let (session, engine, bus) = holon_app::new_from_config_with_di(
+        let (session, engine, bus) = crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),
@@ -234,7 +234,7 @@ fn refusals_of(sidecars: &[(&str, &[(&str, &str)])]) -> Vec<(String, String)> {
             },
             ..Default::default()
         };
-        let (session, engine, bus) = holon_app::new_from_config_with_di(
+        let (session, engine, bus) = crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),

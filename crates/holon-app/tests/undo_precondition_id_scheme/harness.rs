@@ -51,7 +51,7 @@ pub async fn boot_a_working_session() -> Booted {
         ..Default::default()
     };
 
-    let (session, engine, reactive) = holon_app::new_from_config_with_di(
+    let (session, engine, reactive) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

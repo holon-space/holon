@@ -79,7 +79,7 @@ async fn boot() -> Booted {
         },
         ..Default::default()
     };
-    let (session, engine, (registry, bus)) = holon_app::new_from_config_with_di(
+    let (session, engine, (registry, bus)) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),

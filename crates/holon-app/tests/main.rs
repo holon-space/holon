@@ -35,6 +35,7 @@ mod introduced_connection_secret_field;
 mod invalid_connection_config_boots_degraded;
 mod irreversible_share_ops_record_history;
 mod is_program_net_agrees_with_the_profile;
+mod isolated_boot;
 #[cfg(feature = "crash-injection")]
 mod kill_session_stops_every_writer;
 mod loro_document_manager_page_position;

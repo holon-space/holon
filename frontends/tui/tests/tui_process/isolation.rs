@@ -5,9 +5,11 @@
 //! @pbt covers tui-process-isolation — a panic after the boot kills the
 //! `script` wrapper and `holon-tui` and frees the MCP port; a listener that
 //! another run holds gets no connection from the harness's client; a client
-//! made before its server binds waits for the bind
+//! made before its server binds waits for the bind; every launch holds its
+//! secrets in memory, whatever environment the test adds
 //!
-//! Examples, not a PBT: each case is one process lifecycle with no input space.
+//! Examples, except the environment property: each other case is one process
+//! lifecycle with no input space.
 
 use std::io::ErrorKind;
 use std::io::Read;
@@ -18,11 +20,14 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use std::time::Instant;
 
+use proptest::strategy::Strategy;
+
 use super::BOOTED;
 use super::Launch;
 use super::Mcp;
 use super::free_port;
 use super::is_alive;
+use super::isolate;
 
 fn serves(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
@@ -140,4 +145,41 @@ fn a_client_made_before_its_server_binds_waits_for_the_bind() {
         response.contains(r#""result""#),
         "the late listener did not answer: {response}"
     );
+}
+
+/// The launcher's environment, not a spawned boot: a boot that misses the
+/// in-memory backend asks the developer's login keychain, so the property must
+/// fail before any `holon-tui` starts.
+fn launched_backend(envs: Vec<(String, String)>) -> Option<String> {
+    let mut command = std::process::Command::new("true");
+    isolate(&mut command, envs);
+    command
+        .get_envs()
+        .find(|(key, _)| *key == holon_secrets::BACKEND_ENV)
+        .and_then(|(_, value)| value)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+proptest::proptest! {
+    #[test]
+    fn every_launch_holds_its_secrets_in_memory(
+        envs in proptest::collection::vec(
+            (
+                proptest::prop_oneof![
+                    proptest::strategy::Just("HOLON_DEBUG_CHORD".to_string()),
+                    proptest::strategy::Just("HOLON_SECRETS_MEMORY_SEED".to_string()),
+                    proptest::strategy::Just("TERM".to_string()),
+                    "[A-Z_]{1,12}",
+                ]
+                .prop_filter("the backend is the launcher's choice", |key| {
+                    key != holon_secrets::BACKEND_ENV
+                }),
+                "[ -~]{0,12}",
+            ),
+            0..4,
+        )
+    ) {
+        let backend = launched_backend(envs);
+        proptest::prop_assert_eq!(backend.as_deref(), Some("memory"));
+    }
 }

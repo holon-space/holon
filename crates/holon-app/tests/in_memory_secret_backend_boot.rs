@@ -49,7 +49,7 @@ async fn boot(dir: &std::path::Path) -> (Arc<holon_frontend::FrontendSession>, A
         },
         ..Default::default()
     };
-    let (session, _engine, bus) = holon_app::new_from_config_with_di(
+    let (session, _engine, bus) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),
@@ -240,7 +240,7 @@ fn a_seed_file_that_names_one_account_twice_refuses_to_boot() {
         ..Default::default()
     };
     let booted = runtime().block_on(async {
-        holon_app::new_from_config_with_di(
+        crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),
@@ -299,7 +299,7 @@ fn a_seed_without_the_memory_backend_refuses_to_boot() {
         ..Default::default()
     };
     let booted = runtime().block_on(async {
-        holon_app::new_from_config_with_di(
+        crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),
@@ -349,7 +349,7 @@ fn a_real_config_dir_refuses_to_boot_in_memory() {
         ..Default::default()
     };
     let booted = runtime().block_on(async {
-        holon_app::new_from_config_with_di(
+        crate::isolated_boot::new_from_config_with_di(
             holon_config,
             SessionConfig::new(
                 holon_api::UiInfo::permissive(),

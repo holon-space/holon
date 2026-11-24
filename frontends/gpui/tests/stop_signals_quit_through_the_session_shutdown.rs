@@ -40,7 +40,9 @@ impl Gui {
         let log = state.path().join("holon-gpui.log");
 
         // Every input is a flag or points into the state dir, so no setting of
-        // the developer's own reaches this instance.
+        // the developer's own reaches this instance. The binary holds the
+        // keychain grant, so its secrets stay in memory, off the login
+        // keychain.
         let mut command = Command::new(env!("CARGO_BIN_EXE_holon-gpui"));
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("HOLON_") || key == "MCP_SERVER_PORT" {
@@ -57,6 +59,7 @@ impl Gui {
             .arg("--mcp-enabled")
             .arg("false")
             .env("HOME", state.path())
+            .env(holon_secrets::BACKEND_ENV, "memory")
             .env("HOLON_LOG", format!("file://{}", log.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())

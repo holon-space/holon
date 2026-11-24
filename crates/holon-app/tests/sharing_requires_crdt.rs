@@ -59,7 +59,7 @@ async fn share_through_shipped_wiring(
         },
         ..Default::default()
     };
-    let (_session, engine, ()) = holon_app::new_from_config_with_di(
+    let (_session, engine, ()) = crate::isolated_boot::new_from_config_with_di(
         holon_config,
         SessionConfig::new(
             holon_api::UiInfo::permissive(),
