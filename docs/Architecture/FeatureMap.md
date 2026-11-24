@@ -460,7 +460,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`
-- `watch-ui-newborn-first-render-missing-row-load`
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
 - `wide-e2e-shrinker-list-app-item-missing`

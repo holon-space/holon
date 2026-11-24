@@ -32,7 +32,6 @@ EXEMPT = {
     "crash-restart-row-vouches-unstamped-base": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "crash-restore-window-not-disclosed": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "iroh-proptest-fork-parent-aborted-before-first-case-load": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
-    "watch-ui-newborn-first-render-missing-row-load": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "deleted-file-recreated-by-stale-page-mirror": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "writeback-undone-deletion-prune-deadline-load-flake": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "writeback-churning-file-stall-disclosed-twice": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
