@@ -586,6 +586,42 @@ impl Module for LoroModule {
     }
 }
 
+/// One condition for the device key files removed from `storage_dir`, one
+/// for those that could not be.
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn disclose_legacy_key_files(
+    bus: &holon_conditions::condition_bus::ConditionBus,
+    storage_dir: &std::path::Path,
+    outcome: holon_loro::device_key_custody::LegacyKeyFiles,
+) {
+    use holon_conditions::condition_bus::Condition;
+    use holon_conditions::condition_bus::ConditionKind;
+    let subject = storage_dir.display().to_string();
+    if !outcome.removed.is_empty() {
+        let files: Vec<String> = outcome.removed.iter().map(|p| p.display().to_string()).collect();
+        tracing::warn!("removed the device key files {files:?} unread; this device has a new identity");
+        bus.emit(Condition {
+            subject: subject.clone(),
+            reason: ConditionKind::DeviceKeyFileRemoved { files },
+        });
+    }
+    if !outcome.not_removed.is_empty() {
+        let files: Vec<String> = outcome
+            .not_removed
+            .iter()
+            .map(|(p, kind)| format!("{} ({kind})", p.display()))
+            .collect();
+        tracing::error!("could not remove the device key files {files:?}; they are not read");
+        bus.emit(Condition {
+            subject,
+            reason: ConditionKind::DeviceKeyFileNotRemoved { files },
+        });
+    }
+}
+
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -600,16 +636,28 @@ fn register_subtree_share(injector: &Injector) {
     injector.provide::<Arc<SharedTreeSyncManager>>(Provider::root(|_| {
         Shared::new(Arc::new(SharedTreeSyncManager::new()))
     }));
-    // Persistent device key loaded from `<storage_dir>/device.key`, or
-    // generated + saved atomically on first launch. Identity must not
-    // rotate across restarts — it's an input to `stable_peer_id` for
-    // every shared Loro doc, AND it binds every iroh endpoint so
-    // known-peer dedup on the remote side works across restarts.
+    // The platform default refuses in a process that never granted the
+    // keychain, so a harness that forgets to inject never reaches the login one.
     injector.provide::<Arc<SecretKey>>(Provider::root(|resolver| {
+        use holon_loro::device_key_custody::DeviceKeyCustody;
+        use holon_loro::device_key_custody::DeviceKeyLoad;
         let config = resolver.resolve::<LoroConfig>();
-        let key = holon_loro::device_key_store::load_or_create_device_key(&config.storage_dir)
-            .expect("load_or_create_device_key");
-        Shared::new(Arc::new(key))
+        let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
+        disclose_legacy_key_files(
+            &bus,
+            &config.storage_dir,
+            holon_loro::device_key_custody::remove_legacy_key_files(&config.storage_dir),
+        );
+        let keychain = match resolver.optional_resolve::<holon_secrets::DeviceKeychain>() {
+            Some(injected) => injected.0.clone(),
+            None => holon_secrets::platform_keychain(holon_secrets::DEVICE_KEY_SERVICE).into(),
+        };
+        let custody = DeviceKeyCustody::for_storage_dir(keychain, &config.storage_dir)
+            .expect("device key custody");
+        match holon_loro::device_key_custody::load_device_identity(&custody) {
+            DeviceKeyLoad::Loaded(key) | DeviceKeyLoad::Created(key) => Shared::new(Arc::new(key)),
+            other => panic!("the device key is not available: {other:?}"),
+        }
     }));
     injector.provide::<Arc<IrohAdvertiser>>(Provider::root(|resolver| {
         let key = resolver.resolve::<Arc<SecretKey>>();

@@ -36,6 +36,8 @@ test-infra = [
     "holon-app?/crash-injection",
     # The keystone holds its database "from another process" through it.
     "holon-turso?/held-lock-seam",
+    # The harness injects the device keychain from the custody's fault store.
+    "holon-loro?/test-helpers",
     "dep:holon",
     "dep:holon-frontend",
     "dep:holon-secrets",
@@ -225,6 +227,8 @@ regex.workspace = true
 loro.workspace = true
 serde_json.workspace = true
 holon-transition-contract.workspace = true
+# The device identity a boot resolves, compared against a planted key file.
+iroh.workspace = true
 
 [[test]]
 name = "integration"

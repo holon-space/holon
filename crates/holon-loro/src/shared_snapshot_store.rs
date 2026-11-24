@@ -62,7 +62,7 @@ pub struct SharedSnapshotStore {
 
 impl SharedSnapshotStore {
     /// `base_storage_dir` is the Loro storage root (same dir that
-    /// holds `holon_tree.loro` and `device.key`). Snapshots live under
+    /// holds `holon_tree.loro`). Snapshots live under
     /// `<base_storage_dir>/shares/`.
     pub fn new(base_storage_dir: PathBuf, bus: Arc<ConditionBus>) -> Self {
         Self {

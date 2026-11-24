@@ -1050,6 +1050,24 @@ const CONFIG_FILE_UNUSABLE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DEVICE_KEY_FILE_REMOVED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "This device has a new identity and must be paired again",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const DEVICE_KEY_FILE_NOT_REMOVED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "An old device key file could not be removed",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -1143,6 +1161,8 @@ impl ConditionKind {
             Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
             Self::ClockNotRunning { .. } => CLOCK_NOT_RUNNING,
             Self::ConfigFileUnusable { .. } => CONFIG_FILE_UNUSABLE,
+            Self::DeviceKeyFileRemoved { .. } => DEVICE_KEY_FILE_REMOVED,
+            Self::DeviceKeyFileNotRemoved { .. } => DEVICE_KEY_FILE_NOT_REMOVED,
         }
     }
 }

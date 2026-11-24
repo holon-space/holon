@@ -248,7 +248,6 @@ crates/holon-loro/src/block_cell_registry.rs	if let Ok(meta) = tree.get_meta(nod
 crates/holon-loro/src/degraded_signal_bus.rs	let _ = self.tx.send(DegradedChange::Cleared(key.clone()));
 crates/holon-loro/src/degraded_signal_bus.rs	let _ = self.tx.send(DegradedChange::Raised(event));
 crates/holon-loro/src/deleted_container_purge.rs	queue.extend(tree.children(current).unwrap_or_default());
-crates/holon-loro/src/device_key_store.rs	if let Ok(dir) = std::fs::File::open(storage_dir) {
 crates/holon-loro/src/doc_lock.rs	HELD.with(|h| h.borrow().get(&key).copied().unwrap_or_default())
 crates/holon-loro/src/doc_lock.rs	let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 crates/holon-loro/src/iroh_advertiser.rs	Err(e) => {

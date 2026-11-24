@@ -3468,9 +3468,9 @@ mod tests {
             bus.clone(),
         ));
         let manager = Arc::new(SharedTreeSyncManager::new());
-        // Use the persistent key-from-disk path so a `drop+re-make`
-        // simulates a real process restart (same device identity).
-        let key = crate::device_key_store::load_or_create_device_key(dir_path).unwrap();
+        // Keyed by the directory, so a `drop+re-make` keeps the device
+        // identity as a process restart does.
+        let key = crate::device_key_custody::testing::stable_test_key(dir_path);
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         LoroShareBackend::new(
             store,
@@ -6194,7 +6194,7 @@ mod tests {
             bus.clone(),
         ));
         let manager = Arc::new(SharedTreeSyncManager::new());
-        let key = crate::device_key_store::load_or_create_device_key(dir.path()).unwrap();
+        let key = crate::device_key_custody::testing::stable_test_key(dir.path());
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         let sql = Arc::new(RecordingSqlOps::default());
         let backend = LoroShareBackend::new_with_sql(

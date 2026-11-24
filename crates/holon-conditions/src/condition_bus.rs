@@ -776,6 +776,17 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process; the link has to change.
     ConfigFileUnusable { path: String, cause: String },
+    /// The storage directory `subject` held the device key in the `files`,
+    /// which were removed unread: this device has a new network identity, so
+    /// paired devices and shares must pair it again.
+    ///
+    /// All-clear: none in this process.
+    DeviceKeyFileRemoved { files: Vec<String> },
+    /// The device key `files` in the storage directory `subject` could not be
+    /// removed (each names its error kind); they stay, unread.
+    ///
+    /// All-clear: none in this process.
+    DeviceKeyFileNotRemoved { files: Vec<String> },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -894,6 +905,8 @@ impl ConditionKind {
     pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
     pub const CLOCK_NOT_RUNNING: &'static str = "clock-not-running";
     pub const CONFIG_FILE_UNUSABLE: &'static str = "config-file-unusable";
+    pub const DEVICE_KEY_FILE_REMOVED: &'static str = "device-key-file-removed";
+    pub const DEVICE_KEY_FILE_NOT_REMOVED: &'static str = "device-key-file-not-removed";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -993,6 +1006,8 @@ impl ConditionKind {
             Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
             Self::ClockNotRunning { .. } => Self::CLOCK_NOT_RUNNING,
             Self::ConfigFileUnusable { .. } => Self::CONFIG_FILE_UNUSABLE,
+            Self::DeviceKeyFileRemoved { .. } => Self::DEVICE_KEY_FILE_REMOVED,
+            Self::DeviceKeyFileNotRemoved { .. } => Self::DEVICE_KEY_FILE_NOT_REMOVED,
         }
     }
 }

@@ -1,7 +1,7 @@
 //! One writer per vault (Model.md invariant 4, at the process boundary).
 //!
 //! Every session that opens a vault writes into it: org write-back, the
-//! `.loro` snapshots and sidecars, `device.key`, `.holon/*`. Two such sessions
+//! `.loro` snapshots and sidecars, `.holon/*`. Two such sessions
 //! each save their whole Loro document, so the last saver drops the other's
 //! edits. The first session therefore holds an exclusive `flock` on
 //! `{vault}/.holon/writer.lock` for its lifetime, and any other session on the

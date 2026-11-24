@@ -186,6 +186,16 @@ impl FrontendInjectorExt for Injector {
             self.provide::<dyn holon_secrets::KeychainStore>(Provider::root(move |_| {
                 store.clone()
             }));
+            // Same rule as the integration store, so a fixture session over a
+            // temp vault never mints its device key into the login keychain.
+            // The in-memory choice is already disclosed by the banner above.
+            let device_store: Arc<dyn holon_secrets::KeychainStore> =
+                holon_secrets::backend_from_env(holon_secrets::DEVICE_KEY_SERVICE, &config_dir)?
+                    .store
+                    .into();
+            self.provide::<holon_secrets::DeviceKeychain>(Provider::root(move |_| {
+                Shared::new(holon_secrets::DeviceKeychain(device_store.clone()))
+            }));
         }
 
         // ThemeRegistry + PreferenceDefs

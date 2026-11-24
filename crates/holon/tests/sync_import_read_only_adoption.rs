@@ -31,7 +31,7 @@ use holon_core::ReadOnlyDocuments;
 use holon_core::ReadOnlyMembers;
 use holon_core::Result;
 use holon_core::WriteTierAuthority;
-use holon_loro::device_key_store::load_or_create_device_key;
+use holon_loro::device_key_custody::testing::stable_test_key;
 use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
 use holon_loro::loro_document_store::LoroDocumentStore;
@@ -207,7 +207,7 @@ fn share_backend(
         bus.clone(),
     ));
     let manager = Arc::new(SharedTreeSyncManager::new());
-    let key = load_or_create_device_key(dir.path()).expect("device key");
+    let key = stable_test_key(dir.path());
     let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
     LoroShareBackend::new_with_sql(
         store,

@@ -115,6 +115,16 @@ impl KeychainStore for UnavailableKeychainStore {
 /// sidecars reference it.
 pub const INTEGRATION_SECRET_SERVICE: &str = "holon-integrations";
 
+/// Keychain service holding this device's network identity key, one account
+/// per storage directory.
+pub const DEVICE_KEY_SERVICE: &str = "space.holon.device-key";
+
+/// The store the device key is kept in, as the session chose it. A distinct
+/// type so the device key and the integration secrets never share a binding
+/// by accident.
+#[derive(Clone)]
+pub struct DeviceKeychain(pub std::sync::Arc<dyn KeychainStore>);
+
 /// The account name a `${VAR}` reference is filed under.
 ///
 /// Lowercase with `.` folded to `_`, so `${TODOIST_API_KEY}` and the

@@ -1,5 +1,5 @@
-//! The iroh types Holon persists (`device.key`, ticket strings, the peers
-//! sidecar) keep their bytes across iroh upgrades. The fixtures below were
+//! The iroh types Holon persists (the device key entry, ticket strings, the
+//! peers sidecar) keep their bytes across iroh upgrades. The fixtures below were
 //! written by iroh 0.96.1; a round trip alone cannot see a format change, so
 //! each fixture must also decode, and re-encode byte for byte.
 
@@ -15,7 +15,7 @@ use iroh::TransportAddr;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
-use crate::device_key_store::load_or_create_device_key;
+use crate::device_key_custody::DeviceKeyCustody;
 use crate::share_enrollment::CapabilitySecret;
 use crate::share_enrollment::ExpiryTime;
 use crate::shared_snapshot_store::SharedSnapshotStore;
@@ -49,17 +49,25 @@ fn fixture_dial_addrs() -> BTreeSet<TransportAddr> {
     ])
 }
 
+/// The key a keychain entry holding `bytes` loads as.
+fn stored_key(bytes: [u8; 32]) -> SecretKey {
+    let keychain = Arc::new(holon_secrets::InMemoryKeychainStore::new());
+    holon_secrets::KeychainStore::store(&*keychain, "device/fixture", &bytes).unwrap();
+    DeviceKeyCustody::new(keychain, "device/fixture".to_string())
+        .load()
+        .unwrap()
+        .unwrap()
+}
+
 fn store_in(dir: &TempDir) -> SharedSnapshotStore {
     SharedSnapshotStore::new(dir.path().to_path_buf(), Arc::new(ConditionBus::new()))
 }
 
 #[test]
 fn a_device_key_written_by_the_previous_iroh_keeps_its_node_id() {
-    let dir = TempDir::new().unwrap();
     let bytes = unhex32(DEVICE_KEY_HEX);
-    std::fs::write(dir.path().join("device.key"), bytes).unwrap();
 
-    let key = load_or_create_device_key(dir.path()).unwrap();
+    let key = stored_key(bytes);
 
     assert_eq!(key.to_bytes(), bytes);
     assert_eq!(hex(key.public().as_bytes()), NODE_ID_HEX);
@@ -104,8 +112,7 @@ fn endpoint_addr(key_bytes: [u8; 32], addrs: Vec<TransportAddr>) -> EndpointAddr
 /// Every stored writer round-trips the key and the address set it was given.
 fn assert_stored_formats_round_trip(id: SharedTreeId, key_bytes: [u8; 32], addr: EndpointAddr) {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("device.key"), key_bytes).unwrap();
-    let key = load_or_create_device_key(dir.path()).unwrap();
+    let key = stored_key(key_bytes);
     assert_eq!(key.to_bytes(), key_bytes);
     assert_eq!(key.public(), SecretKey::from_bytes(&key_bytes).public());
 

@@ -804,6 +804,22 @@ impl ConditionKind {
                  setting. Repoint the link to an existing file or remove it, then restart Holon.",
                 vec![path.clone(), cause.clone()],
             ),
+
+            Self::DeviceKeyFileRemoved { files } => ConditionDetail::with_body(
+                format!(
+                    "The old device key file in {subject} was removed unread. This device has a \
+                     new identity, so paired devices and shares must pair it again. Removed:"
+                ),
+                files.clone(),
+            ),
+
+            Self::DeviceKeyFileNotRemoved { files } => ConditionDetail::with_body(
+                format!(
+                    "Holon could not remove the old device key file in {subject}. It was not \
+                     read and is not used; remove it yourself:"
+                ),
+                files.clone(),
+            ),
         }
     }
 }

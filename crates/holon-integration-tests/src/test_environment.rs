@@ -760,8 +760,8 @@ pub(crate) fn install_headless_render_interpreter(
     injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
 }
 
-/// Share custody for a headless boot: in-memory, keyed by this instance's
-/// config directory.
+/// Share and device-key custody for a headless boot: in-memory, keyed by this
+/// instance's config directory.
 ///
 /// Keyed rather than fresh, because a share flow's custody outlives one session
 /// — a reboot over the same directory must find the owner key its predecessor
@@ -774,6 +774,11 @@ fn install_test_share_credentials(injector: &fluxdi::Injector, namespace: &std::
     ));
     injector.provide::<holon_loro::share_credentials::ShareCredentials>(fluxdi::Provider::root(
         move |_| credentials.clone(),
+    ));
+    let device_store: Arc<dyn holon_secrets::KeychainStore> =
+        holon_loro::device_key_custody::testing::shared_store(&namespace.to_string_lossy());
+    injector.override_provider::<holon_secrets::DeviceKeychain>(fluxdi::Provider::root(
+        move |_| Arc::new(holon_secrets::DeviceKeychain(device_store.clone())),
     ));
 }
 

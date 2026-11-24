@@ -32,6 +32,7 @@ holon-conditions.workspace = true
 holon-core.workspace = true
 holon-loro.workspace = true
 holon-profiles.workspace = true
+holon-secrets.workspace = true
 holon-sharing.workspace = true
 holon-turso.workspace = true
 holon-views.workspace = true

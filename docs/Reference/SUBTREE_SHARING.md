@@ -253,8 +253,21 @@ only shared-vs-local shadowing is closed here.
 
 Derived from `(device_secret.public(), shared_tree_id)` via
 `share_peer_id::stable_peer_id`; deterministic so a device rejoining the same
-share keeps CRDT lineage stable. The device secret is persisted atomically to
-`<storage_dir>/device.key` (`device_key_store.rs`).
+share keeps CRDT lineage stable.
+
+## Device key custody
+
+The device secret lives in the OS keychain, service `space.holon.device-key`,
+account `device/<first 16 hex of blake3(canonical storage dir)>`
+(`device_key_custody.rs`). Nothing under the vault holds it. A `device.key` or
+`device.key.tmp` left under the storage dir is removed unread at boot and the
+removal is disclosed: the device has a new identity and must be paired again.
+The session picks the keychain by the same rule as the integration secrets
+(`holon_secrets::backend_from_env`); a test boot injects an in-memory store and
+makes no machine-keychain attempt.
+
+Known limit: the account follows the storage dir, so a moved vault looks up a
+new account, mints a new identity and orphans its old keychain entry.
 
 > ⚠ **`stable_peer_id` uses `std`'s `DefaultHasher`, whose algorithm/seed are
 > explicitly not guaranteed stable across Rust std versions.** The whole module
@@ -471,7 +484,7 @@ divergent edits.
 - `crates/holon-loro/src/iroh_sync_adapter.rs` — VV-based wire protocol,
   framing, endpoints.
 - `crates/holon-loro/src/share_peer_id.rs` — stable peer-id derivation.
-- `crates/holon-loro/src/device_key_store.rs` — persistent device secret.
+- `crates/holon-loro/src/device_key_custody.rs` — device secret in the OS keychain.
 - `crates/holon-loro/src/shared_tree.rs` — fork-and-prune + mount nodes.
 - `crates/holon-loro/src/loro_share_backend.rs` — `SubtreeShareOperations`
   trait + impl + `OperationProvider` wiring + SQL projection workers.

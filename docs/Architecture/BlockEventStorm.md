@@ -250,8 +250,8 @@ shipped. Anchors: `share_subtree`, `HistoryRetention` in
   a key; the exported CRDT snapshot is plaintext. The auth surface is entirely out
   of band from the payload: ticket-based (`Ticket::new` / `Ticket::decode`,
   `ticket.rs`) + iroh-endpoint stable identity (`stable_peer_id(device_key,
-  shared_tree_id)`, `share_peer_id.rs`; key material from
-  `device_key_store::load_or_create_device_key`, `device_key_store.rs`). Threat
+  shared_tree_id)`, `share_peer_id.rs`; key material from the OS keychain,
+  `device_key_custody.rs`). Threat
   model deferred to `docs/Reference/SUBTREE_SHARING.md`. Pinned by
   `shared_tree::tests::share_subtree_payload_is_plaintext_not_encrypted` (an
   anonymous `LoroDoc` with zero credentials imports the shared snapshot and reads

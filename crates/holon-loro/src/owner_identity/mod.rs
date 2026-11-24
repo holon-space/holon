@@ -3,9 +3,9 @@
 //!
 //! # Why this is distinct from the device key
 //!
-//! `device_key` ([`crate::device_key_store`]) is a *transport/session*
+//! `device_key` ([`crate::device_key_custody`]) is a *transport/session*
 //! identity: it authenticates a QUIC connection and seeds per-share CRDT peer
-//! ids. It is low-value and stored as a plaintext file beside the vault. The
+//! ids. It lives in the OS keychain under its own service. The
 //! **owner key** is different: it *signs durable authority objects* — the
 //! device roster (B1) and the crossing/policy log ([`holon_sharing`]'s
 //! `SigningAuthority`). If it leaks, an attacker can mint fleet membership; if

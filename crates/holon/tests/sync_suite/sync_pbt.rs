@@ -198,7 +198,7 @@ mod tests {
         use holon_conditions::condition_bus::ConditionKind;
         use holon_core::OperationProvider;
         use holon_loro::LoroBlockOperations;
-        use holon_loro::device_key_store::load_or_create_device_key;
+        use holon_loro::device_key_custody::testing::stable_test_key;
         use holon_loro::iroh_advertiser::IrohAdvertiser;
         use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
         use holon_loro::loro_document_store::LoroDocumentStore;
@@ -402,7 +402,7 @@ mod tests {
                 bus.clone(),
             ));
             let manager = Arc::new(SharedTreeSyncManager::new());
-            let key = load_or_create_device_key(dir_path).unwrap();
+            let key = stable_test_key(dir_path);
             // Bind the advertiser endpoint to the persistent device
             // key so iroh endpoint identity survives restarts —
             // otherwise the remote side treats a rejoining peer as a
