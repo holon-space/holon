@@ -1076,12 +1076,16 @@ mod tests {
 
         let peer = write_peer(TYPE_DECLARATIONS_ROOT, case, write_type_map);
         let doc = Arc::new(LoroDocument::new("boot".to_string()).unwrap());
-        // ALLOW(loro_doc_escape): one thread; the import precedes every read,
-        // and the checks commit first.
-        let local = doc.doc();
-        import(&local, &peer, case.import);
-        let version_before = local.oplog_vv();
-        let deep_before = local.get_deep_value();
+        doc.with_write(WriteOrigin::SyncImport, |txn| {
+            import(txn, &peer, case.import);
+            Ok(())
+        })
+        .unwrap();
+        let state = || {
+            doc.with_read(|d| Ok((d.oplog_vv(), d.get_deep_value())))
+                .unwrap()
+        };
+        let (version_before, deep_before) = state();
 
         let authority = LoroTypeWriteAuthority::new(doc.clone(), None);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1119,17 +1123,13 @@ mod tests {
         assert_eq!(keys(&second), expected, "a second boot read names the same");
         assert!(first.readable.is_empty(), "{:?}", first.readable);
 
-        local.commit();
+        doc.with_write(WriteOrigin::SyncImport, |_| Ok(())).unwrap();
+        let (version_after, deep_after) = state();
         assert_eq!(
-            local.oplog_vv(),
-            version_before,
+            version_after, version_before,
             "the boot read writes nothing"
         );
-        assert_eq!(
-            local.get_deep_value(),
-            deep_before,
-            "the boot read changes no value"
-        );
+        assert_eq!(deep_after, deep_before, "the boot read changes no value");
     }
 
     // Fixed cases: the map wins the name over a list root written before it,

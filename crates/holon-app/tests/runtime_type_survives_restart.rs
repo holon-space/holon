@@ -226,9 +226,9 @@ async fn plant(booted: &Booted, key: &str, corruption: Corruption, home: Home) {
                     match corruption {
                         Corruption::NonString => map.insert(key, 7i64)?,
                         Corruption::ForeignRoot { kind, emptied, .. } => {
-                            kind.plant(txn.doc(), TYPE_DECLARATIONS_ROOT)?;
+                            kind.plant(txn, TYPE_DECLARATIONS_ROOT)?;
                             if emptied {
-                                kind.empty(txn.doc(), TYPE_DECLARATIONS_ROOT)?;
+                                kind.empty(txn, TYPE_DECLARATIONS_ROOT)?;
                             }
                         }
                         other => map.insert(key, corrupt_text(other))?,
