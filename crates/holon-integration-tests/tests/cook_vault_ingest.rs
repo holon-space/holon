@@ -1962,20 +1962,19 @@ fn ingest_refusals(
         .collect()
 }
 
-/// Polls until `settled` holds for the refusal conditions, then returns them.
-async fn refusals_once(
+/// The refusal conditions once the session settled; fails with them unless
+/// `expected` holds. Ingest raises a refusal before it reports the file done.
+async fn settled_refusals(
     app: &holon_integration_tests::TestEnvironment,
-    settled: impl Fn(&[holon_conditions::Condition]) -> bool,
+    expected: impl Fn(&[holon_conditions::Condition]) -> bool,
 ) -> Vec<holon_conditions::Condition> {
     app.settle().await;
-    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
-    loop {
-        let refusals = ingest_refusals(app);
-        if settled(&refusals) || std::time::Instant::now() >= deadline {
-            return refusals;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let refusals = ingest_refusals(app);
+    assert!(
+        expected(&refusals),
+        "the settled refusal conditions are not the expected ones: {refusals:?}"
+    );
+    refusals
 }
 
 const REFUSED_RECIPES: [&str; 4] = ["Bad1.cook", "Bad2.cook", "Bad3.cook", "Bad4.cook"];
@@ -2064,7 +2063,7 @@ fn refused_files_are_disclosed_once_per_format() {
             .expect("a vault holding refused files must boot");
         wait_for_recipe(&app, "Pancakes.cook").await;
 
-        let refusals = refusals_once(&app, cooklang_counts(2, 4)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(2, 4)).await;
         assert_eq!(
             refusals.len(),
             2,
@@ -2083,7 +2082,7 @@ fn refused_files_are_disclosed_once_per_format() {
         app.stop_app().await.expect("stop the app");
         app.start_app(true).await.expect("boot the app again");
         wait_for_recipe(&app, "Pancakes.cook").await;
-        let refusals = refusals_once(&app, cooklang_counts(2, 4)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(2, 4)).await;
         assert_eq!(
             refusals.len(),
             2,
@@ -2125,7 +2124,7 @@ fn a_file_refused_at_boot_is_its_formats_condition_not_a_failed_scan() {
             .resolve::<holon_orgmode::FileWatcherReadySignal>()
             .wait_ready()
             .await;
-        let refusals = refusals_once(&app, cooklang_counts(1, 1)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(1, 1)).await;
         let errors: Vec<String> = collector
             .captured_problems()
             .into_iter()
@@ -2169,7 +2168,7 @@ fn a_formats_refusal_shrinks_as_its_files_are_repaired_and_clears_with_the_last(
             .await
             .expect("a vault holding refused files must boot");
         wait_for_recipe(&app, "Pancakes.cook").await;
-        let refusals = refusals_once(&app, cooklang_counts(1, 3)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(1, 3)).await;
         assert_eq!(
             refusals.len(),
             1,
@@ -2186,7 +2185,7 @@ fn a_formats_refusal_shrinks_as_its_files_are_repaired_and_clears_with_the_last(
             .await
             .expect("repair Bad1.cook");
         wait_for_recipe(&app, "Bad1.cook").await;
-        let refusals = refusals_once(&app, cooklang_counts(1, 2)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(1, 2)).await;
         assert_eq!(refusals.len(), 1, "two refused recipes stay one condition");
         let two = names(&REFUSED_RECIPES[1..3]);
         assert_eq!(
@@ -2203,7 +2202,7 @@ fn a_formats_refusal_shrinks_as_its_files_are_repaired_and_clears_with_the_last(
                 &app.org_root().join("Moved.cook"),
             )
             .expect("rename Bad3.cook");
-        let refusals = refusals_once(&app, |r| {
+        let refusals = settled_refusals(&app, |r| {
             cooklang_counts(1, 1)(r) && refused_names(&app, "cooklang") == ["Moved.cook"]
         })
         .await;
@@ -2222,7 +2221,7 @@ fn a_formats_refusal_shrinks_as_its_files_are_repaired_and_clears_with_the_last(
             .await
             .expect("repair Moved.cook");
         wait_for_recipe(&app, "Moved.cook").await;
-        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        let refusals = settled_refusals(&app, |r| r.is_empty()).await;
         assert!(
             refusals.is_empty(),
             "every refused recipe is repaired or gone, so nothing is disclosed: {:?}",
@@ -2252,7 +2251,7 @@ async fn recipe_page_title(
 ) -> String {
     let rows = env
         .query_sql(&format!(
-            "SELECT p.content AS title FROM block_raw p JOIN block_raw s ON s.parent_id = p.id \
+            "SELECT p.content AS title FROM block p JOIN block s ON s.parent_id = p.id \
              WHERE s.id = 'block:{step_file}::b::0'"
         ))
         .await
@@ -2285,7 +2284,7 @@ fn an_ingested_recipe_edited_into_a_refusal_logs_no_error() {
         app.write_org_file("Good.cook", &refused_recipe("Good"))
             .await
             .expect("break Good.cook");
-        let refusals = refusals_once(&app, cooklang_counts(1, 1)).await;
+        let refusals = settled_refusals(&app, cooklang_counts(1, 1)).await;
         app.settle().await;
         // Time behavior: the poll backstop re-reads a file only on its own
         // ticks, so several of them must pass before the log is checked.
@@ -2325,7 +2324,7 @@ fn renaming_a_refused_recipe_with_a_document_moves_its_refusal_to_the_new_path()
         app.write_org_file("Good.cook", &refused_recipe("Good"))
             .await
             .expect("break Good.cook");
-        refusals_once(&app, cooklang_counts(1, 1)).await;
+        settled_refusals(&app, cooklang_counts(1, 1)).await;
 
         app.org_fs
             .rename_file(
@@ -2333,7 +2332,7 @@ fn renaming_a_refused_recipe_with_a_document_moves_its_refusal_to_the_new_path()
                 &app.org_root().join("Renamed.cook"),
             )
             .expect("rename Good.cook");
-        let refusals = refusals_once(&app, |r| {
+        let refusals = settled_refusals(&app, |r| {
             cooklang_counts(1, 1)(r) && refused_names(&app, "cooklang") == ["Renamed.cook"]
         })
         .await;
@@ -2358,7 +2357,7 @@ fn renaming_a_refused_recipe_with_a_document_moves_its_refusal_to_the_new_path()
         app.write_org_file("Renamed.cook", &recipe("Renamed", "Fold"))
             .await
             .expect("repair Renamed.cook");
-        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        let refusals = settled_refusals(&app, |r| r.is_empty()).await;
         assert!(
             refusals.is_empty(),
             "the only refused recipe is repaired, so nothing is disclosed: {:?}",
@@ -2426,7 +2425,7 @@ fn an_org_page_and_a_same_stem_recipe_stay_two_files_at_boot() {
                 Some(PASTA_COOK),
                 "the authoritative recipe file was rewritten"
             );
-            refusals_once(&app, |r| !r.is_empty()).await;
+            settled_refusals(&app, |r| !r.is_empty()).await;
             assert_eq!(
                 refused_names(&app, "cooklang"),
                 names(&["Pasta.cook"]),
@@ -2472,7 +2471,7 @@ fn an_org_file_written_beside_an_ingested_recipe_is_refused() {
             "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
              {refusal:?}"
         );
-        refusals_once(&app, |r| !r.is_empty()).await;
+        settled_refusals(&app, |r| !r.is_empty()).await;
         assert_eq!(
             refused_names(&app, "org"),
             names(&["Pasta.org"]),
@@ -2510,7 +2509,7 @@ fn an_org_file_added_beside_a_recipe_between_boots_is_refused() {
             "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
              {refusal:?}"
         );
-        refusals_once(&app, |r| !r.is_empty()).await;
+        settled_refusals(&app, |r| !r.is_empty()).await;
         assert_eq!(
             refused_names(&app, "org"),
             names(&["Pasta.org"]),
@@ -2554,7 +2553,7 @@ fn an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unread
             "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
              {refusal:?}"
         );
-        refusals_once(&app, |r| !r.is_empty()).await;
+        settled_refusals(&app, |r| !r.is_empty()).await;
         assert_eq!(
             refused_names(&app, "org"),
             names(&["Pasta.org"]),
@@ -3041,7 +3040,7 @@ fn a_repaired_recipe_clears_its_recorded_refusal() {
         app.write_org_file("Good.cook", &refused_recipe("Good"))
             .await
             .expect("break Good.cook");
-        refusals_once(&app, cooklang_counts(1, 1)).await;
+        settled_refusals(&app, cooklang_counts(1, 1)).await;
         let recorded =
             stored_refusal(&app, "Good.cook", "the refusal on the row", |c| c.is_some()).await;
         assert!(
@@ -3052,7 +3051,7 @@ fn a_repaired_recipe_clears_its_recorded_refusal() {
         app.write_org_file("Good.cook", &recipe("Good", "Fold"))
             .await
             .expect("repair Good.cook");
-        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        let refusals = settled_refusals(&app, |r| r.is_empty()).await;
         assert!(refusals.is_empty(), "the repair clears the condition");
         let cell = stored_refusal(&app, "Good.cook", "the cleared row", |c| c.is_none()).await;
         assert_eq!(cell, None, "the repair must clear the recorded refusal");
@@ -3081,7 +3080,7 @@ fn a_refused_recipe_changed_while_the_app_is_off_is_judged_again() {
             .build(rt.clone())
             .await
             .expect("a vault of one refused recipe must boot");
-        refusals_once(&app, cooklang_counts(1, 1)).await;
+        settled_refusals(&app, cooklang_counts(1, 1)).await;
         stored_refusal(&app, "Good.cook", "the refusal on the row", |c| c.is_some()).await;
 
         app.stop_app().await.expect("stop_app after boot 1");
@@ -3097,7 +3096,7 @@ fn a_refused_recipe_changed_while_the_app_is_off_is_judged_again() {
         );
 
         wait_for_recipe(&app, "Good.cook").await;
-        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        let refusals = settled_refusals(&app, |r| r.is_empty()).await;
         assert!(
             refusals.is_empty(),
             "the repaired recipe ingested, yet a refusal is disclosed: {refusals:?}"

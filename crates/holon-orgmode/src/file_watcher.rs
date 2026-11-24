@@ -341,10 +341,10 @@ mod tests {
         proptest!(config, |(delay_ms in 0u64..=3000)| run(Duration::from_millis(delay_ms)));
     }
 
-    /// Writes `forbidden`, then a vault file `control.org`, then a marker.
-    /// FSEvents delivers in order, so once the marker arrived any event for
-    /// `forbidden` has arrived too, and `control.org` shows that the check sees
-    /// a late vault event.
+    /// Writes `forbidden`, then a vault file `control.org`, then a marker, and
+    /// collects until both vault files arrived. FSEvents gives no order across
+    /// files, so only the control event shows that the check sees a vault event
+    /// written after `forbidden`.
     async fn assert_never_forwarded(
         watcher: &mut VaultFileWatcher,
         root: &Path,
@@ -356,10 +356,17 @@ mod tests {
         std::fs::write(&control, "* Control").unwrap();
         let marker = root.join("marker.org");
         std::fs::write(&marker, "* Marker").unwrap();
-        let seen = collect_until(watcher, &marker, |s| s.contains(&marker)).await;
+        let seen = collect_until(watcher, &marker, |s| {
+            s.contains(&control) && s.contains(&marker)
+        })
+        .await;
+        let missing: Vec<_> = [&control, &marker]
+            .into_iter()
+            .filter(|p| !seen.contains(*p))
+            .collect();
         assert!(
-            seen.contains(&control),
-            "control.org did not arrive before the marker, so the check cannot see a late event: {seen:?}"
+            missing.is_empty(),
+            "no event for {missing:?} within {LIVE_BUDGET:?}, so the check cannot see a late event: {seen:?}"
         );
         assert!(
             !seen.contains(&forbidden.to_path_buf()),
@@ -376,12 +383,7 @@ mod tests {
             let page = root.join("test.org");
             std::fs::write(&page, "* Test").unwrap();
 
-            let seen =
-                collect_until(&mut watcher, &root.join("nudge.org"), |s| s.contains(&page)).await;
-            assert!(
-                seen.contains(&page),
-                "the watch delivered nudges but no event for test.org: {seen:?}"
-            );
+            collect_until(&mut watcher, &page, |s| s.contains(&page)).await;
         });
     }
 

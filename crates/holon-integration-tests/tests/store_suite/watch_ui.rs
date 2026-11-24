@@ -264,11 +264,9 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
     });
 }
 
-/// The common case: `create_block` is awaited, so the newborn's row is in the
-/// store before the watcher's first render, and that render must not be the
-/// missing-row error widget. This pins the WARN-tier path staying out of the
-/// ordinary case, NOT that the create race is impossible — on a row that had
-/// not landed, the same widget would paint.
+/// The common case: once the session settled the newborn's row is in the
+/// `block` matview the UI reads, so the watcher's first render must not be the
+/// missing-row error widget. Before the projection that widget is legal.
 #[test]
 fn a_just_created_blocks_first_render_is_not_the_missing_row_widget() {
     let rt = runtime();
@@ -290,8 +288,16 @@ fn a_just_created_blocks_first_render_is_not_the_missing_row_widget() {
             .await
             .expect("create newborn");
 
-        // Watch with NO wait for the row: the point is the render that races
-        // it.
+        env.settle().await;
+        let projected = env
+            .query_sql("SELECT id FROM block WHERE id = 'block:newborn'")
+            .await
+            .expect("read the block matview");
+        assert!(
+            !projected.is_empty(),
+            "the settled session has no block:newborn in the block matview"
+        );
+
         let (first_render_expr, _watch) = env
             .watch_ui_first_structure(&EntityUri::block("newborn"))
             .await
