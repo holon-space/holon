@@ -294,25 +294,7 @@ impl Fixture<'_> {
 
     /// Put the caret in an outline row — the gesture that raises the keyboard
     /// on a phone and the one that gives `chain_ops(0)` a focused entity.
-    ///
-    /// The grafted rows can land a settle or two after the window first reaches
-    /// a fixed point (a stable element count with no `loading` placeholder is
-    /// reachable before CDC has delivered them), so the row is waited for
-    /// rather than assumed. Tapping a row that is not on screen yet reports
-    /// "not in bounds", which reads like a missing affordance and is only a
-    /// race.
     fn focus_row(&mut self, id: &str) {
-        let uri = format!("block:{id}");
-        for _ in 0..10 {
-            if entity_box(&self.bounds, &uri).is_some() {
-                break;
-            }
-            self.settle();
-        }
-        assert!(
-            entity_box(&self.bounds, &uri).is_some(),
-            "the grafted row {uri} never painted, so there is nothing to put the caret in"
-        );
         let entity = EntityUri::block(id);
         self.runtime
             .clone()

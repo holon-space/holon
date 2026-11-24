@@ -84,6 +84,7 @@ use holon_pbt_core::invariant::InvariantResult;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
@@ -768,7 +769,7 @@ fn boot_band_page(app: &mut HeadlessAppContext, post_count: usize) -> BandPage {
     // that the band's rows exist in the ViewModel; where they are on screen is
     // the question the tests then ask.
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + HANG_DEADLINE;
     let mut round = 0u32;
     let mut vm_rows = 0usize;
     while Instant::now() < deadline {

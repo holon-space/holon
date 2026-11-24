@@ -20,6 +20,8 @@ pub mod inspector;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
+#[cfg(feature = "pbt")]
+pub mod prewarm_seam;
 #[cfg(debug_assertions)]
 pub mod oracles_ui;
 pub mod reactive_vm_poc;
@@ -2790,8 +2792,15 @@ fn launch_holon_window_impl(
     //
     // A seed still in the background (or failed) has no layout to wait for:
     // the window opens at once on the vault-load placeholder (or its error).
+    #[cfg(feature = "pbt")]
+    let prewarm_timed_out = crate::prewarm_seam::take_prewarm_timeout();
+    #[cfg(not(feature = "pbt"))]
+    let prewarm_timed_out = false;
+    if prewarm_timed_out {
+        eprintln!("[GPUI] pre-warm timeout — window will open with loading state");
+    }
     #[cfg(not(target_os = "android"))]
-    if VaultLoad::of(&session) == VaultLoad::Loaded {
+    if !prewarm_timed_out && VaultLoad::of(&session) == VaultLoad::Loaded {
         let engine = &engine;
         use futures::StreamExt;
         use futures::future::Either;

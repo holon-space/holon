@@ -8,7 +8,8 @@
 //!
 //! An engaged hold is a bridge in flight: the epoch relay publishes no new
 //! watermark while one is engaged, as a bridge that awaits before its apply
-//! would need.
+//! would need. A lag is a hold that the relay cannot see: it stands for a
+//! bridge woken for a diff that has not polled it yet.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use holon_frontend::ReactiveViewModel;
 struct Gate {
     opened: Mutable<bool>,
     engaged: Arc<AtomicBool>,
+    announced: bool,
 }
 
 static HOLDS: LazyLock<Mutex<HashMap<EntityUri, Gate>>> = LazyLock::new(Default::default);
@@ -42,9 +44,20 @@ pub struct BridgeHold {
 
 /// Hold `row`'s data bridge from its next data change on.
 pub fn hold_row_bridge(row: EntityUri) -> BridgeHold {
+    shut(row, true)
+}
+
+/// Hold `row`'s data bridge like [`hold_row_bridge`], but leave it out of
+/// [`engaged_rows`].
+pub fn lag_row_bridge(row: EntityUri) -> BridgeHold {
+    shut(row, false)
+}
+
+fn shut(row: EntityUri, announced: bool) -> BridgeHold {
     let gate = Gate {
         opened: Mutable::new(false),
         engaged: Arc::default(),
+        announced,
     };
     let previous = HOLDS.lock().unwrap().insert(row.clone(), gate.clone());
     assert!(previous.is_none(), "{row} already has a bridge hold");
@@ -69,13 +82,22 @@ impl Drop for BridgeHold {
     }
 }
 
-/// The rows whose bridge waits on a shut hold.
+/// The rows whose bridge waits on a shut hold that is not a lag.
 pub fn engaged_rows() -> Vec<EntityUri> {
+    waiting_rows(|gate| gate.announced)
+}
+
+/// The rows whose bridge waits on a shut hold or lag.
+pub fn held_rows() -> Vec<EntityUri> {
+    waiting_rows(|_| true)
+}
+
+fn waiting_rows(keep: impl Fn(&Gate) -> bool) -> Vec<EntityUri> {
     HOLDS
         .lock()
         .unwrap()
         .iter()
-        .filter(|(_, gate)| gate.engaged.load(Ordering::SeqCst))
+        .filter(|(_, gate)| keep(gate) && gate.engaged.load(Ordering::SeqCst))
         .map(|(row, _)| row.clone())
         .collect()
 }

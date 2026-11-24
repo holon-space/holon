@@ -31,6 +31,10 @@ use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 
+use super::settle::HANG_DEADLINE;
+use super::settle::SettleError;
+use super::settle::settle_window;
+
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
 /// tasks (test builds draw dirty windows inside flush_effects), fire fake
 /// timers, drain again, promote staged bounds.
@@ -45,24 +49,9 @@ fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
     bounds.flush();
 }
 
-/// How many [`pump_cycle`]s a bounds lookup waits for a frame that paints the
-/// entity before failing loud.
-///
-/// Counted in CYCLES, not wall time, because `pump_cycle` advances the app's
-/// FAKE CLOCK 500ms per iteration: a wall-clock deadline is a clock-injection
-/// rate, so raising it changes what the tests under it simulate rather than
-/// just how long they wait.
-///
-/// Eight is the settle chain, not a tuning knob. A re-created shell paints its
-/// rows on the next signal tick — two frames — and a gesture that also mutates
-/// has to clear CDC → Loro → projection first, which the harness elsewhere
-/// budgets at a handful of cycles. Eight leaves ~4x headroom over the observed
-/// need while keeping the miss cost bounded and deterministic.
-const BOUNDS_WAIT_PUMP_CYCLES: usize = 8;
-
 /// How many times [`SimUserDriver::send_key_chord`] re-clicks when the click
 /// lands but focus does not move. Counted in ATTEMPTS because each attempt now
-/// costs up to `BOUNDS_WAIT_PUMP_CYCLES` + the landing poll; the wall-clock
+/// costs up to a window settle + the landing poll; the wall-clock
 /// budget this replaced was written when the click point resolved instantly and
 /// had silently narrowed to a single attempt.
 const CHORD_FOCUS_CLICK_ATTEMPTS: usize = 3;
@@ -247,37 +236,57 @@ impl SimUserDriver {
         )
     }
 
-    /// The click point for `entity_id`, WAITING for a frame that actually
-    /// paints it. Fails loud at [`BOUNDS_WAIT_PUMP_CYCLES`] with
-    /// [`Self::miss_census`].
+    /// `find` on the committed frame; when that frame lacks it, `find` again
+    /// on the frame [`settle_window`] commits once the window reflects every
+    /// sequence the engine emitted. Fails loud with [`Self::miss_census`].
     ///
     /// The main panel's virtualized `ReactiveShell` is re-created with an EMPTY
     /// item vec on every projection rebuild and fills only on its next signal
     /// tick, so a one-shot read lands on a blank panel whenever it falls in
     /// that window and the gesture fails on a row that is on screen a frame
     /// later. Every bounds-taking verb on this driver routes through here.
+    fn when_painted<T>(
+        &self,
+        entity_id: &EntityUri,
+        what: &str,
+        find: impl Fn() -> Option<T>,
+    ) -> Result<T, anyhow::Error> {
+        if let Some(found) = find() {
+            return Ok(found);
+        }
+        let app = unsafe { &*self.app_ptr };
+        let epoch = match settle_window(
+            app,
+            &self.bounds,
+            self.engine.ui_watermark(),
+            &mut || {},
+            HANG_DEADLINE,
+        ) {
+            Ok(epoch) | Err(SettleError::Loading(epoch)) => epoch,
+            Err(e) => anyhow::bail!("{what} for {entity_id}: window settle: {e}"),
+        };
+        find().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{what} for {entity_id} not in bounds in the settled frame {epoch:?} ({})",
+                self.miss_census(entity_id)
+            )
+        })
+    }
+
+    /// The click point for `entity_id` in a frame that paints it.
     fn click_point_when_painted(
         &self,
         entity_id: &EntityUri,
         prefer_text: bool,
     ) -> Result<(f32, f32), anyhow::Error> {
-        let app = unsafe { &*self.app_ptr };
-        for _ in 0..BOUNDS_WAIT_PUMP_CYCLES {
-            let center = if prefer_text {
+        self.when_painted(entity_id, "click point", || {
+            if prefer_text {
                 self.text_center(entity_id)
             } else {
                 None
             }
-            .or_else(|| self.bounds_center_f32(entity_id));
-            if let Some(center) = center {
-                return Ok(center);
-            }
-            pump_cycle(app, &self.bounds);
-        }
-        anyhow::bail!(
-            "entity {entity_id} not in bounds after {BOUNDS_WAIT_PUMP_CYCLES} pump cycles ({})",
-            self.miss_census(entity_id)
-        )
+            .or_else(|| self.bounds_center_f32(entity_id))
+        })
     }
 
     /// Dispatch one keystroke; returns gpui's `handled` flag.
@@ -567,26 +576,12 @@ impl UserDriver for SimUserDriver {
         let target_str = target.as_str();
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
         let element_id = holon_frontend::expand_toggle_id_for(bare);
-        // Same frame-wait contract as `click_point_when_painted`: the chevron
-        // lives on a main-panel row, so it is absent from any frame the
-        // virtualized shell rebuilt empty.
-        let app = unsafe { &*self.app_ptr };
-        let mut found = None;
-        for _ in 0..BOUNDS_WAIT_PUMP_CYCLES {
+        // The chevron lives on a main-panel row, so it is absent from any
+        // frame the virtualized shell rebuilt empty.
+        let info = self.when_painted(target, &format!("chevron {element_id}"), || {
             self.pump();
-            if let Some(info) = self.bounds.element_info(&element_id) {
-                found = Some(info);
-                break;
-            }
-            pump_cycle(app, &self.bounds);
-        }
-        let Some(info) = found else {
-            anyhow::bail!(
-                "set_block_expanded: chevron {element_id} not in bounds after \
-                 {BOUNDS_WAIT_PUMP_CYCLES} pump cycles ({})",
-                self.miss_census(target)
-            );
-        };
+            self.bounds.element_info(&element_id)
+        })?;
         let (cx, cy) = info.center();
         self.raw_click(Point {
             x: Pixels::from(cx),

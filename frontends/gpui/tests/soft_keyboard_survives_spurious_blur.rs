@@ -29,6 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::pbt_harness::settle::HANG_DEADLINE;
+
 use gpui::TestAppContext;
 use gpui::VisualTestContext;
 use holon_frontend::geometry::GeometryProvider;
@@ -80,7 +82,7 @@ fn spurious_blur_does_not_dismiss_the_soft_keyboard() {
     // Precondition, not a timing guess: the row must be PAINTED before a tap
     // can focus its editor.
     let row_element = format!("block:{edit_id}");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + HANG_DEADLINE;
     let mut target = None;
     while Instant::now() < deadline {
         settle(&cx, &bounds);

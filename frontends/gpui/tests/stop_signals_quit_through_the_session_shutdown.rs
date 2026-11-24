@@ -14,6 +14,8 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::pbt_harness::settle::HANG_DEADLINE;
+
 const VAULT_ORG: &str = "\
 * Stop page
 :PROPERTIES:
@@ -79,7 +81,7 @@ impl Gui {
     }
 
     fn wait_for_log(&mut self, line: &str) {
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + HANG_DEADLINE;
         loop {
             let text = self.log_text();
             if text.contains(line) {
@@ -90,7 +92,7 @@ impl Gui {
             }
             assert!(
                 Instant::now() < deadline,
-                "holon-gpui did not log `{line}` within 180 s; log:\n{text}"
+                "holon-gpui did not log `{line}` within {HANG_DEADLINE:?}; log:\n{text}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -110,7 +112,7 @@ impl Gui {
     }
 
     fn wait_for_exit(&mut self, name: &str) -> std::process::ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + HANG_DEADLINE;
         loop {
             if let Some(status) = self.child.try_wait().expect("poll holon-gpui") {
                 return status;
@@ -118,7 +120,7 @@ impl Gui {
             if Instant::now() >= deadline {
                 self.child.kill().expect("kill the hung holon-gpui");
                 panic!(
-                    "holon-gpui did not exit within 180 s of SIG{name}; log:\n{}",
+                    "holon-gpui did not exit within {HANG_DEADLINE:?} of SIG{name}; log:\n{}",
                     self.log_text()
                 );
             }

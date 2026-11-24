@@ -469,7 +469,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-chrome-one-row-timeout-load`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
-- `windowed-focus-not-in-bounds-under-load`
 - `windowed-keyword-surface-stale-done-text`
 - `windowed-nested-page-no-chevron-under-load`
 - `windowed-previous-run-toast-box-under-load`

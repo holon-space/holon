@@ -57,6 +57,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
@@ -172,7 +173,7 @@ fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     // Precondition, not a timing guess: the row must be PAINTED before a click
     // can seat a caret in it.
     let target_element = format!("block:{PROMOTION_TARGET_ID}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
+    let boot_deadline = Instant::now() + HANG_DEADLINE;
     let mut painted = false;
     while Instant::now() < boot_deadline {
         settle_frame(&app, &bounds, &env, Duration::from_secs(30));

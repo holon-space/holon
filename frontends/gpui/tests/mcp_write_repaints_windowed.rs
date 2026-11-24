@@ -322,7 +322,7 @@ fn drive<T>(fx: &mut Fixture, fut: impl Future<Output = T>, label: &str) -> T {
     let waker = futures::task::noop_waker();
     let mut task_cx = std::task::Context::from_waker(&waker);
     let mut fut = std::pin::pin!(fut);
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + HANG_DEADLINE;
     loop {
         if let std::task::Poll::Ready(value) = fut.as_mut().poll(&mut task_cx) {
             return value;

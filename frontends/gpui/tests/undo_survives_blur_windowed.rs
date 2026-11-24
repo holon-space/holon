@@ -64,6 +64,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
@@ -207,7 +208,7 @@ fn drive_undo_then_blur(
     // click can seat a caret in one and move focus to the other.
     let edit_element = format!("block:{edit_id}");
     let blur_element = format!("block:{blur_id}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
+    let boot_deadline = Instant::now() + HANG_DEADLINE;
     let mut painted = false;
     while Instant::now() < boot_deadline {
         settle_frame(&app, &bounds, &env, Duration::from_secs(30));

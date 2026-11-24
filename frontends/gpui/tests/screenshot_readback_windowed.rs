@@ -26,6 +26,7 @@ use holon_mcp::server::CapturedImage;
 use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 
+use crate::pbt_harness::settle::HANG_DEADLINE;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
@@ -110,7 +111,7 @@ fn capture_screenshot_through_the_pump_returns_the_painted_frame() {
         .expect("window opened");
 
     let row_element = format!("block:{second_id}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
+    let boot_deadline = Instant::now() + HANG_DEADLINE;
     let row = loop {
         settle_frame(&app, &bounds, &env, Duration::from_secs(30));
         let row = bounds.all_elements().into_iter().find(|(_, info)| {

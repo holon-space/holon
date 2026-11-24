@@ -229,7 +229,7 @@ pub fn settle_window(
                 pending_views: app.pending_views(),
                 owed: watermark.owed(),
                 operations_in_flight: watermark.operations_in_flight(),
-                held_bridges: holon_gpui::bridge_hold::engaged_rows(),
+                held_bridges: holon_gpui::bridge_hold::held_rows(),
             }));
         }
     }

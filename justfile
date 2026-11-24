@@ -1553,6 +1553,7 @@ cargo-free-checks:
     check timing-assertions target/gate-logs/gate-arch-timing-assertions.log ./scripts/check-timing-assertions.sh
     check timing-gate-verdict target/gate-logs/gate-arch-timing-gate-verdict.log ./scripts/check-timing-gate-verdict.sh
     check timeout-margins target/gate-logs/gate-arch-timeout-margins.log with_self_check ./scripts/check-timeout-margins.py
+    check windowed-deadlines target/gate-logs/gate-arch-windowed-deadlines.log with_self_check ./scripts/check-windowed-deadlines.py
     check known-red-evidence target/gate-logs/gate-arch-known-red-evidence.log with_self_check ./scripts/check-known-red-evidence.py
     check known-reds-fixture target/gate-logs/gate-arch-known-reds-fixture.log ./scripts/keystone-known-reds-fixture.sh
     check known-reds-property-checks target/gate-logs/gate-arch-known-reds-property-checks.log known_reds_property_checks

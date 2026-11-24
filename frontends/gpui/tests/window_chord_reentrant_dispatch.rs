@@ -50,6 +50,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
@@ -158,7 +159,7 @@ fn window_registry_chords_reach_their_window() {
     // Precondition: the row must be PAINTED before a chord is pressed into it,
     // or the press would fail for a reason unrelated to the dispatch path.
     let target_element = format!("block:{CHORD_TARGET_ID}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
+    let boot_deadline = Instant::now() + HANG_DEADLINE;
     let mut painted = false;
     while Instant::now() < boot_deadline {
         settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
