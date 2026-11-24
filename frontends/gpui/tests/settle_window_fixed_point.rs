@@ -946,15 +946,8 @@ mod driver_hop {
         ]
     }
 
-    /// A held AddChild can supersede a render generation of holon's ui_watcher
-    /// before its `take_over`, which leaves that seq unclaimed and the settle
-    /// owed forever;
-    /// `settled_frame_shows_every_row_for_a_superseded_generation`
-    /// keeps those cases.
     fn step() -> impl Strategy<Value = (Op, Hop)> {
-        (op(), hop()).prop_filter("held AddChild loses its seq in ui_watcher", |step| {
-            !matches!(step, (Op::AddChild, Hop::HeldBeforeEngine { .. }))
-        })
+        (op(), hop())
     }
 
     /// Children each page holds before the window opens, then random steps.
@@ -1384,8 +1377,9 @@ mod driver_hop {
         }
     }
 
+    /// A held AddChild supersedes a render generation of the page's watcher
+    /// before it takes over.
     #[test]
-    #[ignore = "holon's ui_watcher Delivery::take_over leaves the seq of a superseded generation unclaimed"]
     fn settled_frame_shows_every_row_for_a_superseded_generation() {
         for seeded in [[2, 1], [3, 1]] {
             let steps = vec![(Op::AddChild, Hop::HeldBeforeEngine { hold_ms: 200 })];

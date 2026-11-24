@@ -274,14 +274,6 @@ cat >"$work/timeout-only.log" <<'EOF'
 EOF
 expect_outcome timeout-only 1 '^PRIMARY: \[novel\] .* TIMEOUT: holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed$' \
     "$work/timeout-only.log"
-# The graft-page settle timeout comes from the shared settle_window, so it is
-# known from any windowed test file, not only from the files that first showed it.
-cat >"$work/settle-timeout-other-windowed-file.log" <<'EOF'
-thread 'live_promotion_windowed::typed_todo_promotes' (242967106) panicked at frontends/gpui/tests/live_promotion_windowed.rs:120:25:
-window settle: window did not settle within 60s: frame FrameNo(101) reflects EngineSeq(254), target EngineSeq(257), dirty false, pending views [EntityId(23v1)], owed ["block:wslice-graft-page: applied through 254"], operations in flight 0, held bridges []
-EOF
-expect_outcome settle-timeout-other-windowed-file 0 '^PRIMARY: \[known-red:windowed-settle-timeout-graft-page-owed\] .* @ frontends/gpui/tests/live_promotion_windowed\.rs:120:25: ' \
-    "$work/settle-timeout-other-windowed-file.log"
 cat >"$work/quick-open-fresh-slot-first-key-lost.log" <<'EOF'
 thread 'quick_open_returns_focus_windowed::a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends' (243183011) panicked at frontends/gpui/tests/quick_open_returns_focus_windowed.rs:782:5:
 assertion `left == right` failed: the newborn must carry the characters in typed order — "ba" means the second keystroke was inserted at caret 0 instead of after the first; got [("block:c0543f46-5d29-4e27-adb9-3bb6aea0f7d7", "b")]

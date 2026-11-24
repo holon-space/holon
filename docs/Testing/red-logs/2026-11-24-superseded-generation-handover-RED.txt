@@ -1,0 +1,1023 @@
+BASE: bfc35646331d7c1cca2499546d3f986b161f7ca4
+TREE: e23c336b369977897bacf5ced34e57a6ae141fe9
+STARTED: 2026-11-24T21:52:20Z
+tree: git archive copy of TREE with both claim sites put back on the shared data cursor as on the base (begin_render and take_over route on `data`); the diff below shows the revert
+command: cargo nextest run --workspace --features holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt --profile load-tolerant --no-fail-fast --no-tests=fail -E 'package(holon) & test(/handover::every_claim_on_the_data_cursor/)'
+expected red: every stored schedule and the generated case leave a claim on `data` that no applied event carries ("data owed").
+
+shape env: RUST_FONTCONFIG_DLOPEN=on
+shape env: HOLON_BUILD_SHA unset
+shape env: HOLON_BUILD_TIME unset
+shape env: RUSTFLAGS unset
+shape env: FLOW_JOB_CORES=2
+shape env: NEXTEST_TEST_THREADS=2
+shape env: RUST_TEST_THREADS=2
+shape env: HOLON_PBT_BUDGET=lane
+shape env: CARGO_* set: CARGO_BUILD_JOBS CARGO_HOME CARGO_TARGET_DIR 
+--- <lane>/crates/holon/src/api/ui_watcher.rs	2026-11-24 22:40:09
++++ <archive>/crates/holon/src/api/ui_watcher.rs	2026-11-24 22:52:20
+@@ -101,7 +101,7 @@
+     fn begin_render(&self) -> (u64, OwedChild) {
+         let seq = self.data.sent_with_children();
+         let claim = self.data.owed_child();
+-        claim.cursor().routed(seq);
++        self.data.routed(seq);
+         (seq, claim)
+     }
+ 
+@@ -124,7 +124,7 @@
+         if render.sent() > 0 || handed <= begun {
+             return begun;
+         }
+-        render.routed(handed);
++        self.data.routed(handed);
+         handed
+     }
+ }
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: unused workspace dependency `holon-connections-testing`
+   --> Cargo.toml:321:1
+    |
+321 | holon-connections-testing = { path = "crates/holon-connections-testing" }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `holon-connections-testing`
+warning: unused workspace dependency `is_ci`
+   --> Cargo.toml:226:1
+    |
+226 | is_ci = "1.2"
+    | ^^^^^
+    |
+help: consider removing the workspace dependency `is_ci`
+warning: unused workspace dependency `opentelemetry-appender-tracing`
+   --> Cargo.toml:130:1
+    |
+130 | opentelemetry-appender-tracing = "0.31"
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `opentelemetry-appender-tracing`
+warning: unused workspace dependency `portable-pty`
+   --> Cargo.toml:225:1
+    |
+225 | portable-pty = "0.8"
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `portable-pty`
+warning: unused workspace dependency `prqlc-parser`
+   --> Cargo.toml:270:1
+    |
+270 | prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `prqlc-parser`
+warning: unused workspace dependency `reqwest`
+   --> Cargo.toml:179:1
+    |
+179 | reqwest = { version = "0.13", default-features = false, features = [
+    | ^^^^^^^
+    |
+help: consider removing the workspace dependency `reqwest`
+warning: unused workspace dependency `rustls`
+   --> Cargo.toml:183:1
+    |
+183 | rustls = { version = "0.23", default-features = false, features = [
+    | ^^^^^^
+    |
+help: consider removing the workspace dependency `rustls`
+warning: unused workspace dependency `strip-ansi-escapes`
+   --> Cargo.toml:227:1
+    |
+227 | strip-ansi-escapes = "0.2"
+    | ^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `strip-ansi-escapes`
+warning: unused workspace dependency `ulid`
+   --> Cargo.toml:146:1
+    |
+146 | ulid = "1.1"
+    | ^^^^
+    |
+help: consider removing the workspace dependency `ulid`
+warning: unused workspace dependency `walkdir`
+   --> Cargo.toml:214:1
+    |
+214 | walkdir = "2"
+    | ^^^^^^^
+    |
+help: consider removing the workspace dependency `walkdir`
+warning: workspace (manifest) generated 12 warnings
+   Compiling core-graphics v0.24.0 (<archive>/.cargo/patches/core-graphics)
+   Compiling futures-signals v0.3.34 (<archive>/.cargo/patches/futures-signals)
+   Compiling holon-net-layout v0.1.0 (<archive>/crates/holon-net-layout)
+   Compiling holon-turso v0.1.0 (<archive>/crates/holon-turso)
+   Compiling holon-frontend v0.1.0 (<archive>/crates/holon-frontend)
+   Compiling holon-plugin-rows v0.1.0 (<archive>/guests/plugin-rows)
+   Compiling holon-toon v0.1.0 (<archive>/crates/holon-toon)
+   Compiling workspace-hack v0.1.0 (<archive>/workspace-hack)
+   Compiling core-text v21.0.0
+   Compiling cocoa v0.26.0
+   Compiling holon-gpui v0.1.0 (<archive>/frontends/gpui)
+   Compiling zed-font-kit v0.14.1-zed (https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f281)
+   Compiling holon-lens v0.1.0 (<archive>/crates/holon-lens)
+   Compiling holon-expr v0.1.0 (<archive>/crates/holon-expr)
+   Compiling holon-secrets v0.1.0 (<archive>/crates/holon-secrets)
+   Compiling holon-pattern v0.1.0 (<archive>/crates/holon-pattern)
+   Compiling holon-engine v0.1.0 (<archive>/crates/holon-engine)
+   Compiling holon-loopback-guard v0.1.0 (<archive>/crates/holon-loopback-guard)
+   Compiling holon-rules v0.1.0 (<archive>/crates/holon-rules)
+   Compiling holon-macros v0.1.0 (<archive>/crates/holon-macros)
+   Compiling gpui v0.2.2 (https://github.com/holon-space/zed.git?rev=722d9f3e696abc9356ef1488ecac68239dfd4ac1#722d9f3e)
+   Compiling holon-mcp-mock v0.1.0 (<archive>/crates/holon-mcp-mock)
+   Compiling holon-storage-provider v0.1.0 (<archive>/crates/holon-storage-provider)
+   Compiling holon-architecture-tests v0.1.0 (<archive>/crates/holon-architecture-tests)
+   Compiling holon-api v0.1.0 (<archive>/crates/holon-api)
+   Compiling holon-core v0.1.0 (<archive>/crates/holon-core)
+   Compiling holon-transition-contract v0.1.0 (<archive>/crates/holon-transition-contract)
+   Compiling holon-conditions v0.1.0 (<archive>/crates/holon-conditions)
+   Compiling holon-net v0.1.0 (<archive>/crates/holon-net)
+   Compiling holon-org-format v0.1.0 (<archive>/crates/holon-org-format)
+   Compiling holon-rows v0.1.0 (<archive>/crates/holon-rows)
+   Compiling holon-net-shell v0.1.0 (<archive>/crates/holon-net-shell)
+   Compiling holon-connections v0.1.0 (<archive>/crates/holon-connections)
+   Compiling holon-profiles v0.1.0 (<archive>/crates/holon-profiles)
+   Compiling holon-views v0.1.0 (<archive>/crates/holon-views)
+   Compiling holon-filesystem v0.1.0 (<archive>/crates/holon-filesystem)
+   Compiling holon-kitchen v0.1.0 (<archive>/crates/holon-kitchen)
+   Compiling holon-petri v0.1.0 (<archive>/crates/holon-petri)
+   Compiling holon-pbt-core v0.1.0 (<archive>/crates/holon-pbt-core)
+   Compiling holon-advice v0.1.0 (<archive>/crates/holon-advice)
+   Compiling holon-capability v0.1.0 (<archive>/crates/holon-capability)
+   Compiling holon v0.1.0 (<archive>/crates/holon)
+   Compiling holon-oracles v0.1.0 (<archive>/crates/holon-oracles)
+   Compiling holon-loro v0.1.0 (<archive>/crates/holon-loro)
+   Compiling holon-orgmode v0.1.0 (<archive>/crates/holon-orgmode)
+   Compiling holon-block-roundtrip-testing v0.1.0 (<archive>/crates/holon-block-roundtrip-testing)
+   Compiling holon-mcp-client v0.1.0 (<archive>/crates/holon-mcp-client)
+   Compiling holon-plugin-host v0.1.0 (<archive>/crates/holon-plugin-host)
+   Compiling holon-sharing v0.1.0 (<archive>/crates/holon-sharing)
+   Compiling holon-turso-testing v0.1.0 (<archive>/crates/holon-turso-testing)
+   Compiling holon-connections-testing v0.1.0 (<archive>/crates/holon-connections-testing)
+   Compiling holon-layout-testing v0.1.0 (<archive>/crates/holon-layout-testing)
+   Compiling holon-logseq-db v0.1.0 (<archive>/crates/holon-logseq-db)
+   Compiling holon-netd v0.1.0 (<archive>/crates/holon-netd)
+   Compiling holon-markdown v0.1.0 (<archive>/crates/holon-markdown)
+   Compiling holon-macros-test v0.1.0 (<archive>/crates/holon-macros-test)
+   Compiling gpui_apple v0.1.0 (https://github.com/holon-space/zed.git?rev=722d9f3e696abc9356ef1488ecac68239dfd4ac1#722d9f3e)
+   Compiling gpui-component v0.5.1 (https://github.com/holon-space/gpui-component?rev=a804af8d6d81a29c6dd8637641a761b72e656752#a804af8d)
+   Compiling gpui_macos v0.1.0 (https://github.com/holon-space/zed.git?rev=722d9f3e696abc9356ef1488ecac68239dfd4ac1#722d9f3e)
+   Compiling holon-loro-wiring v0.1.0 (<archive>/crates/holon-loro-wiring)
+   Compiling holon-loro-testing v0.1.0 (<archive>/crates/holon-loro-testing)
+   Compiling gpui_platform v0.1.0 (https://github.com/holon-space/zed.git?rev=722d9f3e696abc9356ef1488ecac68239dfd4ac1#722d9f3e)
+   Compiling holon-app v0.1.0 (<archive>/crates/holon-app)
+   Compiling holon-mcp v0.1.0 (<archive>/frontends/mcp)
+   Compiling holon-integration-tests v0.1.0 (<archive>/crates/holon-integration-tests)
+   Compiling holon-tui v0.1.0 (<archive>/frontends/tui)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-app` (test "main") generated 1 warning
+warning: `holon-tui` (bin "holon-tui") generated 1 warning (1 duplicate)
+warning: `holon-mcp` (bin "holon-mcp" test) generated 1 warning (1 duplicate)
+warning: `holon-mcp` (bin "holon-mcp") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (test "snapshot_boot") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (example "crdt_incr_bench") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (example "diag_harness") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (lib test) generated 1 warning (1 duplicate)
+warning: `holon-tui` (test "main") generated 1 warning (1 duplicate)
+warning: `holon-tui` (test "tui_ui_pbt") generated 1 warning (1 duplicate)
+   Compiling holon-tools v0.1.0 (<archive>/tools)
+warning: `holon-gpui` (lib test) generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (test "integration") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_capture_replay") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_gherkin_replay") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_sim_replay_capture") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_windowed_minimize") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (bin "holon-gpui") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "main") generated 1 warning (1 duplicate)
+warning: unused dependency `holon-connections`
+  --> crates/holon/Cargo.toml:68:1
+   |
+68 | holon-connections.workspace = true
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `holon-connections`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `loro`
+  --> crates/holon/Cargo.toml:40:1
+   |
+40 | loro.workspace = true
+   | ^^^^
+   |
+help: consider removing the dependency on `loro`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon/Cargo.toml:80:1
+   |
+80 | proptest-state-machine = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+   --> crates/holon/Cargo.toml:122:1
+    |
+122 | proptest-state-machine.workspace = true
+    | ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon` (manifest) generated 4 warnings
+warning: unused dependency `opentelemetry-stdout`
+  --> crates/holon-frontend/Cargo.toml:71:1
+   |
+71 | opentelemetry-stdout = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `opentelemetry-stdout`
+warning: `holon-frontend` (manifest) generated 1 warning
+warning: unused dependency `declarative_enum_dispatch`
+   --> crates/holon-integration-tests/Cargo.toml:187:1
+    |
+187 | declarative_enum_dispatch = { version = "0.1", optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `declarative_enum_dispatch`
+warning: unused dependency `holon-block-roundtrip-testing`
+   --> crates/holon-integration-tests/Cargo.toml:175:1
+    |
+175 | holon-block-roundtrip-testing = { workspace = true, optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `holon-block-roundtrip-testing`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `holon-connections-testing`
+   --> crates/holon-integration-tests/Cargo.toml:142:1
+    |
+142 | holon-connections-testing = { path = "../holon-connections-testing", optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `holon-connections-testing`
+warning: `holon-integration-tests` (manifest) generated 3 warnings
+warning: unused dependency `holon-rows`
+  --> crates/holon-kitchen/Cargo.toml:18:1
+   |
+18 | holon-rows.workspace = true
+   | ^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `holon-rows`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon-kitchen` (manifest) generated 1 warning
+warning: unused dependency `workspace-hack`
+  --> crates/holon-loopback-guard/Cargo.toml:16:1
+   |
+16 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-loopback-guard` (manifest) generated 1 warning
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon-loro/Cargo.toml:44:1
+   |
+44 | proptest-state-machine = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon-loro/Cargo.toml:60:1
+   |
+60 | proptest-state-machine.workspace = true
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon-loro` (manifest) generated 2 warnings
+warning: unused dependency `workspace-hack`
+  --> crates/holon-secrets/Cargo.toml:20:1
+   |
+20 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-secrets` (manifest) generated 1 warning
+warning: unused dependency `workspace-hack`
+  --> crates/holon-storage-provider/Cargo.toml:17:1
+   |
+17 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-storage-provider` (manifest) generated 1 warning
+warning: unused dependency `ahash`
+   --> workspace-hack/Cargo.toml:246:1
+    |
+246 | ahash = { version = "0.8", features = ["compile-time-rng"] }
+    | ^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `ahash`
+warning: unused dependency `clap`
+   --> workspace-hack/Cargo.toml:126:1
+    |
+126 | clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+    | ^^^^
+    |
+help: consider removing the dependency on `clap`
+warning: unused dependency `core-graphics`
+   --> workspace-hack/Cargo.toml:249:1
+    |
+249 | core-graphics = { version = "0.24" }
+    | ^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `core-graphics`
+warning: unused dependency `derive_more`
+   --> workspace-hack/Cargo.toml:131:1
+    |
+131 | derive_more = { version = "2", features = ["debug", "deref", "display", "from", "from_str", "into_iterator", "is_variant", "try_int...
+    | ^^^^^^^^^^^
+    |
+help: consider removing the dependency on `derive_more`
+warning: unused dependency `derive_more`
+   --> workspace-hack/Cargo.toml:250:1
+    |
+250 | derive_more = { version = "2", default-features = false, features = ["add", "add_assign", "deref_mut", "mul", "mul_assign", "not"] }
+    | ^^^^^^^^^^^
+    |
+help: consider removing the dependency on `derive_more`
+warning: unused dependency `dispatch2`
+   --> workspace-hack/Cargo.toml:252:1
+    |
+252 | dispatch2 = { version = "0.3" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `dispatch2`
+warning: unused dependency `fastbloom`
+   --> workspace-hack/Cargo.toml:134:1
+    |
+134 | fastbloom = { version = "0.14" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `fastbloom`
+warning: unused dependency `fastrand`
+   --> workspace-hack/Cargo.toml:135:1
+    |
+135 | fastrand = { version = "2" }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `fastrand`
+warning: unused dependency `hashbrown`
+   --> workspace-hack/Cargo.toml:140:1
+    |
+140 | hashbrown = { version = "0.16" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `hashbrown`
+warning: unused dependency `image`
+   --> workspace-hack/Cargo.toml:258:1
+    |
+258 | image = { version = "0.25" }
+    | ^^^^^
+    |
+help: consider removing the dependency on `image`
+warning: unused dependency `instant`
+   --> workspace-hack/Cargo.toml:147:1
+    |
+147 | instant = { version = "0.1", default-features = false, features = ["wasm-bindgen"] }
+    | ^^^^^^^
+    |
+help: consider removing the dependency on `instant`
+warning: unused dependency `itertools`
+   --> workspace-hack/Cargo.toml:259:1
+    |
+259 | itertools = { version = "0.13" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `itertools`
+warning: unused dependency `loro_fractional_index`
+   --> workspace-hack/Cargo.toml:152:1
+    |
+152 | loro_fractional_index = { version = "1", default-features = false, features = ["serde"] }
+    | ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `loro_fractional_index`
+warning: unused dependency `markdown`
+   --> workspace-hack/Cargo.toml:153:1
+    |
+153 | markdown = { version = "1", features = ["serde"] }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `markdown`
+warning: unused dependency `miette`
+   --> workspace-hack/Cargo.toml:155:1
+    |
+155 | miette = { version = "7", features = ["fancy"] }
+    | ^^^^^^
+    |
+help: consider removing the dependency on `miette`
+warning: unused dependency `nom`
+   --> workspace-hack/Cargo.toml:157:1
+    |
+157 | nom = { version = "7" }
+    | ^^^
+    |
+help: consider removing the dependency on `nom`
+warning: unused dependency `opentelemetry_sdk`
+   --> workspace-hack/Cargo.toml:162:1
+    |
+162 | opentelemetry_sdk = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
+    | ^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `opentelemetry_sdk`
+warning: unused dependency `postcard`
+   --> workspace-hack/Cargo.toml:165:1
+    |
+165 | postcard = { version = "1", features = ["experimental-derive", "use-std"] }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `postcard`
+warning: unused dependency `regex`
+   --> workspace-hack/Cargo.toml:173:1
+    |
+173 | regex = { version = "1" }
+    | ^^^^^
+    |
+help: consider removing the dependency on `regex`
+warning: unused dependency `reqwest-594e8ee84c453af0`
+   --> workspace-hack/Cargo.toml:267:1
+    |
+267 | reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls", "rustls...
+    | ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `reqwest-594e8ee84c453af0`
+warning: unused dependency `rmcp`
+   --> workspace-hack/Cargo.toml:176:1
+    |
+176 | rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["auth", "client", "transport-c...
+    | ^^^^
+    |
+help: consider removing the dependency on `rmcp`
+warning: unused dependency `similar`
+   --> workspace-hack/Cargo.toml:183:1
+    |
+183 | similar = { version = "2", features = ["inline", "unicode"] }
+    | ^^^^^^^
+    |
+help: consider removing the dependency on `similar`
+warning: unused dependency `tracing-subscriber`
+   --> workspace-hack/Cargo.toml:199:1
+    |
+199 | tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+    | ^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `tracing-subscriber`
+warning: unused dependency `twox-hash`
+   --> workspace-hack/Cargo.toml:200:1
+    |
+200 | twox-hash = { version = "2" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `twox-hash`
+warning: unused dependency `vergen-gitcl`
+   --> workspace-hack/Cargo.toml:205:1
+    |
+205 | vergen-gitcl = { version = "1", features = ["build"] }
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `vergen-gitcl`
+warning: `workspace-hack` (manifest) generated 25 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9m 27s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+────────────
+ Nextest run ID d12bae13-4b64-45c6-adac-8e483ada35aa with nextest profile: load-tolerant
+    Starting 1 test across 2 binaries (750 tests and 142 binaries skipped)
+        FAIL [   0.045s] (1/1) holon api::ui_watcher::handover::every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles
+  stdout ───
+
+    running 1 test
+    test api::ui_watcher::handover::every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles ... FAILED
+
+    failures:
+
+    failures:
+        api::ui_watcher::handover::every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 309 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'api::ui_watcher::handover::every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles' (1241138434) panicked at crates/holon/src/api/ui_watcher.rs:1322:9:
+    superseded before its own hand-over: data owed: applied 68 sent 69
+    superseded, hands over after its successor did: data owed: applied 68 sent 69
+    generated: Test failed: data owed: applied 0 sent 1.
+    minimal failing input: [
+        Trigger {
+            structural: false,
+        },
+        Trigger {
+            structural: false,
+        },
+        Trigger {
+            structural: false,
+        },
+        Begin(
+            3,
+        ),
+        Route {
+            to: [
+                3,
+            ],
+            gap: 0,
+        },
+        Fail(
+            3,
+        ),
+    ]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.055s] 1 test run: 0 passed, 1 failed, 750 skipped
+        FAIL [   0.045s] (1/1) holon api::ui_watcher::handover::every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles
+error: test run failed
+exit: 100
+
+==== windowed confirmation, same revert, run 1 of 4 (3 of 4 red; the tree is green)
+command: cargo nextest run --workspace --features holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt --no-fail-fast --no-tests=fail --test-threads 1 -E 'binary_id(holon-gpui::main) & test(/settled_frame_shows_every_row_for_a_superseded_generation$/)'
+shape env: RUST_FONTCONFIG_DLOPEN=on
+shape env: HOLON_BUILD_SHA unset
+shape env: HOLON_BUILD_TIME unset
+shape env: RUSTFLAGS unset
+shape env: FLOW_JOB_CORES=2
+shape env: NEXTEST_TEST_THREADS=2
+shape env: RUST_TEST_THREADS=2
+shape env: HOLON_PBT_BUDGET=lane
+shape env: CARGO_* set: CARGO_BUILD_JOBS CARGO_HOME CARGO_TARGET_DIR 
+--- <lane>/crates/holon/src/api/ui_watcher.rs	2026-11-24 22:40:09
++++ <archive>/crates/holon/src/api/ui_watcher.rs	2026-11-24 22:52:20
+@@ -101,7 +101,7 @@
+     fn begin_render(&self) -> (u64, OwedChild) {
+         let seq = self.data.sent_with_children();
+         let claim = self.data.owed_child();
+-        claim.cursor().routed(seq);
++        self.data.routed(seq);
+         (seq, claim)
+     }
+ 
+@@ -124,7 +124,7 @@
+         if render.sent() > 0 || handed <= begun {
+             return begun;
+         }
+-        render.routed(handed);
++        self.data.routed(handed);
+         handed
+     }
+ }
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: unused workspace dependency `holon-connections-testing`
+   --> Cargo.toml:321:1
+    |
+321 | holon-connections-testing = { path = "crates/holon-connections-testing" }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `holon-connections-testing`
+warning: unused workspace dependency `is_ci`
+   --> Cargo.toml:226:1
+    |
+226 | is_ci = "1.2"
+    | ^^^^^
+    |
+help: consider removing the workspace dependency `is_ci`
+warning: unused workspace dependency `opentelemetry-appender-tracing`
+   --> Cargo.toml:130:1
+    |
+130 | opentelemetry-appender-tracing = "0.31"
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `opentelemetry-appender-tracing`
+warning: unused workspace dependency `portable-pty`
+   --> Cargo.toml:225:1
+    |
+225 | portable-pty = "0.8"
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `portable-pty`
+warning: unused workspace dependency `prqlc-parser`
+   --> Cargo.toml:270:1
+    |
+270 | prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `prqlc-parser`
+warning: unused workspace dependency `reqwest`
+   --> Cargo.toml:179:1
+    |
+179 | reqwest = { version = "0.13", default-features = false, features = [
+    | ^^^^^^^
+    |
+help: consider removing the workspace dependency `reqwest`
+warning: unused workspace dependency `rustls`
+   --> Cargo.toml:183:1
+    |
+183 | rustls = { version = "0.23", default-features = false, features = [
+    | ^^^^^^
+    |
+help: consider removing the workspace dependency `rustls`
+warning: unused workspace dependency `strip-ansi-escapes`
+   --> Cargo.toml:227:1
+    |
+227 | strip-ansi-escapes = "0.2"
+    | ^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `strip-ansi-escapes`
+warning: unused workspace dependency `ulid`
+   --> Cargo.toml:146:1
+    |
+146 | ulid = "1.1"
+    | ^^^^
+    |
+help: consider removing the workspace dependency `ulid`
+warning: unused workspace dependency `walkdir`
+   --> Cargo.toml:214:1
+    |
+214 | walkdir = "2"
+    | ^^^^^^^
+    |
+help: consider removing the workspace dependency `walkdir`
+warning: workspace (manifest) generated 12 warnings
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-tui` (bin "holon-tui") generated 1 warning
+warning: `holon-tui` (test "main") generated 1 warning (1 duplicate)
+warning: `holon-tui` (test "tui_ui_pbt") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (test "integration") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (test "snapshot_boot") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (example "crdt_incr_bench") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (lib test) generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (example "diag_harness") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_windowed_minimize") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (bin "holon-gpui") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "main") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_capture_replay") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_gherkin_replay") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (test "gpui_sim_replay_capture") generated 1 warning (1 duplicate)
+warning: `holon-gpui` (lib test) generated 1 warning (1 duplicate)
+warning: `holon-mcp` (bin "holon-mcp" test) generated 1 warning (1 duplicate)
+warning: `holon-mcp` (bin "holon-mcp") generated 1 warning (1 duplicate)
+warning: `holon-app` (test "main") generated 1 warning (1 duplicate)
+warning: unused dependency `holon-connections`
+  --> crates/holon/Cargo.toml:68:1
+   |
+68 | holon-connections.workspace = true
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `holon-connections`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `loro`
+  --> crates/holon/Cargo.toml:40:1
+   |
+40 | loro.workspace = true
+   | ^^^^
+   |
+help: consider removing the dependency on `loro`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon/Cargo.toml:80:1
+   |
+80 | proptest-state-machine = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+   --> crates/holon/Cargo.toml:122:1
+    |
+122 | proptest-state-machine.workspace = true
+    | ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon` (manifest) generated 4 warnings
+warning: unused dependency `opentelemetry-stdout`
+  --> crates/holon-frontend/Cargo.toml:71:1
+   |
+71 | opentelemetry-stdout = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `opentelemetry-stdout`
+warning: `holon-frontend` (manifest) generated 1 warning
+warning: unused dependency `declarative_enum_dispatch`
+   --> crates/holon-integration-tests/Cargo.toml:187:1
+    |
+187 | declarative_enum_dispatch = { version = "0.1", optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `declarative_enum_dispatch`
+warning: unused dependency `holon-block-roundtrip-testing`
+   --> crates/holon-integration-tests/Cargo.toml:175:1
+    |
+175 | holon-block-roundtrip-testing = { workspace = true, optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `holon-block-roundtrip-testing`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `holon-connections-testing`
+   --> crates/holon-integration-tests/Cargo.toml:142:1
+    |
+142 | holon-connections-testing = { path = "../holon-connections-testing", optional = true }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `holon-connections-testing`
+warning: `holon-integration-tests` (manifest) generated 3 warnings
+warning: unused dependency `holon-rows`
+  --> crates/holon-kitchen/Cargo.toml:18:1
+   |
+18 | holon-rows.workspace = true
+   | ^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `holon-rows`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon-kitchen` (manifest) generated 1 warning
+warning: unused dependency `workspace-hack`
+  --> crates/holon-loopback-guard/Cargo.toml:16:1
+   |
+16 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-loopback-guard` (manifest) generated 1 warning
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon-loro/Cargo.toml:44:1
+   |
+44 | proptest-state-machine = { workspace = true, optional = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: unused dependency `proptest-state-machine`
+  --> crates/holon-loro/Cargo.toml:60:1
+   |
+60 | proptest-state-machine.workspace = true
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `proptest-state-machine`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `holon-loro` (manifest) generated 2 warnings
+warning: unused dependency `workspace-hack`
+  --> crates/holon-secrets/Cargo.toml:20:1
+   |
+20 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-secrets` (manifest) generated 1 warning
+warning: unused dependency `workspace-hack`
+  --> crates/holon-storage-provider/Cargo.toml:17:1
+   |
+17 | workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+   | ^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `workspace-hack`
+warning: `holon-storage-provider` (manifest) generated 1 warning
+warning: unused dependency `ahash`
+   --> workspace-hack/Cargo.toml:246:1
+    |
+246 | ahash = { version = "0.8", features = ["compile-time-rng"] }
+    | ^^^^^
+    |
+    = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `ahash`
+warning: unused dependency `clap`
+   --> workspace-hack/Cargo.toml:126:1
+    |
+126 | clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+    | ^^^^
+    |
+help: consider removing the dependency on `clap`
+warning: unused dependency `core-graphics`
+   --> workspace-hack/Cargo.toml:249:1
+    |
+249 | core-graphics = { version = "0.24" }
+    | ^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `core-graphics`
+warning: unused dependency `derive_more`
+   --> workspace-hack/Cargo.toml:131:1
+    |
+131 | derive_more = { version = "2", features = ["debug", "deref", "display", "from", "from_str", "into_iterator", "is_variant", "try_int...
+    | ^^^^^^^^^^^
+    |
+help: consider removing the dependency on `derive_more`
+warning: unused dependency `derive_more`
+   --> workspace-hack/Cargo.toml:250:1
+    |
+250 | derive_more = { version = "2", default-features = false, features = ["add", "add_assign", "deref_mut", "mul", "mul_assign", "not"] }
+    | ^^^^^^^^^^^
+    |
+help: consider removing the dependency on `derive_more`
+warning: unused dependency `dispatch2`
+   --> workspace-hack/Cargo.toml:252:1
+    |
+252 | dispatch2 = { version = "0.3" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `dispatch2`
+warning: unused dependency `fastbloom`
+   --> workspace-hack/Cargo.toml:134:1
+    |
+134 | fastbloom = { version = "0.14" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `fastbloom`
+warning: unused dependency `fastrand`
+   --> workspace-hack/Cargo.toml:135:1
+    |
+135 | fastrand = { version = "2" }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `fastrand`
+warning: unused dependency `hashbrown`
+   --> workspace-hack/Cargo.toml:140:1
+    |
+140 | hashbrown = { version = "0.16" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `hashbrown`
+warning: unused dependency `image`
+   --> workspace-hack/Cargo.toml:258:1
+    |
+258 | image = { version = "0.25" }
+    | ^^^^^
+    |
+help: consider removing the dependency on `image`
+warning: unused dependency `instant`
+   --> workspace-hack/Cargo.toml:147:1
+    |
+147 | instant = { version = "0.1", default-features = false, features = ["wasm-bindgen"] }
+    | ^^^^^^^
+    |
+help: consider removing the dependency on `instant`
+warning: unused dependency `itertools`
+   --> workspace-hack/Cargo.toml:259:1
+    |
+259 | itertools = { version = "0.13" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `itertools`
+warning: unused dependency `loro_fractional_index`
+   --> workspace-hack/Cargo.toml:152:1
+    |
+152 | loro_fractional_index = { version = "1", default-features = false, features = ["serde"] }
+    | ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `loro_fractional_index`
+warning: unused dependency `markdown`
+   --> workspace-hack/Cargo.toml:153:1
+    |
+153 | markdown = { version = "1", features = ["serde"] }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `markdown`
+warning: unused dependency `miette`
+   --> workspace-hack/Cargo.toml:155:1
+    |
+155 | miette = { version = "7", features = ["fancy"] }
+    | ^^^^^^
+    |
+help: consider removing the dependency on `miette`
+warning: unused dependency `nom`
+   --> workspace-hack/Cargo.toml:157:1
+    |
+157 | nom = { version = "7" }
+    | ^^^
+    |
+help: consider removing the dependency on `nom`
+warning: unused dependency `opentelemetry_sdk`
+   --> workspace-hack/Cargo.toml:162:1
+    |
+162 | opentelemetry_sdk = { version = "0.31", features = ["spec_unstable_logs_enabled", "testing"] }
+    | ^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `opentelemetry_sdk`
+warning: unused dependency `postcard`
+   --> workspace-hack/Cargo.toml:165:1
+    |
+165 | postcard = { version = "1", features = ["experimental-derive", "use-std"] }
+    | ^^^^^^^^
+    |
+help: consider removing the dependency on `postcard`
+warning: unused dependency `regex`
+   --> workspace-hack/Cargo.toml:173:1
+    |
+173 | regex = { version = "1" }
+    | ^^^^^
+    |
+help: consider removing the dependency on `regex`
+warning: unused dependency `reqwest-594e8ee84c453af0`
+   --> workspace-hack/Cargo.toml:267:1
+    |
+267 | reqwest-594e8ee84c453af0 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls", "rustls...
+    | ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `reqwest-594e8ee84c453af0`
+warning: unused dependency `rmcp`
+   --> workspace-hack/Cargo.toml:176:1
+    |
+176 | rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["auth", "client", "transport-c...
+    | ^^^^
+    |
+help: consider removing the dependency on `rmcp`
+warning: unused dependency `similar`
+   --> workspace-hack/Cargo.toml:183:1
+    |
+183 | similar = { version = "2", features = ["inline", "unicode"] }
+    | ^^^^^^^
+    |
+help: consider removing the dependency on `similar`
+warning: unused dependency `tracing-subscriber`
+   --> workspace-hack/Cargo.toml:199:1
+    |
+199 | tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+    | ^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `tracing-subscriber`
+warning: unused dependency `twox-hash`
+   --> workspace-hack/Cargo.toml:200:1
+    |
+200 | twox-hash = { version = "2" }
+    | ^^^^^^^^^
+    |
+help: consider removing the dependency on `twox-hash`
+warning: unused dependency `vergen-gitcl`
+   --> workspace-hack/Cargo.toml:205:1
+    |
+205 | vergen-gitcl = { version = "1", features = ["build"] }
+    | ^^^^^^^^^^^^
+    |
+help: consider removing the dependency on `vergen-gitcl`
+warning: `workspace-hack` (manifest) generated 25 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+────────────
+ Nextest run ID b3e34213-ebf4-4f4c-8881-bc4104272f9d with nextest profile: default
+    Starting 1 test across 1 binary (360 tests and 143 binaries skipped)
+        SLOW [> 30.000s] (───) holon-gpui::main settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation
+        SLOW [> 60.000s] (───) holon-gpui::main settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation
+        FAIL [  62.172s] (1/1) holon-gpui::main settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation
+  stdout ───
+
+    running 1 test
+    test settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation has been running for over 60 seconds
+    test settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation ... FAILED
+
+    failures:
+
+    failures:
+        settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 360 filtered out; finished in 62.13s
+
+  stderr ───
+    [driver-hop] open [2, 1] [(AddChild, HeldBeforeEngine { hold_ms: 200 })]
+    2026-11-24T22:02:00.819530Z  WARN http_client: Using fake HTTP client with 404 response
+    2026-11-24T22:02:00.856240Z  WARN holon_profiles::type_registry: computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns entity="block" fields=has_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+    2026-11-24T22:02:01.574068Z  WARN holon_filesystem::file_sync_controller: [FileSyncController] write-back SKIPPED: the holder's membership does not match the authority's, so this render would project a partially-folded document over disk. The diff that resolves it is already in flight and will re-trigger the render. (Further skips of this document log at debug until it settles.) doc=block:hop-page-a difference=block:hop-c0@block:hop-page-a,block:hop-c1@block:hop-page-a held=0 authority=2
+    2026-11-24T22:02:01.581263Z  WARN holon_filesystem::file_sync_controller: [FileSyncController] write-back SKIPPED: the holder's membership does not match the authority's, so this render would project a partially-folded document over disk. The diff that resolves it is already in flight and will re-trigger the render. (Further skips of this document log at debug until it settles.) doc=block:hop-page-b difference=block:hop-c2@block:hop-page-b held=0 authority=1
+    [GPUI] pre-warm timeout — window will open with loading state
+    [driver-hop] opened
+    [driver-hop] step 0 AddChild HeldBeforeEngine { hold_ms: 200 } of [(AddChild, HeldBeforeEngine { hold_ms: 200 })]
+    panic record: no target installed for the panic at frontends/gpui/tests/settle_window_fixed_point.rs:1386:77
+    [test_tracing] UNATTRIBUTED PROBLEM on thread settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation — 0 test scopes active, cannot blame one: [PANIC] settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation (frontends/gpui/tests/settle_window_fixed_point.rs:1386): Case failed: step 0 AddChild HeldBeforeEngine { hold_ms: 200 } of [(AddChild, HeldBeforeEngine { hold_ms: 200 })]: window did not settle within 60s: frame FrameNo(27) reflects EngineSeq(65), target EngineSeq(66), dirty false, pending views [], owed ["block:hop-page-a: applied through 65"], operations in flight 0, held bridges []
+
+    thread 'settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation' (1241147527) panicked at frontends/gpui/tests/settle_window_fixed_point.rs:1386:77:
+    Case failed: step 0 AddChild HeldBeforeEngine { hold_ms: 200 } of [(AddChild, HeldBeforeEngine { hold_ms: 200 })]: window did not settle within 60s: frame FrameNo(27) reflects EngineSeq(65), target EngineSeq(66), dirty false, pending views [], owed ["block:hop-page-a: applied through 65"], operations in flight 0, held bridges []
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  62.180s] 1 test run: 0 passed, 1 failed, 360 skipped
+        FAIL [  62.172s] (1/1) holon-gpui::main settle_window_fixed_point::driver_hop::settled_frame_shows_every_row_for_a_superseded_generation
+error: test run failed
+exit: 100

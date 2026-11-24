@@ -479,7 +479,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-reboot-misses-observability-caps`
 - `windowed-seeded-secret-pre-warm-timeout`
 - `windowed-setfield-popup-pre-warm-timeout`
-- `windowed-settle-timeout-graft-page-owed`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeback-churning-file-stall-disclosed-twice`

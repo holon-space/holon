@@ -95,18 +95,22 @@ impl Delivery {
     }
 
     /// The seq a render that reads the store after this call reflects: every
-    /// batch routed so far was committed before it. The render owes it on
-    /// `data` until the event that shows the render claims it.
-    fn begin_render(&self) -> u64 {
+    /// batch routed so far was committed before it. The render owes it on the
+    /// returned child of `data`, so a render superseded before its successor
+    /// begins takes the claim with it when it ends.
+    fn begin_render(&self) -> (u64, OwedChild) {
         let seq = self.data.sent_with_children();
-        self.data.routed(seq);
-        seq
+        let claim = self.data.owed_child();
+        claim.cursor().routed(seq);
+        (seq, claim)
     }
 
     /// The seq a render that `begun` at that seq reflects once its own
     /// subscription is registered: the predecessor's batches routed so far are
     /// in its read, unless batches routed to the render itself already follow
-    /// that read. The render owes it on `data`, so the predecessor can end.
+    /// that read. The render owes it on its own cursor, so the predecessor can
+    /// end: a successor that takes over later reads the claim from there, and a
+    /// render superseded before any successor read it takes the claim with it.
     fn take_over(
         &self,
         begun: u64,
@@ -120,7 +124,7 @@ impl Delivery {
         if render.sent() > 0 || handed <= begun {
             return begun;
         }
-        self.data.routed(handed);
+        render.routed(handed);
         handed
     }
 }
@@ -436,169 +440,179 @@ async fn render_and_forward(
     delivery: &Delivery,
 ) {
     let Handover {
-        release_predecessor,
+        mut release_predecessor,
         released,
         predecessor,
     } = handover;
-    let rendered = delivery.begin_render();
-    // Advice-rule status surface (ADR 0022 "rule blocks render their own
-    // status"): a rule block whose id carries a NON-Active status has its
-    // render replaced by the error surface, so parse errors and async DDL
-    // failures are visible in place (v1 replaces, like the existing
-    // render-failure path; over-cap banner comes later).
-    if let Some(status) = engine.advice_status().get(block_id.as_str())
-        && !status.is_active()
-    {
-        let _ = tx
-            .send(UiEvent::Structure {
-                render_expr: error_render_expr(&format!("advice rule: {status}")),
-                candidates: Vec::new(),
-                generation,
-                seq: rendered,
-            })
-            .await;
-        return;
-    }
-
-    match delivery
-        .subscribe(
-            render_cursor.cursor(),
-            engine.blocks().render_entity(block_id, variant),
-        )
-        .await
-    {
-        Ok((render_expr, mut data_stream)) => {
-            let rendered =
-                delivery.take_over(rendered, render_cursor.cursor(), predecessor.as_deref());
-            drop(release_predecessor);
-            tracing::info!(
-                "[UiWatcher] render_entity('{}') OK: gen={}, render={:?}",
-                block_id,
-                generation,
-                match &render_expr {
-                    RenderExpr::FunctionCall { name, .. } => name.as_str(),
-                    _ => "non-function",
-                },
-            );
-
-            if tx
-                .send(UiEvent::Structure {
-                    render_expr,
-                    candidates: Vec::new(),
-                    generation,
-                    seq: 0,
-                })
-                .await
-                .is_ok()
-            {
-                forward_data_stream(
-                    &mut data_stream,
-                    &tx,
-                    profile_resolver,
-                    generation,
-                    rendered,
-                )
-                .await;
-            }
-            let Err(oneshot::error::RecvError { .. }) = released.await;
-        }
-        Err(e) => {
-            if e.downcast_ref::<crate::api::block_domain::NoBlockRow>()
-                .is_some()
-            {
-                // WARN, not ERROR: a block with no row is a watch STATE, not a
-                // failed render — the watcher discloses it with the same
-                // visible error widget and recovers on its own when a row
-                // appears.
-                tracing::warn!(
-                    block_id = %block_id,
-                    "[UiWatcher] render_entity found no block row — nothing to render until one \
-                     appears"
-                );
-                let _ = tx
-                    .send(UiEvent::Structure {
-                        render_expr: error_render_expr(&format!("{e:#}")),
-                        candidates: Vec::new(),
-                        generation,
-                        seq: rendered,
-                    })
-                    .await;
-                return;
-            }
-            if let Some(unparseable) =
-                e.downcast_ref::<crate::api::block_domain::UnparseableRenderSource>()
-            {
-                // WARN, not ERROR: the author's render source is wrong, and the
-                // error widget below discloses that on the block itself.
-                tracing::warn!(block_id = %block_id, "[UiWatcher] {unparseable}");
-                let _ = tx
-                    .send(UiEvent::Structure {
-                        render_expr: error_render_expr(&format!("{e:#}")),
-                        candidates: Vec::new(),
-                        generation,
-                        seq: rendered,
-                    })
-                    .await;
-                return;
-            }
-            let verdict = missing_table_verdict(engine.integration_attribution(), &e);
-            if let Some(verdict) = verdict.as_ref().filter(|v| v.is_fully_explained()) {
-                // WARN, not ERROR: every one of these tables belongs to an
-                // integration whose failure was already disclosed at boot with
-                // its real cause. Raising it again per block is the flood, not
-                // the signal.
-                tracing::warn!(
-                    "[UiWatcher] render_entity('{}') reads tables of integrations that are not \
-                     connected: {}",
-                    block_id,
-                    verdict.disclosures().join(" · ")
-                );
-                let _ = tx
-                    .send(UiEvent::Structure {
-                        render_expr: disclosed_render_expr(verdict),
-                        candidates: Vec::new(),
-                        generation,
-                        seq: rendered,
-                    })
-                    .await;
-                return;
-            }
-
-            // Anything the inert half does not fully explain stays loud, and
-            // carries BOTH the unexplained owners and any inert integrations
-            // that co-occurred — dropping either would hide the half the user
-            // can act on.
-            let notes = verdict.map(|v| v.notes()).unwrap_or_default();
-            let attribution = if notes.is_empty() {
-                String::new()
-            } else {
-                format!(" — {}", notes.join("; "))
-            };
-            // ERROR, not WARN: WARN is the disclosed-degradation tier and is
-            // deliberately not read by `inv-no-observed-errors`. A block that
-            // failed to render is a real failure, so it must reach the
-            // error-capture oracles. The error widget below stays: it is the
-            // visible, disclosed surface for the same failure.
-            //
-            // `{:#}`, not `{}`: the matview error chains its cause rather than
-            // spelling it in, and plain Display prints only the outermost
-            // context — which would drop the missing table names entirely.
-            tracing::error!(
-                "[UiWatcher] render_entity('{}') failed: {:#}{}",
-                block_id,
-                e,
-                attribution
-            );
+    let (rendered, begin_claim) = delivery.begin_render();
+    let mut held_stream = None;
+    'rendered: {
+        // Advice-rule status surface (ADR 0022 "rule blocks render their own
+        // status"): a rule block whose id carries a NON-Active status has its
+        // render replaced by the error surface, so parse errors and async DDL
+        // failures are visible in place (v1 replaces, like the existing
+        // render-failure path; over-cap banner comes later).
+        if let Some(status) = engine.advice_status().get(block_id.as_str())
+            && !status.is_active()
+        {
             let _ = tx
                 .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("{e:#}{attribution}")),
+                    render_expr: error_render_expr(&format!("advice rule: {status}")),
                     candidates: Vec::new(),
                     generation,
                     seq: rendered,
                 })
                 .await;
+            break 'rendered;
+        }
+
+        match delivery
+            .subscribe(
+                render_cursor.cursor(),
+                engine.blocks().render_entity(block_id, variant),
+            )
+            .await
+        {
+            Ok((render_expr, mut data_stream)) => {
+                let rendered =
+                    delivery.take_over(rendered, render_cursor.cursor(), predecessor.as_deref());
+                drop(release_predecessor.take());
+                tracing::info!(
+                    "[UiWatcher] render_entity('{}') OK: gen={}, render={:?}",
+                    block_id,
+                    generation,
+                    match &render_expr {
+                        RenderExpr::FunctionCall { name, .. } => name.as_str(),
+                        _ => "non-function",
+                    },
+                );
+
+                if tx
+                    .send(UiEvent::Structure {
+                        render_expr,
+                        candidates: Vec::new(),
+                        generation,
+                        seq: 0,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    forward_data_stream(
+                        &mut data_stream,
+                        &tx,
+                        profile_resolver,
+                        generation,
+                        rendered,
+                    )
+                    .await;
+                }
+                held_stream = Some(data_stream);
+            }
+            Err(e) => {
+                if e.downcast_ref::<crate::api::block_domain::NoBlockRow>()
+                    .is_some()
+                {
+                    // WARN, not ERROR: a block with no row is a watch STATE,
+                    // not a failed render — the watcher discloses it with the
+                    // same visible error widget and recovers on its own when a
+                    // row appears.
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "[UiWatcher] render_entity found no block row — nothing to render until one \
+                         appears"
+                    );
+                    let _ = tx
+                        .send(UiEvent::Structure {
+                            render_expr: error_render_expr(&format!("{e:#}")),
+                            candidates: Vec::new(),
+                            generation,
+                            seq: rendered,
+                        })
+                        .await;
+                    break 'rendered;
+                }
+                if let Some(unparseable) =
+                    e.downcast_ref::<crate::api::block_domain::UnparseableRenderSource>()
+                {
+                    // WARN, not ERROR: the author's render source is wrong, and
+                    // the error widget below discloses that on the block
+                    // itself.
+                    tracing::warn!(block_id = %block_id, "[UiWatcher] {unparseable}");
+                    let _ = tx
+                        .send(UiEvent::Structure {
+                            render_expr: error_render_expr(&format!("{e:#}")),
+                            candidates: Vec::new(),
+                            generation,
+                            seq: rendered,
+                        })
+                        .await;
+                    break 'rendered;
+                }
+                let verdict = missing_table_verdict(engine.integration_attribution(), &e);
+                if let Some(verdict) = verdict.as_ref().filter(|v| v.is_fully_explained()) {
+                    // WARN, not ERROR: every one of these tables belongs to an
+                    // integration whose failure was already disclosed at boot
+                    // with its real cause. Raising it again per block is the
+                    // flood, not the signal.
+                    tracing::warn!(
+                        "[UiWatcher] render_entity('{}') reads tables of integrations that are not \
+                     connected: {}",
+                        block_id,
+                        verdict.disclosures().join(" · ")
+                    );
+                    let _ = tx
+                        .send(UiEvent::Structure {
+                            render_expr: disclosed_render_expr(verdict),
+                            candidates: Vec::new(),
+                            generation,
+                            seq: rendered,
+                        })
+                        .await;
+                    break 'rendered;
+                }
+
+                // Anything the inert half does not fully explain stays loud,
+                // and carries BOTH the unexplained owners and any inert
+                // integrations that co-occurred — dropping either would hide
+                // the half the user can act on.
+                let notes = verdict.map(|v| v.notes()).unwrap_or_default();
+                let attribution = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", notes.join("; "))
+                };
+                // ERROR, not WARN: WARN is the disclosed-degradation tier and
+                // is deliberately not read by `inv-no-observed-errors`. A block
+                // that failed to render is a real failure, so it must reach the
+                // error-capture oracles. The error widget below stays: it is
+                // the visible, disclosed surface for the same failure.
+                //
+                // `{:#}`, not `{}`: the matview error chains its cause rather
+                // than spelling it in, and plain Display prints only the
+                // outermost context — which would drop the missing table names
+                // entirely.
+                tracing::error!(
+                    "[UiWatcher] render_entity('{}') failed: {:#}{}",
+                    block_id,
+                    e,
+                    attribution
+                );
+                let _ = tx
+                    .send(UiEvent::Structure {
+                        render_expr: error_render_expr(&format!("{e:#}{attribution}")),
+                        candidates: Vec::new(),
+                        generation,
+                        seq: rendered,
+                    })
+                    .await;
+            }
         }
     }
+    drop(release_predecessor);
+    // The data stream and the begin claim end only once a successor holds its
+    // claim or the watcher ended.
+    let Err(oneshot::error::RecvError { .. }) = released.await;
+    drop((held_stream, begin_claim));
 }
 
 /// Forward a data CDC stream as UiEvent::Data events.
@@ -956,5 +970,355 @@ mod tests {
             "plain Display drops the chained cause — the log MUST use {{:#}}"
         );
         assert!(format!("{error:#}").contains("cc_session"));
+    }
+}
+
+/// The claims one `watch_ui` puts on its consumer's data cursor, under every
+/// interleaving of re-render triggers, router batches and hand-overs between
+/// render generations. The model only orders the calls; the cursors and the
+/// claims are the real `Delivery` and `DeliveryCursor`.
+#[cfg(test)]
+mod handover {
+    use std::collections::VecDeque;
+
+    use proptest::prelude::*;
+    use proptest::test_runner::Config;
+    use proptest::test_runner::TestCaseError;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        /// A new generation supersedes the current one. A structural trigger
+        /// first routes its batch to the trigger cursor.
+        Trigger {
+            structural: bool,
+        },
+        Begin(usize),
+        /// The router hands its next batch to the subscribed generations
+        /// among `to`.
+        Route {
+            to: Vec<usize>,
+            gap: u64,
+        },
+        TakeOver(usize),
+        /// The render fails: the generation sends its error structure and
+        /// ends, which releases its predecessor.
+        Fail(usize),
+        /// The consumer applies the next event of the current generation.
+        Deliver,
+        /// A superseded generation that took over or failed ends once its
+        /// successor released it.
+        End(usize),
+    }
+
+    struct Generation {
+        render: Option<OwedChild>,
+        begin_claim: Option<OwedChild>,
+        cursor: Arc<DeliveryCursor>,
+        predecessor: Option<Arc<DeliveryCursor>>,
+        begun: Option<u64>,
+        rendered: Option<u64>,
+        /// Batches routed before the hand-over, forwarded after it.
+        backlog: Vec<u64>,
+        events: VecDeque<u64>,
+        handed_over: bool,
+        released: bool,
+    }
+
+    struct Watcher {
+        delivery: Delivery,
+        generations: Vec<Generation>,
+        last_seq: u64,
+    }
+
+    impl Watcher {
+        fn new() -> Self {
+            Self {
+                delivery: Delivery::enclosing(),
+                generations: Vec::new(),
+                last_seq: 0,
+            }
+        }
+
+        fn pick(&self, i: usize) -> Option<usize> {
+            (!self.generations.is_empty()).then(|| i % self.generations.len())
+        }
+
+        fn apply(&mut self, op: &Op) {
+            match op {
+                Op::Trigger { structural } => self.trigger(*structural),
+                Op::Begin(i) => {
+                    if let Some(g) = self.pick(*i) {
+                        self.begin(g);
+                    }
+                }
+                Op::Route { to, gap } => self.route(to, *gap),
+                Op::TakeOver(i) => {
+                    if let Some(g) = self.pick(*i) {
+                        self.take_over(g);
+                    }
+                }
+                Op::Fail(i) => {
+                    if let Some(g) = self.pick(*i) {
+                        self.fail(g);
+                    }
+                }
+                Op::Deliver => self.deliver(),
+                Op::End(i) => {
+                    if let Some(g) = self.pick(*i) {
+                        self.end(g);
+                    }
+                }
+            }
+        }
+
+        fn trigger(&mut self, structural: bool) {
+            if structural {
+                self.last_seq += 1;
+                self.delivery.triggers.cursor().routed(self.last_seq);
+            }
+            let render = self.delivery.data.owed_child();
+            let cursor = render.cursor().clone();
+            let predecessor = self.generations.last().map(|g| g.cursor.clone());
+            self.generations.push(Generation {
+                render: Some(render),
+                begin_claim: None,
+                cursor,
+                predecessor,
+                begun: None,
+                rendered: None,
+                backlog: Vec::new(),
+                events: VecDeque::new(),
+                handed_over: false,
+                released: false,
+            });
+        }
+
+        fn begin(&mut self, g: usize) {
+            if self.generations[g].begun.is_none() {
+                let (begun, claim) = self.delivery.begin_render();
+                let generation = &mut self.generations[g];
+                generation.begun = Some(begun);
+                generation.begin_claim = Some(claim);
+            }
+        }
+
+        fn route(&mut self, to: &[usize], gap: u64) {
+            let mut targets: Vec<usize> = to
+                .iter()
+                .filter_map(|i| self.pick(*i))
+                .filter(|g| {
+                    let generation = &self.generations[*g];
+                    generation.begun.is_some() && generation.render.is_some()
+                })
+                .collect();
+            targets.sort_unstable();
+            targets.dedup();
+            if targets.is_empty() {
+                return;
+            }
+            self.last_seq += 1 + gap;
+            let seq = self.last_seq;
+            for g in targets {
+                let generation = &mut self.generations[g];
+                generation.cursor.routed(seq);
+                match generation.rendered {
+                    Some(rendered) => generation.events.push_back(seq.max(rendered)),
+                    None => generation.backlog.push(seq),
+                }
+            }
+        }
+
+        fn take_over(&mut self, g: usize) {
+            let generation = &mut self.generations[g];
+            let Some(begun) = generation.begun else {
+                return;
+            };
+            if generation.handed_over || generation.render.is_none() {
+                return;
+            }
+            let rendered = self.delivery.take_over(
+                begun,
+                &generation.cursor,
+                generation.predecessor.as_deref(),
+            );
+            generation.rendered = Some(rendered);
+            generation.handed_over = true;
+            generation.events.push_back(rendered);
+            let backlog = std::mem::take(&mut generation.backlog);
+            generation
+                .events
+                .extend(backlog.into_iter().map(|seq| seq.max(rendered)));
+            self.release_predecessor_of(g);
+        }
+
+        fn fail(&mut self, g: usize) {
+            let generation = &mut self.generations[g];
+            let Some(begun) = generation.begun else {
+                return;
+            };
+            if generation.handed_over || generation.render.is_none() {
+                return;
+            }
+            generation.events = VecDeque::from([begun]);
+            generation.backlog.clear();
+            generation.render = None;
+            self.release_predecessor_of(g);
+        }
+
+        fn release_predecessor_of(&mut self, g: usize) {
+            if g > 0 {
+                self.generations[g - 1].released = true;
+            }
+        }
+
+        fn deliver(&mut self) {
+            let Some(current) = self.generations.last_mut() else {
+                return;
+            };
+            if let Some(seq) = current.events.pop_front() {
+                self.delivery.data.applied_through(seq);
+            }
+        }
+
+        fn end(&mut self, g: usize) {
+            let superseded = g + 1 < self.generations.len();
+            let generation = &mut self.generations[g];
+            let finished = generation.handed_over || generation.render.is_none();
+            if superseded && finished && generation.released {
+                generation.render = None;
+                generation.begin_claim = None;
+            }
+        }
+
+        /// Every pending render completes, oldest first, and the consumer
+        /// applies everything the current generation sends.
+        fn drain(&mut self) {
+            for g in 0..self.generations.len() {
+                self.begin(g);
+            }
+            for g in 0..self.generations.len() {
+                self.take_over(g);
+            }
+            for g in 0..self.generations.len() {
+                self.end(g);
+            }
+            while self
+                .generations
+                .last()
+                .is_some_and(|current| !current.events.is_empty())
+            {
+                self.deliver();
+            }
+        }
+    }
+
+    fn settles(ops: &[Op]) -> Result<(), String> {
+        let mut watcher = Watcher::new();
+        for op in ops {
+            watcher.apply(op);
+        }
+        watcher.drain();
+        let data = &watcher.delivery.data;
+        if data.is_lagging() {
+            return Err(format!(
+                "data owed: applied {} sent {}",
+                data.applied(),
+                data.sent_with_children()
+            ));
+        }
+        Ok(())
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        let generation = 0..6usize;
+        prop_oneof![
+            2 => any::<bool>().prop_map(|structural| Op::Trigger { structural }),
+            3 => generation.clone().prop_map(Op::Begin),
+            3 => (prop::collection::vec(generation.clone(), 1..3), 0..3u64)
+                .prop_map(|(to, gap)| Op::Route { to, gap }),
+            3 => generation.clone().prop_map(Op::TakeOver),
+            1 => generation.clone().prop_map(Op::Fail),
+            2 => Just(Op::Deliver),
+            2 => generation.prop_map(Op::End),
+        ]
+    }
+
+    /// Interleavings stored as explicit schedules.
+    fn found() -> Vec<(&'static str, Vec<Op>)> {
+        use Op::*;
+        let first_generation_shows_68 = [
+            Trigger { structural: false },
+            Begin(0),
+            TakeOver(0),
+            Route {
+                to: vec![0],
+                gap: 67,
+            },
+            Deliver,
+            Deliver,
+        ];
+        vec![
+            (
+                "superseded before its own hand-over",
+                [
+                    &first_generation_shows_68[..],
+                    &[
+                        Trigger { structural: false },
+                        Begin(1),
+                        Trigger { structural: false },
+                        Begin(2),
+                        Route {
+                            to: vec![0],
+                            gap: 0,
+                        },
+                        TakeOver(1),
+                        TakeOver(2),
+                    ],
+                ]
+                .concat(),
+            ),
+            (
+                "superseded, hands over after its successor did",
+                [
+                    &first_generation_shows_68[..],
+                    &[
+                        Trigger { structural: false },
+                        Begin(1),
+                        Trigger { structural: false },
+                        Begin(2),
+                        TakeOver(2),
+                        Route {
+                            to: vec![0],
+                            gap: 0,
+                        },
+                        TakeOver(1),
+                    ],
+                ]
+                .concat(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_claim_on_the_data_cursor_is_applied_once_the_watcher_settles() {
+        let mut failures = Vec::new();
+        for (name, ops) in found() {
+            if let Err(e) = settles(&ops) {
+                failures.push(format!("{name}: {e}"));
+            }
+        }
+        let mut runner = TestRunner::new(Config {
+            failure_persistence: None,
+            ..Config::default()
+        });
+        if let Err(e) = runner.run(&prop::collection::vec(op(), 0..40), |ops| {
+            settles(&ops).map_err(TestCaseError::fail)
+        }) {
+            failures.push(format!("generated: {e}"));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
