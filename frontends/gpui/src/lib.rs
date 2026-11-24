@@ -2518,11 +2518,26 @@ fn spawn_overlay_drawer_close(
     use futures_signals::signal::SignalExt;
 
     let mut nav_stream = engine.ui_state().main_view_signal().to_stream();
+    // The root read hops through tokio, so a window settle owes this pump
+    // every Main view generation it has not acted on yet.
+    let handled = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+    let settle_check = {
+        let reader = engine.clone();
+        let handled = handled.clone();
+        engine
+            .ui_watermark()
+            .register_check("overlay-drawer auto-close", move || {
+                handled.load(std::sync::atomic::Ordering::Acquire)
+                    != reader.ui_state().main_view_generation()
+            })
+    };
     cx.spawn(async move |cx| {
+        let _settle_check = settle_check;
         // Outer `None` means "not yet observed", so the stream's opening
         // emission only seeds and never closes a drawer.
         let mut last: Option<(u64, Option<holon_api::EntityUri>)> = None;
         while nav_stream.next().await.is_some() {
+            let view_gen = engine.ui_state().main_view_generation();
             let nav_gen = engine.ui_state().main_nav_generation();
             let root = match main_view_root(&session, &rt_handle).await {
                 Ok(root) => root,
@@ -2531,6 +2546,7 @@ fn spawn_overlay_drawer_close(
                         error = %e,
                         "overlay-drawer auto-close cannot read the Main view root; leaving open                          drawers alone this bump",
                     );
+                    handled.store(view_gen, std::sync::atomic::Ordering::Release);
                     continue;
                 }
             };
@@ -2539,19 +2555,19 @@ fn spawn_overlay_drawer_close(
                 None => false,
             };
             last = Some((nav_gen, root));
-            if !moved {
-                continue;
-            }
-            let _ = cx.update_window(wh, |_, _, cx| {
-                app_model.update(cx, |m, cx| {
-                    if !Arc::ptr_eq(&m.engine, &engine) {
-                        return;
-                    }
-                    if m.close_overlay_drawers() {
-                        cx.notify();
-                    }
+            if moved {
+                let _ = cx.update_window(wh, |_, _, cx| {
+                    app_model.update(cx, |m, cx| {
+                        if !Arc::ptr_eq(&m.engine, &engine) {
+                            return;
+                        }
+                        if m.close_overlay_drawers() {
+                            cx.notify();
+                        }
+                    });
                 });
-            });
+            }
+            handled.store(view_gen, std::sync::atomic::Ordering::Release);
         }
     })
     .detach();
