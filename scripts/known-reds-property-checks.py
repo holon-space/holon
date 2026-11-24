@@ -18,7 +18,10 @@ SIBLING_CASES = 20
 # Some random seeds hit an open counterexample class of the classifier driver, so the gate runs one seed known green.
 GATE_SEED = 23770974
 SIBLINGS = ["name-boundary", "late-child-result", "spliced-verdict", "trailing-verdict-word", "unseen-verdict", "verdict-word-prefix"]
-DRIVERS = [("classifier", {"CASES": str(CLASSIFIER_CASES)})] + [(s, {"CASES": str(SIBLING_CASES)}) for s in SIBLINGS] + [("green-callers", {})]
+# Self-checks with their own case count. test-known-reds-draw-floor.py stays out: its four fixed seeds are four
+# sequential classifier-driver runs, which would multiply this runner's wall.
+OWN_CASES = ["green-callers", "test-scope", "site-anchors", "unreached-kind"]
+DRIVERS = [("classifier", {"CASES": str(CLASSIFIER_CASES)})] + [(s, {"CASES": str(SIBLING_CASES)}) for s in SIBLINGS] + [(s, {}) for s in OWN_CASES]
 COUNTS = f"{CLASSIFIER_CASES} classifier cases, {SIBLING_CASES} per sibling"
 
 

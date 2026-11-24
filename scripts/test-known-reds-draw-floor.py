@@ -4,6 +4,8 @@ checks with `reached` is drawn in every run of at least as many cases as there a
 new kinds, whatever the seed: the floor holds by construction, not by luck.
 
 Run: `python3 scripts/test-known-reds-draw-floor.py` (RUNS=<n> random seeds, default 3).
+It runs by hand only, after a change to scripts/known_reds_logs.py: each seed is one classifier-driver run, the
+slowest driver of scripts/known-reds-property-checks.py, and its random seeds would make a gate unreplayable.
 """
 import os
 import random

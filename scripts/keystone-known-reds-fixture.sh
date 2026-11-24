@@ -1337,6 +1337,14 @@ expect_outcome fork-wrapper/primary-in-another-test 1 '^\[known-reds\] FAIL: 2 n
   printf '     Summary [  18.000s] 1 test run: 0 passed, 1 failed, 0 skipped\n'; } >"$work/fork-wrapper-beside-novel.log"
 expect_outcome fork-wrapper/beside-another-novel-panic 1 '^\[known-reds\] FAIL: 3 novel panic(s), 1 known-red panic(s), 0 collateral' \
     "$work/fork-wrapper-beside-novel.log"
+# A libtest section proves no test instance, so its wrappers stay novel beside a known primary.
+{ printf '     Running tests/main.rs (target/debug/deps/holon-0123)\n\nrunning 1 test\n'
+  printf "thread '%s' (1) panicked at %s:\n%s\n" "$loro_test" "$loro_loc" "$loro_msg"
+  printf "thread '%s' (2) panicked at /cargo/registry/src/proptest-1.11.0/src/test_runner/runner.rs:490:31:\nTest failed normally in child process.\n" "$loro_test"
+  printf "thread '%s' (3) panicked at crates/holon/tests/x_pbt.rs:790:5:\nTest failed: failed in other process.\n" "$loro_test"
+  printf 'test %s ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n' "$loro_test"; } >"$work/fork-wrapper-libtest.log"
+expect_outcome fork-wrapper/libtest-known-primary 1 '^\[known-reds\] FAIL: 2 novel panic(s), 1 known-red panic(s), 0 collateral' \
+    "$work/fork-wrapper-libtest.log"
 # The fixed examples of the drawn-log property check; its random draws run in
 # scripts/test-known-reds-classifier.py.
 mkdir "$work/examples"

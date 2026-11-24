@@ -6,6 +6,8 @@ that they can go red. Every MUTANT is applied once to a copy of the classifier i
 repository's other scripts and docs; the property checks run with CLASSIFIER=<copy> on the printed seed and must exit
 non-zero, and must exit zero on the unmutated classifier. A mutant that survives is a failure, so a survivor is
 removed from MUTANTS only with a note here.
+It runs by hand only, after a change to the classifier or to a property-check driver, never in `just cargo-free-checks`:
+each mutant is a whole property-checks run, and it cannot be a driver of the runner it mutates.
 """
 import os
 import random

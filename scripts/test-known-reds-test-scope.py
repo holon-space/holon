@@ -8,7 +8,7 @@ Fixed cases, no property test: the input is the shape of one log (one panic prin
 under one test name) and the verdict is one of two words, so each case is the whole
 class; the generated-log checks (test-known-reds-classifier.py) cover the rest.
 
-Run: `python3 scripts/test-known-reds-test-scope.py`.
+Run: `python3 scripts/test-known-reds-test-scope.py` (CLASSIFIER=<script> names the classifier under test).
 """
 import os
 import re
@@ -19,7 +19,8 @@ from pathlib import Path
 
 import known_reds_logs as logs
 
-REPO = Path(__file__).resolve().parent.parent
+CLASSIFIER = Path(os.environ.get("CLASSIFIER", Path(__file__).resolve().parent / "keystone-known-reds.sh")).resolve()
+REPO = CLASSIFIER.parent.parent
 NAMED = "holon::main scope::the_named_test"
 OTHER = "holon::main scope::the_other_test"
 PATTERN = "^scoped defect [0-9]+$"
@@ -50,13 +51,13 @@ def libtest(name):
 def classify(work, tests, text):
     tree = Path(tempfile.mkdtemp(dir=work))
     (tree / "docs/Testing").mkdir(parents=True)
-    (tree / "scripts").symlink_to(REPO / "scripts")
+    (tree / "scripts").symlink_to(CLASSIFIER.parent)
     (tree / "docs/Testing/known-red-evidence").symlink_to(REPO / "docs/Testing/known-red-evidence")
     registry = (REPO / "docs/Testing/KeystoneKnownReds.md").read_text()
     (tree / "docs/Testing/KeystoneKnownReds.md").write_text(registry.replace(logs.REGISTRY_HEADER, logs.REGISTRY_HEADER + row(tests), 1))
     log = tree / "case.log"
     log.write_text(text)
-    r = subprocess.run([str(tree / "scripts/keystone-known-reds.sh"), str(log)], capture_output=True, text=True)
+    r = subprocess.run([str(tree / "scripts" / CLASSIFIER.name), str(log)], capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
 
