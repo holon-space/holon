@@ -15,10 +15,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_signals::signal::SignalExt;
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
 use holon_api::EntityUri;
+use holon_api::NavigationOp;
 use holon_api::Value;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
@@ -265,9 +267,10 @@ impl Harness {
         self.settle();
     }
 
-    /// [`Self::dispatch_nav`], with the op parked until the window owes nothing
-    /// for the bump its dispatch fired: what the window read meanwhile is the
-    /// view from before the op, as when a loaded host runs the op late.
+    /// [`Self::dispatch_nav`], with the op parked before it runs while the
+    /// window settles and draws on the view from before the op, as when a
+    /// loaded host runs the op late. The Main view bump comes only after the
+    /// release, once the op committed.
     fn dispatch_nav_parked_until_window_caught_up(&mut self, op: &str, params: Vec<(&str, Value)>) {
         let hold = self.env.engine().dispatch_hold().clone();
         hold.hold_next("navigation", op);
@@ -295,6 +298,48 @@ impl Harness {
             .block_on(hold.release(1, HANG_DEADLINE))
             .unwrap_or_else(|e| panic!("release the parked navigation.{op}: {e:#}"));
         self.runtime.block_on(self.env.settle());
+        self.settle();
+    }
+
+    /// [`Self::dispatch_nav`], with the op held after its commit until the
+    /// window is at rest on the committed rows, then released with no frame
+    /// forced: the op's Main view bump is the last change, and only it can
+    /// redraw the readers that poll the generation on render.
+    fn dispatch_nav_held_after_commit(&mut self, op: NavigationOp, params: Vec<(&str, Value)>) {
+        let op = op.as_str();
+        let hold = self.env.engine().dispatch_hold().clone();
+        let view_before = self.engine.ui_state().main_view_generation();
+        hold.hold_next_committed("navigation", op);
+        self.dispatch_nav_unsettled(op, params);
+        let start = Instant::now();
+        while hold.parked_runs("navigation", op) == 0 {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "navigation.{op} never reached its commit; parked runs: {:?}",
+                hold.parked_names(),
+            );
+            self.app.run_until_parked();
+        }
+        self.runtime.block_on(self.env.settle());
+        self.settle();
+        assert_eq!(
+            self.engine.ui_state().main_view_generation(),
+            view_before,
+            "navigation.{op} bumped the Main view before its caller saw the commit, so the \
+             release below does not leave the bump as the last change",
+        );
+        self.runtime
+            .block_on(hold.release(1, HANG_DEADLINE))
+            .unwrap_or_else(|e| panic!("release the committed navigation.{op}: {e:#}"));
+        let view = self.engine.ui_state().main_view_signal();
+        let bumped = self.runtime.block_on(async {
+            tokio::time::timeout(HANG_DEADLINE, view.wait_for(view_before + 1)).await
+        });
+        assert!(
+            bumped.is_ok(),
+            "navigation.{op} committed, but the Main view generation stayed at {}",
+            self.engine.ui_state().main_view_generation(),
+        );
         self.settle();
     }
 
@@ -330,6 +375,22 @@ impl Harness {
             .first()
             .and_then(|row| row.get("history_id"))
             .and_then(|v| v.as_i64())
+    }
+
+    /// The tab strip's oracle: the open Main rows `region_open_tabs` lists.
+    fn open_main_tab_count(&self) -> usize {
+        let rows = self
+            .runtime
+            .block_on(self.env.query_sql(
+                "SELECT count(*) AS n FROM navigation_history WHERE region = 'main' AND \
+                 closed_at IS NULL",
+            ))
+            .expect("count the open Main tabs");
+        let n = rows[0]
+            .get("n")
+            .and_then(|v| v.as_i64())
+            .expect("count(*) is an integer");
+        usize::try_from(n).expect("a count is not negative")
     }
 
     fn right_root(&self) -> Option<EntityUri> {
@@ -803,6 +864,121 @@ fn only_a_real_page_change_dismisses_an_overlay_sidebar() {
         !h.is_open(LEFT_SIDEBAR, DrawerMode::Overlay),
         "tapping a page in the sidebar must put the sidebar away whether or not that page is the \
          one already showing — the gesture is the same and so is what it hides",
+    );
+
+    h.teardown(driver);
+}
+
+/// A Main view bump lands off the GPUI thread after the frames its op's commit
+/// caused; the breadcrumb and the tab strip read it on render. With no drawer
+/// over the page nothing else redraws, so each `main` navigation op must leave
+/// both on the view it landed on by its bump alone.
+#[test]
+fn every_main_navigation_moves_the_bar_and_the_tab_strip_by_its_bump_alone() {
+    let mut h = boot("Holon-Nav-Bump-Redraws", DESKTOP_WINDOW);
+    let driver = h.driver();
+    let main = || ("region", Value::String("main".into()));
+    let pages = [
+        EntityUri::block(NAV_TARGET),
+        row_uri(ROW_CONTROL),
+        row_uri(ROW_UNDER_SCRIM),
+    ];
+
+    // Collected per op, so one stale op does not hide another.
+    let mut stale_ops: Vec<String> = Vec::new();
+    for &op in NavigationOp::ALL {
+        let elsewhere = |h: &Harness| {
+            let root = h.main_root();
+            let page = pages
+                .iter()
+                .find(|p| root.as_ref() != Some(*p))
+                .expect("three pages, one root");
+            ("block_id", Value::String(page.to_string()))
+        };
+        let params = match op {
+            NavigationOp::Focus | NavigationOp::FocusPin | NavigationOp::OpenTab => {
+                vec![main(), elsewhere(&h)]
+            }
+            NavigationOp::Close => {
+                let tab = elsewhere(&h);
+                h.dispatch_nav("open_tab", vec![main(), tab]);
+                let cursor = h.main_cursor().expect("open_tab leaves a Main cursor");
+                vec![("history_id", Value::Integer(cursor))]
+            }
+            NavigationOp::GoBack => {
+                let page = elsewhere(&h);
+                h.dispatch_nav("focus", vec![main(), page]);
+                vec![main()]
+            }
+            NavigationOp::GoForward => {
+                let page = elsewhere(&h);
+                h.dispatch_nav("focus", vec![main(), page]);
+                h.dispatch_nav("go_back", vec![main()]);
+                vec![main()]
+            }
+            NavigationOp::GoHome | NavigationOp::NewTab => {
+                let page = elsewhere(&h);
+                h.dispatch_nav("focus", vec![main(), page]);
+                vec![main()]
+            }
+            NavigationOp::Activate => {
+                let tab = elsewhere(&h);
+                h.dispatch_nav("open_tab", vec![main(), tab]);
+                let background = h.background_tab_id();
+                vec![main(), ("history_id", Value::Integer(background))]
+            }
+        };
+        let before = (h.main_root(), h.main_cursor(), h.open_main_tab_count());
+        h.dispatch_nav_held_after_commit(op, params);
+        let (root, cursor, tabs) = (h.main_root(), h.main_cursor(), h.open_main_tab_count());
+        assert_ne!(
+            (&root, &cursor, tabs),
+            (&before.0, &before.1, before.2),
+            "{op:?} moved neither the Main root, its cursor nor its open tabs, so the claims \
+             below are vacuous",
+        );
+        let rebind = &h.rebind;
+        let (bar, bar_root, highlighted, drawn_tabs) = h.app.update(|cx| {
+            (
+                rebind.breadcrumb_block(cx),
+                rebind.breadcrumb_view_root(cx),
+                rebind.drawn_active_tab(cx),
+                rebind.drawn_tab_count(cx),
+            )
+        });
+        let stale: Vec<String> = [
+            // A bump that keeps the root leaves the bar on the caret's block.
+            (bar_root != root || (root != before.0 && bar != root)).then(|| {
+                format!(
+                    "breadcrumb: shows {bar:?} resolved against view root {bar_root:?}, not \
+                     the page {root:?}"
+                )
+            }),
+            (highlighted != cursor).then(|| {
+                format!(
+                    "tab strip: highlights tab {highlighted:?}, not the cursor's tab {cursor:?}"
+                )
+            }),
+            (drawn_tabs != Some(tabs)).then(|| {
+                format!("tab strip: draws {drawn_tabs:?} tabs, not the {tabs} open Main tabs")
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !stale.is_empty() {
+            stale_ops.push(format!(
+                "{op:?} moved Main {before:?} -> {:?}:\n  {}",
+                (&root, &cursor, tabs),
+                stale.join("\n  "),
+            ));
+        }
+    }
+    assert!(
+        stale_ops.is_empty(),
+        "each op below bumped the Main view after its commit, but its readers kept the old \
+         view:\n{}",
+        stale_ops.join("\n"),
     );
 
     h.teardown(driver);

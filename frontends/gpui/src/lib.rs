@@ -1121,6 +1121,7 @@ impl Render for HolonApp {
                     state,
                     wh,
                     &async_cx,
+                    self.ui_watermark.register_check("breadcrumb read", || true),
                 );
             }
         }
@@ -1158,7 +1159,10 @@ impl Render for HolonApp {
                 let state = self.tab_strip.clone();
                 let wh = window.window_handle();
                 let async_cx = cx.to_async();
-                tab_strip::resolve_tab_strip(generation, session, rt_handle, state, wh, &async_cx);
+                let owed = self.ui_watermark.register_check("tab strip read", || true);
+                tab_strip::resolve_tab_strip(
+                    generation, session, rt_handle, state, wh, &async_cx, owed,
+                );
             }
         }
         let (
@@ -2375,7 +2379,7 @@ impl RebindHandle {
             // re-evaluates).
             spawn_root_layout_signal(app_model.clone(), engine.clone(), window, cx);
             spawn_boot_report_pump(app_model.clone(), session_for_close.clone(), window, cx);
-            spawn_overlay_drawer_close(
+            spawn_main_view_pump(
                 app_model.clone(),
                 engine,
                 session_for_close,
@@ -2507,8 +2511,11 @@ fn spawn_root_layout_signal(
     .detach();
 }
 
-/// Spawn the window's overlay-drawer auto-close pump on `engine`: every move of
-/// the `main` region's cursor runs [`AppModel::close_overlay_drawers`].
+/// Spawn the window's Main view pump on `engine`: every move of the `main`
+/// region's cursor redraws the window and runs
+/// [`AppModel::close_overlay_drawers`]. The redraw is what the breadcrumb and
+/// the tab strip need: they read the generation on render, and an op bumps it
+/// off the GPUI thread after the frames its own commit caused.
 ///
 /// Keyed on `main_view_generation` rather than on the focused block, because
 /// placing the caret in a row also writes the focus — an overlay sidebar must
@@ -2517,7 +2524,7 @@ fn spawn_root_layout_signal(
 /// page tap in the sidebar wakes no other loop this window runs. Bound to one
 /// engine like [`spawn_root_layout_signal`], and self-suppressing after a
 /// rebind the same way.
-fn spawn_overlay_drawer_close(
+fn spawn_main_view_pump(
     app_model: Entity<AppModel>,
     engine: Arc<ReactiveEngine>,
     session: Arc<FrontendSession>,
@@ -2537,7 +2544,7 @@ fn spawn_overlay_drawer_close(
         let handled = handled.clone();
         engine
             .ui_watermark()
-            .register_check("overlay-drawer auto-close", move || {
+            .register_check("main view pump", move || {
                 handled.load(std::sync::atomic::Ordering::Acquire)
                     != reader.ui_state().main_view_generation()
             })
@@ -2548,6 +2555,9 @@ fn spawn_overlay_drawer_close(
         // emission only seeds and never closes a drawer.
         let mut last: Option<(u64, Option<holon_api::EntityUri>)> = None;
         while nav_stream.next().await.is_some() {
+            if cx.update_window(wh, |_, window, _| window.refresh()).is_err() {
+                break;
+            }
             let view_gen = engine.ui_state().main_view_generation();
             let nav_gen = engine.ui_state().main_nav_generation();
             let root = match main_view_root(&session, &rt_handle).await {
@@ -3414,7 +3424,7 @@ fn launch_holon_window_impl(
     // don't cascade here.
     spawn_root_layout_signal(app_model.clone(), engine.clone(), wh, cx);
     spawn_boot_report_pump(app_model.clone(), session.clone(), wh, cx);
-    spawn_overlay_drawer_close(
+    spawn_main_view_pump(
         app_model.clone(),
         engine,
         session.clone(),

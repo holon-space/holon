@@ -4465,6 +4465,12 @@ impl DispatchingOperationEngine {
             let retry = outcome.is_err() && run.refused && !run.ran;
             if !retry {
                 drop(claim);
+                #[cfg(feature = "dispatch-hold")]
+                if outcome.is_ok() {
+                    self.dispatch_hold
+                        .committed_checkpoint(&request.entity_name, &request.op_name)
+                        .await?;
+                }
                 return outcome;
             }
             if attempt == SHAPE_CLAIM_ATTEMPTS {

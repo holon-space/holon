@@ -37,6 +37,7 @@ use holon_api::Value;
 use holon_frontend::FrontendSession;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::render_epoch::UiCheck;
 
 use crate::search_ui::SearchTheme;
 
@@ -133,7 +134,8 @@ struct ResolvedStrip {
 }
 
 /// Resolve the open MAIN tabs + active cursor and pump them back into `state`.
-/// Region-global (no block id).
+/// Region-global (no block id). `owed` keeps the window unsettled until the
+/// answer is in `state`.
 pub fn resolve_tab_strip(
     generation: u64,
     session: Arc<FrontendSession>,
@@ -141,6 +143,7 @@ pub fn resolve_tab_strip(
     state: Entity<TabStripState>,
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
+    owed: UiCheck,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<ResolvedStrip, String>>();
     rt_handle.spawn(async move {
@@ -150,6 +153,7 @@ pub fn resolve_tab_strip(
 
     async_cx
         .spawn(async move |cx| {
+            let _owed = owed;
             let outcome = rx.await;
             let _ = cx.update_window(window_handle, |_, _window, cx| {
                 state.update(cx, |s, cx| {

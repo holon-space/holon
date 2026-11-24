@@ -34,6 +34,7 @@ use gpui::px;
 use holon_api::EntityUri;
 use holon_frontend::FrontendSession;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::render_epoch::UiCheck;
 
 use crate::search_ui::Hit;
 use crate::search_ui::SearchTheme;
@@ -137,6 +138,7 @@ pub fn resolve_breadcrumb(
     state: Entity<BreadcrumbState>,
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
+    owed: UiCheck,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<Resolved>, String>>();
     rt_handle.spawn(async move {
@@ -146,6 +148,7 @@ pub fn resolve_breadcrumb(
 
     async_cx
         .spawn(async move |cx| {
+            let _owed = owed;
             let outcome = rx.await;
             let _ = cx.update_window(window_handle, |_, _window, cx| {
                 state.update(cx, |s, cx| {

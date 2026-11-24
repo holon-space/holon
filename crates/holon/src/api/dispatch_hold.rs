@@ -10,6 +10,9 @@
 //! A third parks a judged write after its shape judgement, holding every claim
 //! the judgement took, and a fourth refuses a judged write's shape claim as if
 //! it closed a wait cycle.
+//!
+//! A fifth parks a run after it committed and gave up its admission claim, so
+//! its caller sees the outcome only once the test releases it.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -28,6 +31,7 @@ enum Effect {
     Fail,
     ParkJudged,
     RefuseNest,
+    ParkCommitted,
 }
 
 #[derive(Debug)]
@@ -77,6 +81,12 @@ impl DispatchHold {
     /// [`Self::release`].
     pub fn hold_next_judged(&self, entity: &str, op: &str) {
         self.add_rule(entity, op, Effect::ParkJudged);
+    }
+
+    /// Park the next successful run of `entity.op` after its commit, with its
+    /// admission claim already released, until [`Self::release`].
+    pub fn hold_next_committed(&self, entity: &str, op: &str) {
+        self.add_rule(entity, op, Effect::ParkCommitted);
     }
 
     /// Refuse the shape claim of each of the next `times` judged runs of
@@ -189,6 +199,12 @@ impl DispatchHold {
     /// The judged-run hook: a no-op unless a judged-run rule names this run.
     pub(crate) async fn judged_checkpoint(&self, entity: &EntityName, op: &str) -> Result<()> {
         self.park_on(entity, op, &[Effect::ParkJudged]).await
+    }
+
+    /// The committed-run hook: a no-op unless a committed-run rule names this
+    /// run.
+    pub(crate) async fn committed_checkpoint(&self, entity: &EntityName, op: &str) -> Result<()> {
+        self.park_on(entity, op, &[Effect::ParkCommitted]).await
     }
 
     /// Whether a rule refuses this judged run's shape claim; consumes it.
