@@ -2202,6 +2202,18 @@ impl RebindHandle {
             .clone()
     }
 
+    /// The Main view root the breadcrumb's last resolution read.
+    #[cfg(feature = "pbt")]
+    pub fn breadcrumb_view_root(&self, cx: &App) -> Option<holon_api::EntityUri> {
+        self.holon_app
+            .as_ref()?
+            .read(cx)
+            .breadcrumb
+            .read(cx)
+            .view_root
+            .clone()
+    }
+
     /// Set the bottom safe-area inset — the padding an open soft keyboard adds
     /// to the page container, shrinking the box every panel lays out in
     /// (`HolonApp::render`'s `.pb(...)`). On mobile the platform supplies this

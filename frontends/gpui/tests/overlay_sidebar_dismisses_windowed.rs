@@ -13,7 +13,7 @@
 //! main overlay_sidebar_dismisses_windowed:: --features holon-gpui/pbt`
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -35,7 +35,7 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
 use crate::pbt_harness::settle::HANG_DEADLINE;
-use crate::pbt_harness::settle::hold_tokio_workers;
+use crate::pbt_harness::settle::Pump;
 use crate::pbt_harness::settle::settle_window;
 
 const LEFT_SIDEBAR: &str = "block:default-left-sidebar";
@@ -59,9 +59,6 @@ const NAV_TARGET: &str = "parent";
 const ROW_UNDER_SCRIM: &str = "block:c2";
 /// The row that leg focuses FIRST, to prove the tap point is live at all.
 const ROW_CONTROL: &str = "block:c1";
-/// Longer than a window settle that waits for nothing, so a tokio hop it does
-/// not count lands after it returns.
-const TOKIO_HOLD: Duration = Duration::from_millis(200);
 
 /// The block the `main` region is open on — the oracle the auto-close is
 /// judged against, read from the tables the panel is a view of.
@@ -268,26 +265,37 @@ impl Harness {
         self.settle();
     }
 
-    /// [`Self::dispatch_nav`], with every tokio worker busy for `TOKIO_HOLD`
-    /// once the engine settled: the window settle alone must then wait for a
-    /// reaction that reaches the window over a tokio task, as on a loaded host.
-    fn dispatch_nav_with_tokio_held(&mut self, op: &str, params: Vec<(&str, Value)>) {
+    /// [`Self::dispatch_nav`], with the op parked until the window owes nothing
+    /// for the bump its dispatch fired: what the window read meanwhile is the
+    /// view from before the op, as when a loaded host runs the op late.
+    fn dispatch_nav_parked_until_window_caught_up(&mut self, op: &str, params: Vec<(&str, Value)>) {
+        let hold = self.env.engine().dispatch_hold().clone();
+        hold.hold_next("navigation", op);
         self.dispatch_nav_unsettled(op, params);
-        self.runtime.block_on(self.env.settle());
-        hold_tokio_workers(&self.runtime, TOKIO_HOLD);
-        let engine = self
+        let watermark = self
             .env
             .reactive_engine
             .get()
-            .expect("reactive engine after start_app");
-        settle_window(
-            &self.app,
-            &self.bounds,
-            engine.ui_watermark(),
-            &mut || {},
-            HANG_DEADLINE,
-        )
-        .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
+            .expect("reactive engine after start_app")
+            .ui_watermark()
+            .clone();
+        let start = Instant::now();
+        while !watermark.owed().is_empty() {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "with navigation.{op} parked the window still owes {:?}",
+                watermark.owed(),
+            );
+            self.app.run_until_parked();
+        }
+        // The breadcrumb and the tab strip read on render: draw a frame while
+        // the op is parked, as a live window would.
+        self.app.force_frame();
+        self.runtime
+            .block_on(hold.release(1, HANG_DEADLINE))
+            .unwrap_or_else(|e| panic!("release the parked navigation.{op}: {e:#}"));
+        self.runtime.block_on(self.env.settle());
+        self.settle();
     }
 
     fn dispatch_nav_unsettled(&self, op: &str, params: Vec<(&str, Value)>) {
@@ -310,6 +318,18 @@ impl Harness {
             .and_then(|row| row.get("root_id"))
             .and_then(|v| v.as_string())
             .map(|raw| EntityUri::parse(raw).expect("focus_roots.root_id is a block URI"))
+    }
+
+    fn main_cursor(&self) -> Option<i64> {
+        self.runtime
+            .block_on(
+                self.env
+                    .query_sql("SELECT history_id FROM navigation_cursor WHERE region = 'main'"),
+            )
+            .expect("read the Main cursor")
+            .first()
+            .and_then(|row| row.get("history_id"))
+            .and_then(|v| v.as_i64())
     }
 
     fn right_root(&self) -> Option<EntityUri> {
@@ -679,20 +699,55 @@ fn only_a_real_page_change_dismisses_an_overlay_sidebar() {
     // alone, so only the resolved root says the view moved.
     h.open_sidebar(LEFT_SIDEBAR);
     let root_before = h.main_root();
-    h.dispatch_nav_with_tokio_held("go_back", vec![("region", Value::String("main".into()))]);
-    let root_after = h.main_root();
-    eprintln!(
-        "[overlay-dismiss/go-back] root {root_before:?} -> {root_after:?} left_open={}",
-        h.is_open(LEFT_SIDEBAR, DrawerMode::Overlay),
+    h.dispatch_nav_parked_until_window_caught_up(
+        "go_back",
+        vec![("region", Value::String("main".into()))],
     );
+    let root_after = h.main_root();
+    let cursor_after = h.main_cursor();
+    let rebind = &h.rebind;
+    let (bar, bar_root, highlighted) = h.app.update(|cx| {
+        (
+            rebind.breadcrumb_block(cx),
+            rebind.breadcrumb_view_root(cx),
+            rebind.drawn_active_tab(cx),
+        )
+    });
     assert_ne!(
         root_after, root_before,
-        "Back must move the Main view, else the claim below is vacuous",
+        "Back must move the Main view, else the claims below are vacuous",
     );
+    // Every reader woken by the Main view bump must act on the root Back landed
+    // on; each one is checked so one stale reader does not hide another.
+    let left_open = h.is_open(LEFT_SIDEBAR, DrawerMode::Overlay);
+    let stale: Vec<String> = [
+        left_open.then(|| {
+            format!(
+                "close pump: Back put the user on {root_after:?} but the overlay sidebar \
+                 covering it stayed open"
+            )
+        }),
+        (bar != root_after || bar_root != root_after).then(|| {
+            format!(
+                "breadcrumb: shows {bar:?} resolved against view root {bar_root:?}, \
+                 not the page Back landed on {root_after:?}"
+            )
+        }),
+        (highlighted != cursor_after).then(|| {
+            format!(
+                "tab strip: highlights tab {highlighted:?}, not the tab Back landed on \
+                 {cursor_after:?}"
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(
-        !h.is_open(LEFT_SIDEBAR, DrawerMode::Overlay),
-        "Back put the user on another page — the sidebar covering it must come down, the same as \
-         for a page tapped in the sidebar",
+        stale.is_empty(),
+        "Back moved the Main view {root_before:?} -> {root_after:?}, but readers of the view \
+         bump kept the old root:\n{}",
+        stale.join("\n"),
     );
 
     // CLOSING A BACKGROUND TAB IS NOT. The counter bumps because `close` cannot
