@@ -207,6 +207,8 @@ The fit for Holon:
   per step. Simulation samples durations and reports the risk that the plan
   misses its deadline (section 3).
 
+**The clock is an input arc.** A timed transition reads the time on every firing, so by [the input-arc rule](#5-engines-as-substitution-transitions) the time is one of its input arcs: a Clock place with a read arc to each timed transition. The read happens inside the atomic firing. Its precondition is not one global linear time: the time must not go back along one executor's firing order. So each executor has one timeline, and it takes the time itself; a caller never passes it in. Clocks outside an executor (log stamps, one task's durations, the order between devices that Loro keeps) need no such rule.
+
 Chicken Teriyaki with time:
 
 ```text
@@ -288,6 +290,8 @@ cell is not durable state.
 | fluxdi | one live cell per type or set slot: `Pending` / `Partial` / `Ready` / `Failed`, with a generation | a registered provider for `T` and its declared dependencies | `resolve_live::<T>()` |
 | Turso IVM | one matview or query result per (query, params), with completeness | the query compiles to a matview over known relations; needs: its schema roots | create or subscribe the matview (start on first observer) |
 | Loro | one document per id: loaded / absent / failed | the document exists in the store; needs: the store | load or check out the document |
+
+**Input-arc rule.** A transition's input arcs are exactly the places it reads when it fires; nothing else. A DI provider is a transition, and its dependencies are its input arcs. A provider that uses only part of a dependency is split, so that each provider reads only what it uses and no arc is wider than the read.
 
 Text edits stay inside Loro and bypass the dispatcher
 (`docs/adr/0032-petri-net-execution-semantics.md:219-224`). The net observes
