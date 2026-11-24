@@ -1304,6 +1304,7 @@ impl HeadlessFrontendComponent {
                     injector,
                     &org_fs_for_di,
                     &secret_namespace,
+                    false,
                 );
                 holon_mcp::di::register_debug_services(injector);
                 // Image bytes for every image block, so the write-back's

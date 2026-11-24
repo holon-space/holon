@@ -406,6 +406,12 @@ impl NotifyWatcher {
     /// dot) — the union of the registered format adapters' claims. Only those
     /// paths may disturb a pending rename half.
     pub fn new_unarmed_for_extensions(extensions: Vec<String>) -> std::io::Result<Self> {
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("build_watcher") {
+            return Err(std::io::Error::other(
+                "[crash-injection] the OS refuses a file watcher",
+            ));
+        }
         let (tx, _) = broadcast::channel(4096);
         let event_tx = tx.clone();
         let pairing = Mutex::new(RenamePairing::default());
@@ -452,6 +458,12 @@ impl FileChangeSource for NotifyWatcher {
     }
 
     fn arm(&self, root: &Path) -> std::io::Result<()> {
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("arm_watcher") {
+            return Err(std::io::Error::other(
+                "[crash-injection] arming the watcher fails",
+            ));
+        }
         self.watcher
             .lock()
             .expect("NotifyWatcher mutex poisoned")

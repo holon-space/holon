@@ -102,15 +102,20 @@ pub fn boot_step_fault_error(fault: holon_pbt_core::BootStepFault) -> String {
         BootStepFault::LayoutSeed => step_failure::SEED_DEFAULT_LAYOUT,
         BootStepFault::SyncController => return INJECTED_FACTORY_ERROR.to_string(),
         BootStepFault::IntegrationSupervisor => return INJECTED_FACTORY_ERROR.to_string(),
+        BootStepFault::VaultWatcher => return INJECTED_WATCHER_BUILD_ERROR.to_string(),
+        BootStepFault::VaultWatchRegistration => return INJECTED_WATCH_ERROR.to_string(),
     };
     format!("[crash-injection] boot step `{point}` fails")
 }
 
 const INJECTED_FACTORY_ERROR: &str = "boot step fault: injected factory error";
+const INJECTED_WATCHER_BUILD_ERROR: &str = "[crash-injection] the OS refuses a file watcher";
+const INJECTED_WATCH_ERROR: &str = "[crash-injection] arming the watcher fails";
 
 /// Arms `fault` on a container whose frontend is already registered (the
 /// boot's extra setup): a step fails at its injection point, a factory by
-/// override.
+/// override. A watcher fault needs the production change source
+/// ([`BootStepFault::fires_in_os_watcher`]).
 pub fn arm_boot_step_fault(fault: holon_pbt_core::BootStepFault, injector: &fluxdi::Injector) {
     use holon_app::wiring::step_failure;
     use holon_filesystem::crash_injection::arm;
@@ -137,5 +142,7 @@ pub fn arm_boot_step_fault(fault: holon_pbt_core::BootStepFault, injector: &flux
                 }),
             );
         }
+        BootStepFault::VaultWatcher => arm("build_watcher"),
+        BootStepFault::VaultWatchRegistration => arm("arm_watcher"),
     }
 }

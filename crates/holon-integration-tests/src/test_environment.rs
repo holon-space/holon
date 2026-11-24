@@ -499,6 +499,8 @@ impl TestEnvironmentBuilder {
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
         let boot_step_fault = self.boot_step_fault;
+        let os_file_watcher =
+            boot_step_fault.is_some_and(holon_pbt_core::BootStepFault::fires_in_os_watcher);
         let (session, backend_engine, (doc_store, reactive_engine, idle_signal, injector)) =
             holon_app::new_from_config_with_di(
                 holon_config,
@@ -512,6 +514,7 @@ impl TestEnvironmentBuilder {
                         injector,
                         &org_fs_for_di,
                         &secret_namespace,
+                        os_file_watcher,
                     );
                     holon_mcp::di::register_debug_services(injector);
                     if let Some(fault) = boot_step_fault {
@@ -537,6 +540,9 @@ impl TestEnvironmentBuilder {
                 },
             )
             .await?;
+        // The OS watcher never sees `org_fs`, so no change seq of it is a
+        // target the org loop reaches.
+        let idle_signal = idle_signal.filter(|_| !os_file_watcher);
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
         let sync_handle = if enable_loro
@@ -729,14 +735,20 @@ impl Default for TestEnvironmentBuilder {
 /// A write through this fs fires its change event synchronously on
 /// completion — org sync becomes deterministic (no fsevents debounce,
 /// no partial-write window, no 9s recursive-watch arming).
+/// With `os_file_watcher` the production change source stays bound: the
+/// session's OS watcher is real while its files stay in memory.
 pub(crate) fn override_org_fs_bindings(
     injector: &fluxdi::Injector,
     org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
+    os_file_watcher: bool,
 ) {
     let fs = org_fs.clone();
     injector.override_provider::<dyn holon_filesystem::FileSystem>(fluxdi::Provider::root(
         move |_| fs.clone() as Arc<dyn holon_filesystem::FileSystem>,
     ));
+    if os_file_watcher {
+        return;
+    }
     let cs = org_fs.clone();
     injector.override_provider::<dyn holon_filesystem::FileChangeSource>(fluxdi::Provider::root(
         move |_| cs.clone() as Arc<dyn holon_filesystem::FileChangeSource>,
@@ -757,9 +769,10 @@ pub(crate) fn install_headless_render_interpreter(
     injector: &fluxdi::Injector,
     org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
     secret_namespace: &std::path::Path,
+    os_file_watcher: bool,
 ) {
     use holon_frontend::reactive::RenderInterpreterInjectorExt;
-    override_org_fs_bindings(injector, org_fs);
+    override_org_fs_bindings(injector, org_fs, os_file_watcher);
     install_test_share_credentials(injector, secret_namespace);
     let slot = injector.resolve::<BuilderServicesSlot>();
     injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
@@ -1265,6 +1278,7 @@ impl TestEnvironment {
                         injector,
                         &org_fs_for_di,
                         &secret_namespace,
+                        false,
                     );
                     holon_mcp::di::register_debug_services(injector);
                     Ok(())
@@ -1493,7 +1507,7 @@ impl TestEnvironment {
                         .map_err(|e| anyhow::anyhow!("register_org_file_sync_core: {e}"))?;
                     // Force the in-memory org fs over the core's real-disk
                     // defaults.
-                    override_org_fs_bindings(injector, &org_fs);
+                    override_org_fs_bindings(injector, &org_fs, false);
                     Ok(())
                 }
             },

@@ -1775,8 +1775,9 @@ fn an_undone_deletion_survives_a_crash_before_the_put_back() {
     );
 }
 
-/// A vault the app cannot watch says so: file changes stop reaching Holon,
-/// and the user sees that and why.
+/// A vault the app cannot watch says so, and still syncs: the vault is
+/// ingested and Holon's edits reach its files. The in-memory twin of the
+/// boot-step fault PBT's watch-registration fault.
 #[test]
 fn a_vault_that_cannot_be_watched_is_disclosed() {
     let rt = runtime();
@@ -1802,6 +1803,22 @@ fn a_vault_that_cannot_be_watched_is_disclosed() {
             1,
             "the vault is not watched and nothing says so"
         );
+        assert_eq!(
+            count_rows(&env, "block:day-keeps").await,
+            1,
+            "the vault was not ingested"
+        );
+        env.create_block("unwatched-probe", "area-daypage", "probe")
+            .await
+            .expect("create a block");
+        holon_integration_tests::polling::wait_for_file_condition(
+            env.org_fs.as_ref(),
+            &env.org_root().join("DayPage.org"),
+            |content| content.contains("unwatched-probe"),
+            HANG,
+        )
+        .await
+        .unwrap_or_else(|hung| panic!("the new block was not written back: {hung}"));
         env.stop_app().await.expect("stop_app");
     });
 }

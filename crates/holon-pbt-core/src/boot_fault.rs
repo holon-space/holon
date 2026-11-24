@@ -67,16 +67,28 @@ pub enum BootStepFault {
     SyncController,
     /// The MCP integration supervisor's factory returns an error.
     IntegrationSupervisor,
+    /// The OS refuses a file watcher, as at its watcher limit.
+    VaultWatcher,
+    /// The OS builds the file watcher but refuses to watch the vault.
+    VaultWatchRegistration,
 }
 
 impl BootStepFault {
-    pub const ALL: [BootStepFault; 5] = [
+    pub const ALL: [BootStepFault; 7] = [
         Self::IntegrationProjection,
         Self::ActionWatchers,
         Self::LayoutSeed,
         Self::SyncController,
         Self::IntegrationSupervisor,
+        Self::VaultWatcher,
+        Self::VaultWatchRegistration,
     ];
+
+    /// The fault fires in the OS file watcher, which a session reaches only
+    /// over the production change source.
+    pub fn fires_in_os_watcher(self) -> bool {
+        matches!(self, Self::VaultWatcher | Self::VaultWatchRegistration)
+    }
 }
 
 pub fn any_boot_step_fault() -> BoxedStrategy<BootStepFault> {
