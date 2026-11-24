@@ -13,6 +13,7 @@
 //! main overlay_sidebar_dismisses_windowed:: --features holon-gpui/pbt`
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -34,6 +35,7 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
 use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
 use crate::pbt_harness::settle::settle_window;
 
 const LEFT_SIDEBAR: &str = "block:default-left-sidebar";
@@ -57,6 +59,9 @@ const NAV_TARGET: &str = "parent";
 const ROW_UNDER_SCRIM: &str = "block:c2";
 /// The row that leg focuses FIRST, to prove the tap point is live at all.
 const ROW_CONTROL: &str = "block:c1";
+/// Longer than a window settle that waits for nothing, so a tokio hop it does
+/// not count lands after it returns.
+const TOKIO_HOLD: Duration = Duration::from_millis(200);
 
 /// The block the `main` region is open on — the oracle the auto-close is
 /// judged against, read from the tables the panel is a view of.
@@ -258,6 +263,34 @@ impl Harness {
 
     /// Dispatch a `navigation` op and let it land.
     fn dispatch_nav(&mut self, op: &str, params: Vec<(&str, Value)>) {
+        self.dispatch_nav_unsettled(op, params);
+        self.runtime.block_on(self.env.settle());
+        self.settle();
+    }
+
+    /// [`Self::dispatch_nav`], with every tokio worker busy for `TOKIO_HOLD`
+    /// once the engine settled: the window settle alone must then wait for a
+    /// reaction that reaches the window over a tokio task, as on a loaded host.
+    fn dispatch_nav_with_tokio_held(&mut self, op: &str, params: Vec<(&str, Value)>) {
+        self.dispatch_nav_unsettled(op, params);
+        self.runtime.block_on(self.env.settle());
+        hold_tokio_workers(&self.runtime, TOKIO_HOLD);
+        let engine = self
+            .env
+            .reactive_engine
+            .get()
+            .expect("reactive engine after start_app");
+        settle_window(
+            &self.app,
+            &self.bounds,
+            engine.ui_watermark(),
+            &mut || {},
+            HANG_DEADLINE,
+        )
+        .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
+    }
+
+    fn dispatch_nav_unsettled(&self, op: &str, params: Vec<(&str, Value)>) {
         let services: Arc<dyn BuilderServices> = self.engine.clone();
         services.dispatch_intent(OperationIntent::new(
             "navigation".into(),
@@ -267,8 +300,6 @@ impl Harness {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
         ));
-        self.runtime.block_on(self.env.settle());
-        self.settle();
     }
 
     fn main_root(&self) -> Option<EntityUri> {
@@ -648,7 +679,7 @@ fn only_a_real_page_change_dismisses_an_overlay_sidebar() {
     // alone, so only the resolved root says the view moved.
     h.open_sidebar(LEFT_SIDEBAR);
     let root_before = h.main_root();
-    h.dispatch_nav("go_back", vec![("region", Value::String("main".into()))]);
+    h.dispatch_nav_with_tokio_held("go_back", vec![("region", Value::String("main".into()))]);
     let root_after = h.main_root();
     eprintln!(
         "[overlay-dismiss/go-back] root {root_before:?} -> {root_after:?} left_open={}",
