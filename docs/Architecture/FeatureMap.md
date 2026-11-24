@@ -398,7 +398,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `logseq-parity-corpus-replay-load-timeout`
 - `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
-- `loro-compaction-convergence-test-over-cap-load`
 - `loro-compaction-peer-trimmed-below-lacked`
 - `loro-move-false-cycle-duplicate-id`
 - `metamorphic-undo-facet-unchanged`

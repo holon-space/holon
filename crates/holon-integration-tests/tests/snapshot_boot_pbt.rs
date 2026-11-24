@@ -48,18 +48,19 @@ fn sidecar_initial_state(case: &HandAuthoredCase) -> ReferenceState {
     }
 }
 
-/// One state per distinct key among the hand-authored cases.
-fn sidecar_states() -> Vec<ReferenceState> {
+/// One state per distinct key among the hand-authored cases, built on demand:
+/// building the state of every case costs more than the boots of a lane run.
+fn sidecar_states() -> impl Iterator<Item = ReferenceState> {
     let mut seen = std::collections::HashSet::new();
     load_cases()
-        .iter()
-        .map(sidecar_initial_state)
-        .filter(|state| seen.insert(BootKey::of(state)))
-        .collect()
+        .into_iter()
+        .map(|case| sidecar_initial_state(&case))
+        .filter(move |state| seen.insert(BootKey::of(state)))
 }
 
-/// A lane run keeps each test under half the 120 s nextest cap; a run with
-/// `PROPTEST_CASES` set takes every hand-authored key and that many cases.
+/// A lane run keeps each test under half the 120 s nextest cap at ambient
+/// load; a run with `PROPTEST_CASES` set takes every hand-authored key and
+/// that many cases.
 fn full_run() -> bool {
     std::env::var_os("PROPTEST_CASES").is_some()
 }
@@ -73,32 +74,68 @@ fn runner(lane_cases: u32) -> TestRunner {
     })
 }
 
+/// The template's own first restore is the restored boot compared here; a
+/// later restore of the same template matching it is
+/// `a_restore_does_not_see_the_cases_before_it`.
 fn restore_matches_fresh(state: &ReferenceState) {
-    let fresh = ComposedSut::<WideE2E>::init_test(state);
-    let fresh_obs = observe(&fresh);
-    drop(fresh);
-    let template = template_for(state);
-    let restored = ComposedSut::<WideE2E>::init_restored(&template, state);
+    let fresh_obs = tracing::info_span!("boot", phase = "fresh").in_scope(|| {
+        let fresh = ComposedSut::<WideE2E>::init_test(state);
+        observe(&fresh)
+    });
+    let template = tracing::info_span!("boot", phase = "template and its first restore")
+        .in_scope(|| template_for(state));
     assert_obs_eq(
         &fresh_obs,
-        &observe(&restored),
+        template.obs(),
         &format!("restore of {} vs a fresh boot", BootKey::of(state)),
     );
 }
 
+/// The wall time of each boot phase of this process, read from its spans.
+fn boot_phase_report() -> String {
+    let mut phases: std::collections::BTreeMap<String, Vec<std::time::Duration>> =
+        std::collections::BTreeMap::new();
+    for span in holon_integration_tests::test_tracing::case_spans() {
+        let Some(phase) = span.attributes.iter().find(|kv| kv.key.as_str() == "phase") else {
+            continue;
+        };
+        let took = span
+            .end_time
+            .duration_since(span.start_time)
+            .expect("span ends after it starts");
+        phases
+            .entry(phase.value.to_string())
+            .or_default()
+            .push(took);
+    }
+    phases
+        .iter()
+        .map(|(phase, took)| {
+            format!(
+                "[snapshot boot timing] {phase}: {} boot(s), total {} ms, max {} ms\n",
+                took.len(),
+                took.iter().sum::<std::time::Duration>().as_millis(),
+                took.iter().max().expect("a phase has a span").as_millis()
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn a_restored_boot_observes_what_a_fresh_boot_observes() {
-    let states: Vec<_> = sidecar_states().into_iter().filter(restorable).collect();
-    let keys = if full_run() { states.len() } else { 5 };
-    for state in &states[..keys.min(states.len())] {
-        restore_matches_fresh(state);
+    holon_integration_tests::test_tracing::SpanCollector::global();
+    // Each key costs three boots.
+    let keys = if full_run() { usize::MAX } else { 2 };
+    for state in sidecar_states().filter(restorable).take(keys) {
+        restore_matches_fresh(&state);
     }
-    runner(2)
+    runner(1)
         .run(&restorable_init_state(), |state| {
             restore_matches_fresh(&state);
             Ok(())
         })
         .unwrap();
+    eprint!("{}", boot_phase_report());
 }
 
 /// Runs `transitions` on a restored SUT, then checks that a second restore of
@@ -165,7 +202,6 @@ fn panic_message(run: impl FnOnce()) -> String {
 
 fn first_restorable_sidecar_state() -> ReferenceState {
     sidecar_states()
-        .into_iter()
         .find(restorable)
         .expect("a hand-authored case boots a restorable session")
 }

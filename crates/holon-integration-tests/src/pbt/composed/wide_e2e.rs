@@ -1436,11 +1436,28 @@ pub(crate) async fn boot_wide_unaligned(
         panic!(
             "the composed boot did not finish within {INTEGRATION_BOOT_BOUND:?} with the \
              `{provider}` integration peer drawn to answer {connect:?}: the session resolves \
-             only after every enabled integration connected",
+             only after every enabled integration connected; {state}",
             provider = crate::fake_mcp_module::PROVIDER_NAME,
+            state = last_observed_boot_state(),
         )
     });
     finish_wide_boot(bundle, ref_state, has_frontend).await
+}
+
+/// What a boot that hit its bound got through: the fake integration peer's
+/// requests and the spans that finished last.
+fn last_observed_boot_state() -> String {
+    use crate::fake_mcp_module::REQUEST_ANSWERED_SPAN;
+    use crate::fake_mcp_module::REQUEST_ARRIVED_SPAN;
+    let mut spans = crate::test_tracing::SpanCollector::global().finished_spans();
+    let count = |name: &str| spans.iter().filter(|s| s.name.as_ref() == name).count();
+    let (arrived, answered) = (count(REQUEST_ARRIVED_SPAN), count(REQUEST_ANSWERED_SPAN));
+    spans.sort_by_key(|s| std::cmp::Reverse(s.end_time));
+    let newest: Vec<&str> = spans.iter().take(8).map(|s| s.name.as_ref()).collect();
+    format!(
+        "the integration peer got {arrived} request(s) and answered {answered}; \
+         the last finished boot spans, newest first: {newest:?}"
+    )
 }
 
 /// The part of [`boot_and_seed_wide`] after the builder booted the SUT: the

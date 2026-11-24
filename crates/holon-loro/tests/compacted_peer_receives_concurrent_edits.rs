@@ -44,10 +44,12 @@ use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 use serial_test::serial;
 use tempfile::TempDir;
+use tracing::Instrument;
 
 const EDITS: &str = "edits";
 const LEDGER_FILE: &str = "peer-versions.json";
 const DIAL_BUDGET: Duration = Duration::from_secs(20);
+const DISCLOSURE_BUDGET: Duration = Duration::from_secs(20);
 
 /// Which device pairs sync with each other.
 #[derive(Clone, Copy, Debug)]
@@ -310,6 +312,7 @@ struct Peer {
 }
 
 impl Peer {
+    #[tracing::instrument(name = "open_peer", skip_all, fields(id = id))]
     async fn open(dir: TempDir, id: u64, roster: &SharedRoster) -> Result<Self> {
         let bus = Arc::new(ConditionBus::new());
         let store = LoroDocumentStore::new(dir.path().to_path_buf())
@@ -333,14 +336,23 @@ impl Peer {
     }
 
     /// Quit and relaunch: checkpoint, then a fresh store over the same dir.
+    #[tracing::instrument(name = "restart_peer", skip_all, fields(id = self.id))]
     async fn restart(&mut self, roster: &SharedRoster) -> Result<()> {
-        self.store.checkpoint().await?;
         self.advertiser.drop_share(ROOT_CONTAINER_ID).await?;
+        self.reopen_store().await?;
+        self.addr = advertise(&self.store, &self.advertiser, roster).await?;
+        Ok(())
+    }
+
+    /// The store half of a restart, for a peer that syncs no more and so
+    /// needs no share.
+    #[tracing::instrument(skip_all, fields(id = self.id))]
+    async fn reopen_store(&mut self) -> Result<()> {
+        self.store.checkpoint().await?;
         self.store = LoroDocumentStore::new(self.dir.path().to_path_buf())
             .with_peer_id(Some(self.id))
             .with_condition_bus(self.bus.clone());
         self.doc = self.store.get_doc(DocScope::Global).await?;
-        self.addr = advertise(&self.store, &self.advertiser, roster).await?;
         Ok(())
     }
 
@@ -452,6 +464,7 @@ fn record_pairing(owner: &Peer, joiner: &Peer) -> Result<()> {
 /// `to` dials `from`; both sides import the other's delta and record the
 /// other's hello. A failed dial is disclosed on the dialer's bus as the
 /// production dialers do, and comes back as the dial's error.
+#[tracing::instrument(name = "sync", skip(peers, cap))]
 async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) -> Result<()> {
     let alpn = make_alpn(ALPN_PREFIX, ROOT_CONTAINER_ID);
     // A reference clone of the same doc, as the transport needs an owned
@@ -475,11 +488,30 @@ async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) ->
     .with_context(|| format!("peer {to} dialing peer {from} took over {DIAL_BUDGET:?}"))?;
     if let Err(e) = dialed {
         disclose_sync_refusal(&peers[to].bus, ROOT_CONTAINER_ID, &e);
-        // The acceptor discloses its own refusal after the dialer returns.
-        tokio::time::sleep(Duration::from_millis(200)).await;
         return Err(e);
     }
     Ok(())
+}
+
+/// The refusal conditions on every peer's bus, once there is at least one.
+/// The acceptor discloses its own refusal after the dialer returns, so the
+/// dialer's error alone does not mean the refusal is on a bus yet.
+async fn raised_refusals(peers: &[Peer]) -> Result<Vec<String>> {
+    let wait = async {
+        loop {
+            let mut subscriptions: Vec<_> = peers.iter().map(|p| p.bus.subscribe()).collect();
+            let refusals: Vec<String> = peers.iter().flat_map(Peer::refusals).collect();
+            if !refusals.is_empty() {
+                return refusals;
+            }
+            let changed = subscriptions.iter_mut().map(|s| Box::pin(s.changes.recv()));
+            let _ = futures::future::select_all(changed).await;
+        }
+    };
+    tokio::time::timeout(DISCLOSURE_BUDGET, wait).await.with_context(|| {
+        let conditions: Vec<_> = peers.iter().map(|p| p.bus.current()).collect();
+        format!("no refusal was disclosed within {DISCLOSURE_BUDGET:?}; the buses hold {conditions:?}")
+    })
 }
 
 /// The invariants that hold after every step: no device trimmed history some
@@ -564,7 +596,11 @@ impl Run {
                 self.peers[peer].authored.push(key);
             }
             Op::Save { peer } => {
-                self.peers[peer].store.save_all().await?;
+                self.peers[peer]
+                    .store
+                    .save_all()
+                    .instrument(tracing::info_span!("save", peer))
+                    .await?;
                 if let Err(e) = self.peers[peer].snapshot_loads()? {
                     return Ok(Err(format!("after {op:?}: {e}")));
                 }
@@ -635,7 +671,7 @@ impl Run {
             }
         }
         if self.case.expect == Expect::Refused {
-            return self.check_refused();
+            return self.check_refused().await;
         }
 
         // Enough rounds for an edit to cross the longest path.
@@ -700,14 +736,19 @@ impl Run {
     /// with a single head trims all history below it, and any compaction
     /// loads on restart. The second restart's checkpoint is its store's first
     /// save, so a compaction.
+    #[tracing::instrument(skip_all)]
     async fn check_trim_advances(&mut self) -> Result<Result<(), String>> {
         if !self.compaction {
             return Ok(Ok(()));
         }
         for p in 0..self.peers.len() {
             let heads = self.peers[p].heads()?;
+            self.peers[p]
+                .advertiser
+                .drop_share(ROOT_CONTAINER_ID)
+                .await?;
             for _ in 0..2 {
-                self.peers[p].restart(&self.roster).await?;
+                self.peers[p].reopen_store().await?;
             }
             let trimmed_at = self.peers[p].trimmed_at()?;
             if heads.len() == 1 && trimmed_at != heads {
@@ -719,7 +760,7 @@ impl Run {
         Ok(Ok(()))
     }
 
-    fn check_refused(&self) -> Result<Result<(), String>> {
+    async fn check_refused(&self) -> Result<Result<(), String>> {
         let late = self.case.adopted;
         anyhow::ensure!(
             self.peers[0].is_shallow()?,
@@ -728,11 +769,8 @@ impl Run {
         if self.log.is_empty() {
             return Ok(Err("the late join synced without an error".into()));
         }
-        let refusals: Vec<String> = self.peers.iter().flat_map(Peer::refusals).collect();
-        if refusals.is_empty() {
-            return Ok(Err(
-                "the refused late join raised no refusal condition".into()
-            ));
+        if let Err(e) = raised_refusals(&self.peers).await {
+            return Ok(Err(format!("the refused late join: {e:#}")));
         }
         for key in &self.peers[late].authored {
             if !self.peers[late].holds(key)? {
@@ -743,6 +781,7 @@ impl Run {
     }
 }
 
+#[tracing::instrument(name = "case", skip_all, fields(topology = ?case.topology, ops = case.ops.len(), expect = ?case.expect))]
 async fn run(case: &Case, compaction: bool) -> Result<Result<(), String>> {
     let mut run = Run::open(case, compaction).await?;
     let mut verdict = run.check().await?;
@@ -764,7 +803,23 @@ fn check(rt: &tokio::runtime::Runtime, case: &Case, compaction: bool) -> Result<
         .map_err(TestCaseError::fail)
 }
 
+/// Each case and its peer boots, restarts, saves and syncs, as one line per
+/// closed span with its wall time.
+fn report_spans() {
+    use tracing_subscriber::fmt::format::FmtSpan;
+    // Fails only when a test before this one in the process installed it.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
+            "{}=info",
+            module_path!()
+        )))
+        .with_span_events(FmtSpan::CLOSE)
+        .with_test_writer()
+        .try_init();
+}
+
 fn every_edit_reaches_every_peer(compaction: bool) {
+    report_spans();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

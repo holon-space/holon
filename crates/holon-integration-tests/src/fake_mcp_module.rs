@@ -23,6 +23,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 use tokio::sync::watch;
+use tracing::Instrument;
 
 /// The integration's provider name: its sidecar file stem.
 pub const PROVIDER_NAME: &str = "fake-mcp";
@@ -178,6 +179,11 @@ tools:
     )
 }
 
+/// The span that closes as a request reaches the peer, before its gate.
+pub const REQUEST_ARRIVED_SPAN: &str = "fake_mcp_peer.request_arrived";
+/// The span that closes once the peer answered a request.
+pub const REQUEST_ANSWERED_SPAN: &str = "fake_mcp_peer.request_answered";
+
 /// A loopback HTTP server hosting [`FakeMcpServer`]. Every request waits at
 /// the gate until it opens; the server stops when the peer is dropped.
 pub struct FakeMcpPeer {
@@ -203,11 +209,14 @@ impl FakeMcpPeer {
                     move |request: axum::extract::Request, next: axum::middleware::Next| {
                         let mut gate = gate_rx.clone();
                         async move {
+                            tracing::info_span!(REQUEST_ARRIVED_SPAN).in_scope(|| {});
                             // A dropped peer leaves its in-flight connections
                             // running; they answer that the peer is gone.
                             let released = gate.wait_for(|open| *open).await.is_ok();
                             if released {
-                                next.run(request).await
+                                next.run(request)
+                                    .instrument(tracing::info_span!(REQUEST_ANSWERED_SPAN))
+                                    .await
                             } else {
                                 axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
                             }
