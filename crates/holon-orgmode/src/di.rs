@@ -736,28 +736,33 @@ impl Default for AssetSeedGate {
 /// org + cook) gets it verbatim. Otherwise the vault is single-format: a
 /// container may still override the ONE adapter, and failing that it is org.
 async fn resolve_format_registry(resolver: &Injector) -> Arc<holon_core::FormatRegistry> {
-    if let Some(registry) = resolver
-        .optional_resolve_async::<holon_core::FormatRegistry>()
-        .await
+    if let Some(registry) = holon_core::resolve_if_bound_async::<holon_core::FormatRegistry>(
+        resolver,
+        "[OrgModeModule] vault format registry",
+    )
+    .await
     {
         return registry;
     }
 
-    let classifier = resolver
-        .optional_resolve_async::<holon_api::link_parser::LinkTargetClassifier>()
-        .await
-        .map(|c| (*c).clone());
-    let adapter = resolver
-        .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
-        .await
-        .unwrap_or_else(|| {
-            // The container binds a registry-backed classifier; without one the
-            // adapter falls back to the built-in entity schemes.
-            let classifier = classifier.unwrap_or_default();
-            Arc::new(crate::file_format::OrgFormatAdapter::with_classifier(
-                classifier,
-            )) as Arc<dyn holon_core::FileFormatAdapter>
-        });
+    let classifier = holon_core::resolve_if_bound_async::<
+        holon_api::link_parser::LinkTargetClassifier,
+    >(resolver, "[OrgModeModule] vault link classifier")
+    .await
+    .map(|c| (*c).clone());
+    let adapter = holon_core::resolve_if_bound_async::<dyn holon_core::FileFormatAdapter>(
+        resolver,
+        "[OrgModeModule] vault format adapter",
+    )
+    .await
+    .unwrap_or_else(|| {
+        // The container binds a registry-backed classifier; without one the
+        // adapter falls back to the built-in entity schemes.
+        let classifier = classifier.unwrap_or_default();
+        Arc::new(crate::file_format::OrgFormatAdapter::with_classifier(
+            classifier,
+        )) as Arc<dyn holon_core::FileFormatAdapter>
+    });
     Arc::new(
         holon_core::FormatRegistry::new(vec![adapter])
             .expect("one adapter cannot contest its own extensions"),
@@ -803,15 +808,17 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
             // with `AsyncFactoryRequiresAsyncResolve`. The composition root
             // binds the registry with a sync provider; a container binding
             // none watches org alone.
-            let extensions: Vec<String> = match resolver.try_resolve::<holon_core::FormatRegistry>()
-            {
-                Ok(formats) => formats.extensions().map(|e| e.to_string()).collect(),
-                Err(_) => vec!["org".to_string()],
-            };
-            Arc::new(
-                holon_filesystem::NotifyWatcher::new_unarmed_for_extensions(extensions)
-                    .expect("notify watcher construction failed"),
-            ) as Arc<dyn holon_filesystem::FileChangeSource>
+            let extensions: Vec<String> =
+                match holon_core::resolve_if_bound::<holon_core::FormatRegistry>(
+                    resolver,
+                    "[OrgModeModule] vault watcher extensions",
+                ) {
+                    Some(formats) => formats.extensions().map(|e| e.to_string()).collect(),
+                    None => vec!["org".to_string()],
+                };
+            Arc::new(holon_filesystem::NotifyWatcher::new_unarmed_for_extensions(
+                extensions,
+            )) as Arc<dyn holon_filesystem::FileChangeSource>
         },
     )) {
         Ok(()) => {}
@@ -2036,15 +2043,15 @@ async fn run_file_sync_controller(
                 Ok((_, Err(e))) => {
                     error!("[OrgMode] watch_recursive failed: {}", e);
                     disclose_sync_not_started(&format!(
-                        "the vault could not be watched, so changes to its files do not reach \
-                         Holon: {e}"
+                        "the vault could not be watched, so changes to its files are picked up \
+                         by polling, up to 2 s late: {e}"
                     ));
                 }
                 Err(e) => {
                     error!("[OrgMode] the watcher-arming thread panicked: {}", e);
                     disclose_sync_not_started(&format!(
-                        "watching the vault panicked, so changes to its files do not reach \
-                         Holon: {e}"
+                        "watching the vault panicked, so changes to its files are picked up by \
+                         polling, up to 2 s late: {e}"
                     ));
                 }
             }

@@ -384,70 +384,68 @@ fn has_vault_ext(path: &Path, exts: &[String]) -> bool {
 }
 
 /// Production adapter: wraps `notify::RecommendedWatcher` (fsevents on macOS).
+///
+/// The OS watcher is built in [`FileChangeSource::arm`], the one step that
+/// reads it: an OS that refuses a watcher fails that step, not the
+/// construction every subscriber depends on.
 pub struct NotifyWatcher {
-    watcher: Mutex<RecommendedWatcher>,
+    extensions: Vec<String>,
+    watcher: Mutex<Option<RecommendedWatcher>>,
     tx: broadcast::Sender<FileChange>,
 }
 
 static NOTIFY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl NotifyWatcher {
-    /// Build the watcher (channels + callback) without registering the
-    /// recursive watch — see [`FileChangeSource::arm`].
     /// Watch an org-only vault. The production wiring uses
     /// [`new_unarmed_for_extensions`](Self::new_unarmed_for_extensions) with
     /// the registry's union; this is the single-format convenience the
     /// focused watcher tests drive.
-    pub fn new_unarmed() -> std::io::Result<Self> {
+    pub fn new_unarmed() -> Self {
         Self::new_unarmed_for_extensions(vec!["org".to_string()])
     }
 
     /// Watch a vault whose documents carry `extensions` (lowercase, no leading
     /// dot) — the union of the registered format adapters' claims. Only those
     /// paths may disturb a pending rename half.
-    pub fn new_unarmed_for_extensions(extensions: Vec<String>) -> std::io::Result<Self> {
-        #[cfg(feature = "crash-injection")]
-        if crate::crash_injection::fires("build_watcher") {
-            return Err(std::io::Error::other(
-                "[crash-injection] the OS refuses a file watcher",
-            ));
-        }
+    pub fn new_unarmed_for_extensions(extensions: Vec<String>) -> Self {
         let (tx, _) = broadcast::channel(4096);
-        let event_tx = tx.clone();
+        Self {
+            extensions,
+            watcher: Mutex::new(None),
+            tx,
+        }
+    }
+
+    fn build_watcher(&self) -> notify::Result<RecommendedWatcher> {
+        let event_tx = self.tx.clone();
+        let extensions = self.extensions.clone();
         let pairing = Mutex::new(RenamePairing::default());
-        let watcher = notify::recommended_watcher(
-            move |res: Result<notify::Event, notify::Error>| match res {
-                Ok(event) => {
-                    let signals = notify_event_to_signals(&event, &|p: &Path| p.exists());
-                    let now = Instant::now();
-                    let mut pairing = pairing
-                        .lock()
-                        .expect("NotifyWatcher rename-pairing mutex poisoned");
-                    for signal in &signals {
-                        // Cheap extension relevance here; the full
-                        // gitignore/VCS filter stays in the `VaultFileWatcher`
-                        // bridge. This is enough to keep a foreign interposer
-                        // (lock file, byte-syncer temp) from disturbing a
-                        // pending rename `From`.
-                        let emissions = pairing
-                            .classify(signal, now, &|p: &Path| has_vault_ext(p, &extensions));
-                        for (path, kind) in emissions {
-                            let seq =
-                                NOTIFY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                            // send only errors with no subscribers — fine.
-                            let _ = event_tx.send(FileChange { path, kind, seq });
-                        }
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
+            Ok(event) => {
+                let signals = notify_event_to_signals(&event, &|p: &Path| p.exists());
+                let now = Instant::now();
+                let mut pairing = pairing
+                    .lock()
+                    .expect("NotifyWatcher rename-pairing mutex poisoned");
+                for signal in &signals {
+                    // Cheap extension relevance here; the full
+                    // gitignore/VCS filter stays in the `VaultFileWatcher`
+                    // bridge. This is enough to keep a foreign interposer
+                    // (lock file, byte-syncer temp) from disturbing a
+                    // pending rename `From`.
+                    let emissions =
+                        pairing.classify(signal, now, &|p: &Path| has_vault_ext(p, &extensions));
+                    for (path, kind) in emissions {
+                        let seq = NOTIFY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        // send only errors with no subscribers — fine.
+                        let _ = event_tx.send(FileChange { path, kind, seq });
                     }
                 }
-                Err(e) => {
-                    tracing::error!("[NotifyWatcher] watcher error: {e}");
-                }
-            },
-        )
-        .map_err(std::io::Error::other)?;
-        Ok(Self {
-            watcher: Mutex::new(watcher),
-            tx,
+            }
+            Err(e) => {
+                tracing::error!("[NotifyWatcher] watcher error: {e}");
+            }
         })
     }
 }
@@ -458,15 +456,24 @@ impl FileChangeSource for NotifyWatcher {
     }
 
     fn arm(&self, root: &Path) -> std::io::Result<()> {
+        let mut slot = self.watcher.lock().expect("NotifyWatcher mutex poisoned");
+        assert!(slot.is_none(), "NotifyWatcher armed twice");
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("build_watcher") {
+            return Err(std::io::Error::other(
+                "building the file watcher failed: [crash-injection] the OS refuses a file watcher",
+            ));
+        }
+        let watcher = slot.insert(self.build_watcher().map_err(|e| {
+            std::io::Error::other(format!("building the file watcher failed: {e}"))
+        })?);
         #[cfg(feature = "crash-injection")]
         if crate::crash_injection::fires("arm_watcher") {
             return Err(std::io::Error::other(
                 "[crash-injection] arming the watcher fails",
             ));
         }
-        self.watcher
-            .lock()
-            .expect("NotifyWatcher mutex poisoned")
+        watcher
             .watch(root, RecursiveMode::Recursive)
             .map_err(std::io::Error::other)
     }
@@ -906,7 +913,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let watcher = NotifyWatcher::new_unarmed().unwrap();
+        let watcher = NotifyWatcher::new_unarmed();
         let mut rx = watcher.subscribe();
         watcher.arm(&root).unwrap();
         let live = root.join("live.org");

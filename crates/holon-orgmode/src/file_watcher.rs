@@ -224,7 +224,7 @@ mod tests {
 
     impl DelayedRelay {
         fn new(delay: Duration) -> Self {
-            let watcher = NotifyWatcher::new_unarmed().unwrap();
+            let watcher = NotifyWatcher::new_unarmed();
             let mut raw = watcher.subscribe();
             let (tx, _) = broadcast::channel(4096);
             let (due_tx, mut due_rx) = mpsc::unbounded_channel();
