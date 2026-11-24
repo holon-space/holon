@@ -5710,6 +5710,8 @@ dependencies = [
  "holon-core",
  "holon-loro",
  "holon-loro-testing",
+ "holon-net",
+ "holon-net-shell",
  "holon-profiles",
  "holon-secrets",
  "holon-sharing",

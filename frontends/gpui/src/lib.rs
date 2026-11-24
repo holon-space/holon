@@ -1864,6 +1864,17 @@ impl Render for HolonApp {
             overlay_theme,
         );
 
+        let device_key_bar = share_ui::render_device_key_bar(
+            self.share_ui.read(cx),
+            self.session.clone(),
+            self.rt_handle.clone(),
+            self.share_ui.clone(),
+            window.window_handle(),
+            &cx.to_async(),
+            self.bounds_registry.clone(),
+            overlay_theme,
+        );
+
         let mut page = page_container()
             .bg(page_background)
             .text_color(text)
@@ -1876,6 +1887,9 @@ impl Render for HolonApp {
                 title_bar.into_any_element(),
             ));
         if let Some(bar) = deferred_reimport_bar {
+            page = page.child(bar);
+        }
+        if let Some(bar) = device_key_bar {
             page = page.child(bar);
         }
         page = page.child(content);

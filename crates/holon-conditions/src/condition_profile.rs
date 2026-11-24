@@ -64,12 +64,15 @@ pub enum OpId {
     AcceptRemoval,
     /// Takes the document as `doc`.
     RewriteFromStore,
+    /// Replaces an unreadable device key; only the user's own gesture fires it.
+    CreateDeviceKey,
+    LoadDeviceKey,
 }
 
 impl OpId {
     pub const fn entity(self) -> &'static str {
         match self {
-            Self::PairRetryReimport => "device",
+            Self::PairRetryReimport | Self::CreateDeviceKey | Self::LoadDeviceKey => "device",
             Self::DropRefusedTypeTable => "type_table",
             Self::AcceptRemoval | Self::RewriteFromStore => "writeback",
         }
@@ -81,6 +84,8 @@ impl OpId {
             Self::DropRefusedTypeTable => "drop_refused_table",
             Self::AcceptRemoval => "accept_removal",
             Self::RewriteFromStore => "rewrite_from_store",
+            Self::CreateDeviceKey => "create_device_key",
+            Self::LoadDeviceKey => "load_device_key",
         }
     }
 }
@@ -1068,6 +1073,33 @@ const DEVICE_KEY_FILE_NOT_REMOVED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DEVICE_KEY_CORRUPT: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Sharing is off: the device key cannot be read",
+    icons::KEY,
+    ConditionPlacement::Banner,
+    AllClear::RemedyApplied,
+    &[RemedySlot::Retry(OpId::CreateDeviceKey)],
+);
+
+const DEVICE_KEY_UNAVAILABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Sharing is off: the keychain is not available",
+    icons::KEY,
+    ConditionPlacement::Banner,
+    AllClear::RemedyApplied,
+    &[RemedySlot::Retry(OpId::LoadDeviceKey)],
+);
+
+const DEVICE_KEY_REPLACED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "This device has a new device key",
+    icons::KEY,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -1163,6 +1195,9 @@ impl ConditionKind {
             Self::ConfigFileUnusable { .. } => CONFIG_FILE_UNUSABLE,
             Self::DeviceKeyFileRemoved { .. } => DEVICE_KEY_FILE_REMOVED,
             Self::DeviceKeyFileNotRemoved { .. } => DEVICE_KEY_FILE_NOT_REMOVED,
+            Self::DeviceKeyCorrupt { .. } => DEVICE_KEY_CORRUPT,
+            Self::DeviceKeyUnavailable { .. } => DEVICE_KEY_UNAVAILABLE,
+            Self::DeviceKeyReplaced { .. } => DEVICE_KEY_REPLACED,
         }
     }
 }

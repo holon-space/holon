@@ -64,9 +64,9 @@ impl std::fmt::Display for ContainerLogId {
     }
 }
 
-/// Stable per-device peer id — the sender identity on every envelope and the
-/// second component of the ADR 0028 crossing-ordering tuple. Produced by
-/// [`crate::share_peer_id::stable_peer_id`].
+/// The peer id a device authors a share under — the sender identity on every
+/// envelope and the second component of the ADR 0028 crossing-ordering tuple.
+/// Each load of a share on a device draws a fresh random one.
 ///
 /// Lives here rather than in `holon-sharing` so the transport (which cannot
 /// depend on the policy crate) and the acceptor name the SAME type;

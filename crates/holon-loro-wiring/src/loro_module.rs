@@ -493,13 +493,10 @@ impl Module for LoroModule {
             // `LoroProjection::arm`.
             projection.arm();
 
-            // Rehydrate any previously-persisted shared subtrees —
-            // walk mount nodes in the global doc, load each
-            // `shares/<id>.loro` snapshot, re-register with the
-            // manager + advertiser, attach save workers. Must run
-            // AFTER the global doc is fully loaded but BEFORE the
-            // sync controller starts, so the controller's first pass
-            // sees a consistent share registry.
+            // Load the persisted shared subtrees locally; the device-key net
+            // starts their network legs once the key is read. Runs after the
+            // global doc is loaded and before the sync controller starts, so
+            // the controller's first pass sees a consistent share registry.
             #[cfg(all(
                 feature = "iroh-sync",
                 not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -522,9 +519,13 @@ impl Module for LoroModule {
                 // concurrent writer.
                 let doc_arc = collab.doc();
                 let doc = &*doc_arc;
+                // Resolving the net starts the device-key load off this path.
+                let key_net = resolver.resolve::<Arc<crate::device_key_net::DeviceKeyNet>>();
                 match rehydrate_shared_trees(&backend, doc).await {
-                    Ok(n) if n > 0 => info!("[LoroModule] rehydrated {n} shared subtree(s)"),
-                    Ok(_) => {}
+                    Ok(loaded) => {
+                        info!("[LoroModule] rehydrated {} shared subtree(s)", loaded.len());
+                        key_net.shares_loaded((*backend).clone(), loaded);
+                    }
                     Err(e) => {
                         error!("[LoroModule] rehydrate_shared_trees failed: {e:#}")
                     }
@@ -601,8 +602,14 @@ fn disclose_legacy_key_files(
     use holon_conditions::condition_bus::ConditionKind;
     let subject = storage_dir.display().to_string();
     if !outcome.removed.is_empty() {
-        let files: Vec<String> = outcome.removed.iter().map(|p| p.display().to_string()).collect();
-        tracing::warn!("removed the device key files {files:?} unread; this device has a new identity");
+        let files: Vec<String> = outcome
+            .removed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        tracing::warn!(
+            "removed the device key files {files:?} unread; this device has a new identity"
+        );
         bus.emit(Condition {
             subject: subject.clone(),
             reason: ConditionKind::DeviceKeyFileRemoved { files },
@@ -628,19 +635,20 @@ fn disclose_legacy_key_files(
 ))]
 fn register_subtree_share(injector: &Injector) {
     use holon_core::OperationProvider;
-    use holon_loro::iroh_advertiser::IrohAdvertiser;
     use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
     use holon_loro::loro_share_backend::LoroShareBackend;
-    use iroh::SecretKey;
+    use holon_loro::share_identity::IdentitySlot;
+
+    use crate::device_key_net::DeviceKeyNet;
 
     injector.provide::<Arc<SharedTreeSyncManager>>(Provider::root(|_| {
         Shared::new(Arc::new(SharedTreeSyncManager::new()))
     }));
+    injector.provide::<Arc<IdentitySlot>>(Provider::root(|_| Shared::new(IdentitySlot::loading())));
     // The platform default refuses in a process that never granted the
-    // keychain, so a harness that forgets to inject never reaches the login one.
-    injector.provide::<Arc<SecretKey>>(Provider::root(|resolver| {
-        use holon_loro::device_key_custody::DeviceKeyCustody;
-        use holon_loro::device_key_custody::DeviceKeyLoad;
+    // keychain, so a harness that forgets to inject never reaches the login
+    // one.
+    injector.provide::<Arc<DeviceKeyNet>>(Provider::root(|resolver| {
         let config = resolver.resolve::<LoroConfig>();
         let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
         disclose_legacy_key_files(
@@ -652,21 +660,21 @@ fn register_subtree_share(injector: &Injector) {
             Some(injected) => injected.0.clone(),
             None => holon_secrets::platform_keychain(holon_secrets::DEVICE_KEY_SERVICE).into(),
         };
-        let custody = DeviceKeyCustody::for_storage_dir(keychain, &config.storage_dir)
-            .expect("device key custody");
-        match holon_loro::device_key_custody::load_device_identity(&custody) {
-            DeviceKeyLoad::Loaded(key) | DeviceKeyLoad::Created(key) => Shared::new(Arc::new(key)),
-            other => panic!("the device key is not available: {other:?}"),
-        }
+        Shared::new(Arc::new(DeviceKeyNet::start(
+            holon_loro::device_key_custody::DeviceKeyCustody::for_storage_dir(
+                keychain,
+                &config.storage_dir,
+            ),
+            (*resolver.resolve::<Arc<IdentitySlot>>()).clone(),
+            (*bus).clone(),
+            resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+        )))
     }));
-    injector.provide::<Arc<IrohAdvertiser>>(Provider::root(|resolver| {
-        let key = resolver.resolve::<Arc<SecretKey>>();
-        // The bus is where a BEARER-ticket admission is disclosed to the user
-        // (ADR 0028 R5 stopgap); without it the advertiser can only log.
-        let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
-        Shared::new(Arc::new(
-            IrohAdvertiser::new_with_key((**key).clone()).with_degraded_bus((*bus).clone()),
-        ))
+    injector.provide_into_set::<dyn OperationProvider>(Provider::root(|resolver| {
+        let net = resolver.resolve::<Arc<DeviceKeyNet>>();
+        Arc::new(crate::device_key_net::DeviceKeyRemedyProvider::new(
+            (*net).clone(),
+        )) as Arc<dyn OperationProvider>
     }));
     // `Arc<ConditionBus>` is NOT registered here. Disclosure must exist in
     // every container, not only the Loro one, so holon's core registration
@@ -689,9 +697,8 @@ fn register_subtree_share(injector: &Injector) {
         let snapshot_store =
             resolver.resolve::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>();
         let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
-        let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
+        let identity = resolver.resolve::<Arc<IdentitySlot>>();
         let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
-        let key = resolver.resolve::<Arc<SecretKey>>();
         let store_arc = Arc::new(RwLock::new((*doc_store).clone()));
 
         // Wire up the `block` SQL provider so mount-node projection into
@@ -750,9 +757,8 @@ fn register_subtree_share(injector: &Injector) {
             store_arc,
             (*snapshot_store).clone(),
             (*manager).clone(),
-            (*advertiser).clone(),
+            (*identity).clone(),
             (*bus).clone(),
-            (**key).clone(),
             credentials,
             Some(sql_ops),
             Some(downstream_projection),
@@ -767,7 +773,7 @@ fn register_subtree_share(injector: &Injector) {
         },
     ));
 
-    // Whole-store pairing. Shares the advertiser with the subtree shares above:
+    // Whole-store pairing. Shares the identity with the subtree shares above:
     // one endpoint per device, so a paired peer and a share peer are the same
     // QUIC identity to every acceptor roster.
     // The re-import leg (D78.d) writes through the SHARED `BlockOrdering`,
@@ -780,7 +786,7 @@ fn register_subtree_share(injector: &Injector) {
     injector.provide::<Arc<holon_loro::device_pairing_op::DevicePairing>>(Provider::root(
         move |resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
+            let identity = resolver.resolve::<Arc<IdentitySlot>>();
             let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
             let ordering_injector = ordering_injector.clone();
             let ordering: holon_loro::device_pairing_op::OrderingResolver = Arc::new(move || {
@@ -819,7 +825,7 @@ fn register_subtree_share(injector: &Injector) {
                 });
             Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(
                 (*doc_store).clone(),
-                (*advertiser).clone(),
+                (*identity).clone(),
                 ordering,
                 projection,
                 write_tier,

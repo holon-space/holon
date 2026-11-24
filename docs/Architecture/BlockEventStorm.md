@@ -33,7 +33,7 @@ boundaries, each with its own vocabulary and its own translation rules.
 |---|---|---|---|---|
 | **Authoring / Format** | `holon-org-format`, `holon-orgmode` | parse/render disk text ↔ Block | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
 | **CRDT of record** | `holon-loro` | the authoritative block store + merge | LoroTree **node** (`TreeID`) + meta `LoroMap` | `STABLE_ID` meta key (`TreeID` is peer-local!) |
-| **P2P transport** | `holon-loro` (Iroh) | replicate the CRDT between peers | version-vector delta bytes | per-share `stable_peer_id` |
+| **P2P transport** | `holon-loro` (Iroh) | replicate the CRDT between peers | version-vector delta bytes | random peer id per share load |
 | **Read projection / Query** | `holon-turso` | SQL read model + CDC | **row** in `block` matview / `block_raw` | `id` column (not SQLite ROWID!) |
 | **Interaction / Render** | `holon-frontend`, `frontends/gpui`,`/tui` | Block → ViewModel; gesture → intent | **row** → ViewModel → widget | `EntityUri` carried by the intent |
 | **Shared kernel** | `holon-api`, `holon-core` | the `Block` struct, `Change`, `EntityUri`, `ChangeOp` | `Block` | `EntityUri` (`block:` scheme) |
@@ -249,9 +249,8 @@ shipped. Anchors: `share_subtree`, `HistoryRetention` in
   the word). `share_subtree → extract_for_share → commit_share_prune` never touches
   a key; the exported CRDT snapshot is plaintext. The auth surface is entirely out
   of band from the payload: ticket-based (`Ticket::new` / `Ticket::decode`,
-  `ticket.rs`) + iroh-endpoint stable identity (`stable_peer_id(device_key,
-  shared_tree_id)`, `share_peer_id.rs`; key material from the OS keychain,
-  `device_key_custody.rs`). Threat
+  `ticket.rs`) + iroh-endpoint identity (the device key from the OS keychain,
+  `device_key_custody.rs`, held by `share_identity.rs`). Threat
   model deferred to `docs/Reference/SUBTREE_SHARING.md`. Pinned by
   `shared_tree::tests::share_subtree_payload_is_plaintext_not_encrypted` (an
   anonymous `LoroDoc` with zero credentials imports the shared snapshot and reads

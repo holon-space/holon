@@ -274,6 +274,10 @@ pub struct TestEnvironment {
     /// (which falls back to the raw path for files not on the real disk)
     /// yields keys that strip_prefix against the controller root.
     org_root: PathBuf,
+
+    /// The clock of every boot of this environment, the first and each
+    /// `start_app`.
+    boot_clock: Arc<dyn holon_api::Clock>,
 }
 
 impl std::fmt::Debug for TestEnvironment {
@@ -483,7 +487,7 @@ impl TestEnvironmentBuilder {
             Some(clock) => clock.clone(),
             None => Arc::new(holon_api::SystemClock),
         };
-        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive(), clock);
+        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive(), clock.clone());
         if !self.wait_for_file_watcher {
             session_config = session_config.without_wait();
         }
@@ -571,6 +575,7 @@ impl TestEnvironmentBuilder {
         holon::testing::clock_guard::assert_clock_running_in(&injector);
 
         Ok(TestEnvironment {
+            boot_clock: clock,
             org_fs,
             org_root,
             temp_dir,
@@ -1002,6 +1007,7 @@ impl TestEnvironment {
         let org_scanned_through = org_fs.last_change_seq();
 
         Ok(Self {
+            boot_clock: Arc::new(holon_api::SystemClock),
             org_fs,
             org_root,
             temp_dir,
@@ -1233,10 +1239,8 @@ impl TestEnvironment {
             ..Default::default()
         };
         let config_dir = self.temp_dir.path().to_path_buf();
-        let mut session_config = SessionConfig::new(
-            holon_api::UiInfo::permissive(),
-            std::sync::Arc::new(holon_api::SystemClock),
-        );
+        let mut session_config =
+            SessionConfig::new(holon_api::UiInfo::permissive(), self.boot_clock.clone());
         if !wait_for_ready {
             session_config = session_config.without_wait();
         }

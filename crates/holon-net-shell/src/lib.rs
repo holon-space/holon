@@ -81,6 +81,13 @@ impl Shell {
             .expect("the net executor lock is poisoned")
     }
 
+    /// Runs `f` on the executor at the time read under its lock, so callers
+    /// on other threads hand the executor their times in lock order.
+    fn at_now<R>(&self, f: impl FnOnce(&mut Executor, Duration) -> R) -> R {
+        let mut exec = self.exec();
+        f(&mut exec, self.now())
+    }
+
     fn queue(&self, requests: Vec<EffectRequest>) {
         self.inner
             .pending
@@ -99,10 +106,8 @@ impl Shell {
     ///
     /// A net that does not quiesce after a write is a net-definition bug.
     pub fn write(&self, place: &str, subject: &str, content: Content) {
-        let now = self.now();
         let quiesced = self
-            .exec()
-            .write(place, subject, content, now)
+            .at_now(|exec, now| exec.write(place, subject, content, now))
             .unwrap_or_else(|e| panic!("the net has no quiescence after a write to {place}: {e}"));
         self.queue(quiesced.requests);
     }
@@ -114,8 +119,7 @@ impl Shell {
         &self,
         f: impl FnOnce(&mut Executor, Duration) -> Result<Vec<EffectRequest>, E>,
     ) -> Result<(), E> {
-        let now = self.now();
-        let requests = f(&mut self.exec(), now)?;
+        let requests = self.at_now(f)?;
         self.queue(requests);
         self.inner.progress.send_modify(|n| *n += 1);
         self.inner.fired.notify_one();
@@ -130,10 +134,8 @@ impl Shell {
         subject: &str,
         occurrence: OccurrenceId,
     ) -> Result<Accepted, FireError> {
-        let now = self.now();
         let accepted = self
-            .exec()
-            .fire(transition, subject, occurrence, Content::new(), now)?;
+            .at_now(|exec, now| exec.fire(transition, subject, occurrence, Content::new(), now))?;
         self.queue(accepted.requests);
         self.inner.progress.send_modify(|n| *n += 1);
         self.inner.fired.notify_one();
@@ -151,8 +153,7 @@ impl Shell {
     /// [`Shell::drive`] is the loop for an owner whose effects are `Send` in
     /// every lifetime.
     pub fn step(&self) -> Result<Vec<EffectRequest>, ExecError> {
-        let now = self.now();
-        let new = self.exec().step(now)?;
+        let new = self.at_now(|exec, now| exec.step(now))?;
         let mut requests = std::mem::take(
             &mut *self
                 .inner
@@ -169,8 +170,7 @@ impl Shell {
 
     /// Hands the result of a [`Shell::step`] effect back.
     pub fn complete(&self, request: &EffectRequest, result: EffectResult) -> Result<(), ExecError> {
-        let now = self.now();
-        let quiesced = self.exec().complete(request.attempt, result, now)?;
+        let quiesced = self.at_now(|exec, now| exec.complete(request.attempt, result, now))?;
         self.queue(quiesced.requests);
         self.inner.progress.send_modify(|n| *n += 1);
         Ok(())
@@ -264,5 +264,49 @@ mod tests {
         assert_eq!(ran, vec!["a".to_string()]);
         assert_eq!(waiter.await.unwrap(), Ok(Settled::Done));
         assert!(shell.read(|e| e.tokens().token("Out", "a").is_some()));
+    }
+
+    /// Not a property test: the input is the scheduler's interleaving of the
+    /// threads, which no generator draws.
+    #[test]
+    fn writes_from_many_threads_never_move_the_clock_back() {
+        const THREADS: usize = 8;
+        const WRITES: usize = 2000;
+        let shell = Shell::new(net()).unwrap();
+        let errors: Vec<String> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|t| {
+                    let shell = &shell;
+                    s.spawn(move || {
+                        (0..WRITES)
+                            .filter_map(|i| {
+                                shell
+                                    .apply(|exec, now| {
+                                        exec.write("In", &format!("{t}-{i}"), Content::new(), now)
+                                            .map(|q| q.requests)
+                                    })
+                                    .err()
+                                    .map(|e| e.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().expect("a writer thread panicked"))
+                .collect()
+        });
+        let written = shell.read(|e| {
+            (0..THREADS)
+                .flat_map(|t| (0..WRITES).map(move |i| format!("{t}-{i}")))
+                .filter(|subject| e.tokens().token("In", subject).is_some())
+                .count()
+        });
+        assert_eq!(
+            (errors.len(), errors.first(), written),
+            (0, None, THREADS * WRITES),
+            "every write from every thread lands, and none sees the clock go back"
+        );
     }
 }

@@ -33,7 +33,6 @@ use holon_core::Result;
 use holon_core::UndoAction;
 use holon_core::WriteTierAuthority;
 use iroh::EndpointAddr;
-use iroh::SecretKey;
 use loro::LoroDoc;
 use loro::TreeID;
 use loro::TreeParentId;
@@ -69,7 +68,8 @@ use crate::share_enrollment::ExpiryTime;
 use crate::share_enrollment::PeerFingerprint;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::peer_fingerprint;
-use crate::share_peer_id::stable_peer_id;
+use crate::share_identity::IdentitySlot;
+use crate::share_identity::ShareIdentity;
 use crate::shared_snapshot_store::SharedSnapshotStore;
 use crate::shared_tree::ExitRoot;
 use crate::shared_tree::HistoryRetention;
@@ -313,9 +313,8 @@ pub struct LoroShareBackend {
     store: Arc<RwLock<LoroDocumentStore>>,
     snapshot_store: Arc<SharedSnapshotStore>,
     manager: Arc<SharedTreeSyncManager>,
-    advertiser: Arc<IrohAdvertiser>,
+    identity: Arc<IdentitySlot>,
     degraded_bus: Arc<ConditionBus>,
-    device_key: SecretKey,
     /// Handle to the SQL `block` table. Used to project mount nodes into
     /// Block rows after `accept_shared_subtree` / `rehydrate_shared_trees`
     /// so the UI — which reads from SQL — can render shared content.
@@ -423,10 +422,7 @@ const SYNC_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Uses the generic [`DebouncedCommitWorker`] with the `local_only()`
 /// filter — `Import` events are remote updates just applied by the
 /// sync protocol, and syncing them back out would churn forever. The
-/// filter uses `EventTriggerKind::Local` (what Loro hands us); the
-/// alternative of comparing the top-level change's peer id to
-/// `stable_peer_id(device_key, shared_tree_id)` yields the same
-/// outcome.
+/// filter uses `EventTriggerKind::Local` (what Loro hands us).
 ///
 /// `local_peer_id` is accepted as a parameter purely so the tracing
 /// line shows it for debugging — the filter itself is `local_only()`.
@@ -836,18 +832,16 @@ impl LoroShareBackend {
         store: Arc<RwLock<LoroDocumentStore>>,
         snapshot_store: Arc<SharedSnapshotStore>,
         manager: Arc<SharedTreeSyncManager>,
-        advertiser: Arc<IrohAdvertiser>,
+        identity: Arc<IdentitySlot>,
         degraded_bus: Arc<ConditionBus>,
-        device_key: SecretKey,
         credentials: Arc<ShareCredentials>,
     ) -> Arc<Self> {
         Self::new_with_sql(
             store,
             snapshot_store,
             manager,
-            advertiser,
+            identity,
             degraded_bus,
-            device_key,
             credentials,
             None,
             None,
@@ -865,9 +859,8 @@ impl LoroShareBackend {
         store: Arc<RwLock<LoroDocumentStore>>,
         snapshot_store: Arc<SharedSnapshotStore>,
         manager: Arc<SharedTreeSyncManager>,
-        advertiser: Arc<IrohAdvertiser>,
+        identity: Arc<IdentitySlot>,
         degraded_bus: Arc<ConditionBus>,
-        device_key: SecretKey,
         credentials: Arc<ShareCredentials>,
         sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
         downstream_projection: Option<Arc<dyn DownstreamProjection>>,
@@ -892,9 +885,8 @@ impl LoroShareBackend {
             store,
             snapshot_store,
             manager,
-            advertiser,
+            identity,
             degraded_bus,
-            device_key,
             credentials,
             sql_ops,
             downstream_projection,
@@ -937,10 +929,8 @@ impl LoroShareBackend {
     /// debounces + calls `sync_with_peers`. Called wherever
     /// `attach_save_worker` is called.
     pub async fn attach_sync_worker(&self, shared_tree_id: SharedTreeId, doc: Arc<LoroDoc>) {
-        // Read the doc's real peer id (already set via `set_peer_id`
-        // before this worker is attached). Recomputing `stable_peer_id`
-        // here would re-bump the generation and diverge from the id the
-        // doc actually authors under.
+        // The doc's peer id, set via `set_peer_id` before this worker is
+        // attached; each load mints a new one.
         let local_peer_id = doc.peer_id();
         let worker =
             spawn_sync_worker(self.weak_self(), shared_tree_id.clone(), doc, local_peer_id);
@@ -1356,7 +1346,11 @@ impl LoroShareBackend {
                 // peer newly pinned by `acceptor_enroll` is in the live roster
                 // by now. Writing the sidecar here is what lets it reconnect
                 // after a restart without re-proving the capability.
-                if let Err(e) = strong.persist_roster(access.container()).await {
+                let persisted = match strong.identity() {
+                    Ok(identity) => strong.persist_roster(&identity, access.container()).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = persisted {
                     warn!(
                         shared_tree_id = %access.container(),
                         error = %e,
@@ -1450,8 +1444,8 @@ impl LoroShareBackend {
     /// Snapshot the live roster's pinned-peer set back into the signed
     /// sidecar, so a peer admitted this session is still pinned after a
     /// restart. Called after every inbound admission and after a revocation.
-    async fn persist_roster(&self, shared_tree_id: &str) -> Result<()> {
-        let Some(roster) = self.advertiser.roster_for(shared_tree_id).await else {
+    async fn persist_roster(&self, identity: &ShareIdentity, shared_tree_id: &str) -> Result<()> {
+        let Some(roster) = identity.advertiser().roster_for(shared_tree_id).await else {
             return Err(err(format!(
                 "share {shared_tree_id} is advertised without a roster, so there is no pinned-peer \
                  set to persist"
@@ -1482,7 +1476,8 @@ impl LoroShareBackend {
         shared_tree_id: &str,
         peer: PeerFingerprint,
     ) -> Result<bool> {
-        let Some(roster) = self.advertiser.roster_for(shared_tree_id).await else {
+        let identity = self.identity()?;
+        let Some(roster) = identity.advertiser().roster_for(shared_tree_id).await else {
             return Err(err(format!(
                 "share {shared_tree_id} is not advertised with a roster; there is nothing to \
                  revoke from"
@@ -1494,7 +1489,7 @@ impl LoroShareBackend {
             guard.close_enrollment(chrono::Utc::now().timestamp());
             removed
         };
-        self.persist_roster(shared_tree_id).await?;
+        self.persist_roster(&identity, shared_tree_id).await?;
         // Revoking only the acceptor side would leave the outbound leg intact:
         // `sync_with_peers` dials every remembered addr and pulls, so a revoked
         // peer's ops would keep arriving through OUR dial. Forget its addrs.
@@ -1511,6 +1506,7 @@ impl LoroShareBackend {
 
     async fn start_advertising_stable(
         &self,
+        identity: &ShareIdentity,
         shared_tree_id: &SharedTreeId,
         doc: Arc<LoroDoc>,
         admission: ShareAdmission,
@@ -1526,8 +1522,8 @@ impl LoroShareBackend {
                 None
             }
         };
-        let addr = self
-            .advertiser
+        let addr = identity
+            .advertiser()
             .start_share_with_callback(
                 shared_tree_id.to_string(),
                 doc,
@@ -1574,6 +1570,7 @@ impl LoroShareBackend {
     ///
     /// Renamed from `pull_from_peers` to reflect bidirectional semantics.
     pub async fn sync_with_peers(&self, shared_tree_id: &SharedTreeId) -> Result<usize> {
+        let identity = self.identity()?;
         let doc = self
             .manager
             .get_doc(shared_tree_id)
@@ -1608,7 +1605,7 @@ impl LoroShareBackend {
             .load_capability(shared_tree_id)
             .map_err(|e| err(format!("cannot sync share {shared_tree_id}: {e:#}")))?;
         let alpn_bytes = make_alpn(ALPN_PREFIX, shared_tree_id);
-        let advertiser_ep = self.advertiser.endpoint_for(shared_tree_id).await;
+        let advertiser_ep = identity.advertiser().endpoint_for(shared_tree_id).await;
         let mut synced = 0usize;
         for addr in peers {
             let ep = match advertiser_ep.clone() {
@@ -1690,7 +1687,16 @@ impl LoroShareBackend {
 
     /// Test-only access to the advertiser (for teardown in tests).
     pub fn advertiser_for_test(&self) -> Arc<IrohAdvertiser> {
-        self.advertiser.clone()
+        self.identity()
+            .expect("a test backend has a device identity")
+            .advertiser()
+            .clone()
+    }
+
+    /// This device's identity, or the one error a network leg returns
+    /// without it.
+    fn identity(&self) -> Result<Arc<ShareIdentity>> {
+        self.identity.require().map_err(|e| err(e.to_string()))
     }
 
     /// Test-only view of the addrs this device would dial for a share. The
@@ -2027,6 +2033,12 @@ fn set_stable_id(doc: &LoroDoc, tid: TreeID, stable_id: &str) -> anyhow::Result<
     crate::stable_id_index::write_stable_id(doc, tid, bare)
 }
 
+/// A random peer id: two mints never author under the same id, so no
+/// `(peer_id, counter)` pair repeats across devices, restarts or crashes.
+fn fresh_peer_id() -> u64 {
+    rand::random::<u64>()
+}
+
 /// True if `e` is the `IrohAdvertiser` "already advertising" error —
 /// which is semantically success on the rehydration / accept paths.
 fn is_already_advertising(e: &anyhow::Error) -> bool {
@@ -2036,6 +2048,7 @@ fn is_already_advertising(e: &anyhow::Error) -> bool {
 #[async_trait]
 impl SubtreeShareOperations<()> for LoroShareBackend {
     async fn share_subtree(&self, id: &str, retention: String) -> Result<OperationResult> {
+        let identity = self.identity()?;
         let id_uri =
             EntityUri::parse(id).map_err(|e| err(format!("invalid block URI {id:?}: {e:#}")))?;
         if !id_uri.is_block() {
@@ -2136,15 +2149,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 )
                 .map_err(|e| anyhow::Error::msg(format!("extract_for_share failed: {e:#}")))?;
 
-                // Stable peer id BEFORE save so the persisted snapshot
-                // already carries the right identity. Bump the generation so
-                // this mint can never reuse a `(peer_id, counter)` from a
-                // stale snapshot after a crash — see `share_peer_id`.
-                let generation = self
-                    .snapshot_store
-                    .next_generation(&shared_tree_id)
-                    .map_err(|e| anyhow::Error::msg(format!("bump peer-id generation: {e:#}")))?;
-                let peer_id = stable_peer_id(&self.device_key, &shared_tree_id, generation);
+                // Peer id BEFORE save so the persisted snapshot already
+                // authors under it.
+                let peer_id = fresh_peer_id();
                 extracted
                     .shared_doc
                     .set_peer_id(peer_id)
@@ -2269,6 +2276,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         let addr = self
             .start_advertising_stable(
+                &identity,
                 &shared_tree_id,
                 shared_arc.clone(),
                 ShareAdmission::Enrolled {
@@ -2327,6 +2335,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // access — but it is now the only thing that does, and it is bounded by
         // the enrollment window, the peer cap, and revocation.
         let t = Ticket::decode(&ticket).map_err(|e| err(format!("decode ticket: {e:#}")))?;
+        let identity = self.identity()?;
 
         // One placement per share on this device. A second accept names a
         // second place for the SAME page, and a page has one parent; refuse it
@@ -2343,13 +2352,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         }
 
         let shared_doc = crate::loro_backend::styled_loro_doc();
-        let generation = self
-            .snapshot_store
-            .next_generation(&t.shared_tree_id)
-            .map_err(|e| err(format!("bump peer-id generation: {e:#}")))?;
-        let peer_id = stable_peer_id(&self.device_key, &t.shared_tree_id, generation);
         shared_doc
-            .set_peer_id(peer_id)
+            .set_peer_id(fresh_peer_id())
             .map_err(|e| err(format!("set_peer_id on shared doc: {e:#}")))?;
 
         // Remember the ticket author's address so later edits can pull.
@@ -2371,6 +2375,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .await?;
         match self
             .start_advertising_stable(
+                &identity,
                 &shared_tree_id,
                 shared_arc.clone(),
                 ShareAdmission::Enrolled {
@@ -2392,8 +2397,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             }
         }
         let alpn_bytes = make_alpn(ALPN_PREFIX, &shared_tree_id);
-        let client_ep = self
-            .advertiser
+        let client_ep = identity
+            .advertiser()
             .endpoint_for(&shared_tree_id)
             .await
             .ok_or_else(|| err("advertiser endpoint missing right after start_share"))?;
@@ -2425,8 +2430,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Read the roster back from the advertiser rather than using the one
         // built above: on the "already advertising" branch the LIVE roster is
         // an earlier one, and pinning into a detached copy would pin nothing.
-        let live_roster = self
-            .advertiser
+        let live_roster = identity
+            .advertiser()
             .roster_for(&shared_tree_id)
             .await
             .ok_or_else(|| {
@@ -2441,7 +2446,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 .pin_dialed(peer_fingerprint(&conn))
                 .map_err(|e| err(format!("pin the share author into our roster: {e}")))?;
         }
-        self.persist_roster(&shared_tree_id).await?;
+        self.persist_roster(&identity, &shared_tree_id).await?;
         let _conn = conn;
 
         // Persist the shared snapshot BEFORE creating a mount node in
@@ -2800,8 +2805,11 @@ impl LoroShareBackend {
 
         // (3) Close the advertiser endpoint + stop advertising. A share whose
         // roster could not be rebuilt at rehydration is loaded unadvertised.
-        if self.advertiser.is_active(&shared_tree_id).await {
-            self.advertiser
+        if let Some(identity) = self.identity.ready()
+            && identity.advertiser().is_active(&shared_tree_id).await
+        {
+            identity
+                .advertiser()
                 .drop_share(&shared_tree_id)
                 .await
                 .map_err(|e| err(format!("drop_share({shared_tree_id}): {e:#}")))?;
@@ -2984,10 +2992,10 @@ impl OperationProvider for LoroShareBackend {
     }
 }
 
-/// Walk the global Loro doc's mount nodes and rehydrate each share:
-/// load the snapshot from disk, register it with the manager, start
-/// advertising (tolerating "already advertising"), attach a save
-/// worker. Returns the count of successfully rehydrated shares.
+/// Walk the global Loro doc's mount nodes and load each share locally:
+/// load the snapshot from disk, register it with the manager, attach a
+/// save worker and project it into SQL. Needs no device identity; the
+/// network legs run in [`LoroShareBackend::start_share_network`].
 ///
 /// Snapshots that fail to load are already quarantined + logged by
 /// [`SharedSnapshotStore::load`]; we just skip them. Orphan snapshot
@@ -2996,7 +3004,7 @@ impl OperationProvider for LoroShareBackend {
 pub async fn rehydrate_shared_trees(
     backend: &LoroShareBackend,
     global_doc: &LoroDoc,
-) -> Result<usize> {
+) -> Result<Vec<LoadedShare>> {
     // Clean up any `.tmp` files from a previous crashed write before
     // any reads can see them.
     if let Err(e) = backend.snapshot_store.sweep_stale_tmps() {
@@ -3064,7 +3072,7 @@ pub async fn rehydrate_shared_trees(
         }
     }
 
-    let mut rehydrated = 0usize;
+    let mut loaded = Vec::new();
     for record in mount_records {
         let info = record.info;
         let shared_tree_id = info.shared_tree_id.clone();
@@ -3114,26 +3122,9 @@ pub async fn rehydrate_shared_trees(
             }
         };
 
-        // Bump the generation on every rehydrate so post-restart edits
-        // author under a FRESH peer-id: even a stale loaded snapshot then
-        // cannot cause `(peer_id, counter)` reuse — see `share_peer_id`.
-        let generation = match backend.snapshot_store.next_generation(&shared_tree_id) {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    shared_tree_id = %shared_tree_id,
-                    error = %e,
-                    "[share] bump peer-id generation during rehydrate failed"
-                );
-                backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.to_string(),
-                    reason: ConditionKind::RehydrationFailed(format!("next_generation: {e:#}")),
-                });
-                continue;
-            }
-        };
-        let peer_id = stable_peer_id(&backend.device_key, &shared_tree_id, generation);
-        if let Err(e) = doc.set_peer_id(peer_id) {
+        // A fresh peer id per load: even a stale snapshot then cannot
+        // repeat a `(peer_id, counter)` pair.
+        if let Err(e) = doc.set_peer_id(fresh_peer_id()) {
             warn!(
                 shared_tree_id = %shared_tree_id,
                 error = %e,
@@ -3176,125 +3167,9 @@ pub async fn rehydrate_shared_trees(
             }
         }
 
-        // Rebuild the acceptor roster from the keychain capability + the
-        // owner-signed sidecar. A share whose roster cannot be rebuilt is NOT
-        // advertised: serving it un-gated would hand every peer that knows the
-        // (leaky) `shared_tree_id` read+write, which is exactly the hole this
-        // path closes. The share stays registered and syncable outbound, and
-        // the failure is disclosed rather than silently downgraded.
-        let roster = match backend.rehydrate_roster(&shared_tree_id).await {
-            Ok(roster) => Some(roster),
-            Err(e) => {
-                warn!(
-                    shared_tree_id = %shared_tree_id,
-                    error = %e,
-                    "[share] roster could not be rebuilt; refusing to advertise this share"
-                );
-                backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.to_string(),
-                    reason: ConditionKind::RehydrationFailed(format!(
-                        "roster unavailable, share not advertised: {e:#}"
-                    )),
-                });
-                None
-            }
-        };
-
-        // Start advertising. "Already advertising" is success (e.g.,
-        // two rehydration paths got wired up). Other errors are
-        // degraded-mode but non-fatal — the share is still in the
-        // registry and can be pulled from.
-        if let Some(roster) = roster {
-            match backend
-                .start_advertising_stable(
-                    &shared_tree_id,
-                    arc.clone(),
-                    ShareAdmission::Enrolled {
-                        roster,
-                        capabilities: Capabilities::read_write(),
-                    },
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(e) if is_already_advertising(&e) => {}
-                Err(e) => {
-                    warn!(
-                        shared_tree_id = %shared_tree_id,
-                        error = %e,
-                        "[share] advertiser start_share failed during rehydrate"
-                    );
-                    backend.degraded_bus.emit(Condition {
-                        subject: shared_tree_id.to_string(),
-                        reason: ConditionKind::RehydrationFailed(format!("advertiser: {e:#}")),
-                    });
-                    // Intentionally continue — the share is usable for
-                    // pulls even without advertising.
-                }
-            }
-        }
-
         backend
             .attach_save_worker(shared_tree_id.clone(), arc.clone())
             .await;
-        backend
-            .attach_sync_worker(shared_tree_id.clone(), arc.clone())
-            .await;
-
-        // Kick an initial sync to every known peer so (a) our fresh
-        // endpoint addr gets registered on the other side's
-        // advertiser and (b) we pull any edits that landed while we
-        // were offline. Spawned non-blocking so rehydrate can process
-        // multiple shares concurrently. Retries with backoff: the
-        // peer may itself be mid-restart (its endpoint torn down but
-        // not yet rebound), and a failed kick would otherwise leave
-        // both sides holding stale addrs with nothing to repair them.
-        let backend_for_kick = backend.weak_self();
-        let kick_id = shared_tree_id.clone();
-        let had_peers = {
-            let guard = backend.known_peers.read().await;
-            guard
-                .get(shared_tree_id.as_str())
-                .is_some_and(|p| !p.is_empty())
-        };
-        if had_peers {
-            tokio::spawn(async move {
-                let mut delay = Duration::from_secs(1);
-                for attempt in 1u32..=3 {
-                    let Some(strong) = backend_for_kick.upgrade() else {
-                        return;
-                    };
-                    match strong.sync_with_peers(&kick_id).await {
-                        Ok(n) if n > 0 => {
-                            tracing::debug!(
-                                shared_tree_id = %kick_id,
-                                peers_synced = %n,
-                                attempt = attempt,
-                                "[share] rehydrate kick-sync complete"
-                            );
-                            return;
-                        }
-                        Ok(_) => {}
-                        Err(e) => warn!(
-                            shared_tree_id = %kick_id,
-                            error = %e,
-                            attempt = attempt,
-                            "[share] rehydrate kick-sync failed"
-                        ),
-                    }
-                    drop(strong);
-                    if attempt < 3 {
-                        tokio::time::sleep(delay).await;
-                        delay *= 2;
-                    }
-                }
-                warn!(
-                    shared_tree_id = %kick_id,
-                    "[share] rehydrate kick-sync reached no peer after 3 attempts — \
-                     cross-peer sync resumes when a peer dials us or a local edit retries"
-                );
-            });
-        }
 
         // Re-project the share into SQL. The `create` op is an UPSERT, so
         // this is safe across restarts and repairs rows lost while the Loro
@@ -3351,10 +3226,149 @@ pub async fn rehydrate_shared_trees(
             );
         }
 
-        rehydrated += 1;
+        loaded.push(LoadedShare {
+            shared_tree_id,
+            doc: arc,
+        });
     }
 
-    Ok(rehydrated)
+    Ok(loaded)
+}
+
+/// A share loaded from disk whose network legs have not started.
+pub struct LoadedShare {
+    pub shared_tree_id: SharedTreeId,
+    pub doc: Arc<LoroDoc>,
+}
+
+impl LoroShareBackend {
+    /// The network legs of the loaded shares: roster, advertising, the
+    /// sync worker and a first sync with the known peers.
+    pub async fn start_share_network(&self, identity: &ShareIdentity, loaded: Vec<LoadedShare>) {
+        for LoadedShare {
+            shared_tree_id,
+            doc: arc,
+        } in loaded
+        {
+            // Rebuild the acceptor roster from the keychain capability + the
+            // owner-signed sidecar. A share whose roster cannot be rebuilt is
+            // NOT advertised: serving it un-gated would hand every peer that
+            // knows the (leaky) `shared_tree_id` read+write, which is exactly
+            // the hole this path closes. The share stays registered and
+            // syncable outbound, and the failure is disclosed rather than
+            // silently downgraded.
+            let roster = match self.rehydrate_roster(&shared_tree_id).await {
+                Ok(roster) => Some(roster),
+                Err(e) => {
+                    warn!(
+                        shared_tree_id = %shared_tree_id,
+                        error = %e,
+                        "[share] roster could not be rebuilt; refusing to advertise this share"
+                    );
+                    self.degraded_bus.emit(Condition {
+                        subject: shared_tree_id.to_string(),
+                        reason: ConditionKind::RehydrationFailed(format!(
+                            "roster unavailable, share not advertised: {e:#}"
+                        )),
+                    });
+                    None
+                }
+            };
+
+            // Start advertising. "Already advertising" is success (e.g.,
+            // two rehydration paths got wired up). Other errors are
+            // degraded-mode but non-fatal — the share is still in the
+            // registry and can be pulled from.
+            if let Some(roster) = roster {
+                match self
+                    .start_advertising_stable(
+                        identity,
+                        &shared_tree_id,
+                        arc.clone(),
+                        ShareAdmission::Enrolled {
+                            roster,
+                            capabilities: Capabilities::read_write(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) if is_already_advertising(&e) => {}
+                    Err(e) => {
+                        warn!(
+                            shared_tree_id = %shared_tree_id,
+                            error = %e,
+                            "[share] advertiser start_share failed during rehydrate"
+                        );
+                        self.degraded_bus.emit(Condition {
+                            subject: shared_tree_id.to_string(),
+                            reason: ConditionKind::RehydrationFailed(format!("advertiser: {e:#}")),
+                        });
+                        // Intentionally continue — the share is usable for
+                        // pulls even without advertising.
+                    }
+                }
+            }
+
+            self.attach_sync_worker(shared_tree_id.clone(), arc.clone())
+                .await;
+
+            // Kick an initial sync to every known peer so (a) our fresh
+            // endpoint addr gets registered on the other side's
+            // advertiser and (b) we pull any edits that landed while we
+            // were offline. Spawned non-blocking so rehydrate can process
+            // multiple shares concurrently. Retries with backoff: the
+            // peer may itself be mid-restart (its endpoint torn down but
+            // not yet rebound), and a failed kick would otherwise leave
+            // both sides holding stale addrs with nothing to repair them.
+            let backend_for_kick = self.weak_self();
+            let kick_id = shared_tree_id.clone();
+            let had_peers = {
+                let guard = self.known_peers.read().await;
+                guard
+                    .get(shared_tree_id.as_str())
+                    .is_some_and(|p| !p.is_empty())
+            };
+            if had_peers {
+                tokio::spawn(async move {
+                    let mut delay = Duration::from_secs(1);
+                    for attempt in 1u32..=3 {
+                        let Some(strong) = backend_for_kick.upgrade() else {
+                            return;
+                        };
+                        match strong.sync_with_peers(&kick_id).await {
+                            Ok(n) if n > 0 => {
+                                tracing::debug!(
+                                    shared_tree_id = %kick_id,
+                                    peers_synced = %n,
+                                    attempt = attempt,
+                                    "[share] rehydrate kick-sync complete"
+                                );
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(e) => warn!(
+                                shared_tree_id = %kick_id,
+                                error = %e,
+                                attempt = attempt,
+                                "[share] rehydrate kick-sync failed"
+                            ),
+                        }
+                        drop(strong);
+                        if attempt < 3 {
+                            tokio::time::sleep(delay).await;
+                            delay *= 2;
+                        }
+                    }
+                    warn!(
+                        shared_tree_id = %kick_id,
+                        "[share] rehydrate kick-sync reached no peer after 3 attempts — \
+                         cross-peer sync resumes when a peer dials us or a local edit retries"
+                    );
+                });
+            }
+        }
+    }
 }
 
 impl LoroShareBackend {
@@ -3471,16 +3485,8 @@ mod tests {
         // Keyed by the directory, so a `drop+re-make` keeps the device
         // identity as a process restart does.
         let key = crate::device_key_custody::testing::stable_test_key(dir_path);
-        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
-        LoroShareBackend::new(
-            store,
-            snapshot_store,
-            manager,
-            advertiser,
-            bus,
-            key,
-            credentials,
-        )
+        let identity = IdentitySlot::with_identity(ShareIdentity::new(key, bus.clone()));
+        LoroShareBackend::new(store, snapshot_store, manager, identity, bus, credentials)
     }
 
     fn sid(id: &str) -> SharedTreeId {
@@ -3492,8 +3498,8 @@ mod tests {
         (backend, dir)
     }
 
-    /// Rehydrate a freshly-rebuilt backend's shares — the restart every
-    /// rehydrate test performs.
+    /// Rehydrate a freshly-rebuilt backend's shares and start their network
+    /// legs — the restart every rehydrate test performs.
     ///
     /// The raw-doc escape lives HERE, once, rather than at each call site:
     /// `rehydrate_shared_trees` is async and so cannot run inside
@@ -3505,9 +3511,15 @@ mod tests {
         // ALLOW(loro_doc_escape): async consumer, single-threaded test, no
         // concurrent writer.
         let doc_arc = collab.doc();
-        rehydrate_shared_trees(backend, &doc_arc)
+        let loaded = rehydrate_shared_trees(backend, &doc_arc)
             .await
-            .expect("rehydrate_shared_trees")
+            .expect("rehydrate_shared_trees");
+        let n = loaded.len();
+        let identity = backend
+            .identity()
+            .expect("a test backend has a device identity");
+        backend.start_share_network(&identity, loaded).await;
+        n
     }
 
     fn make_backend_with_keychain() -> (
@@ -4106,8 +4118,8 @@ mod tests {
         );
 
         // Clean up advertiser tasks.
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
         // Silence the unused helper warning — used in the bidirectional test.
         let _ = read_text(&backend_a, "shared-parent").await;
     }
@@ -4180,8 +4192,8 @@ mod tests {
             "B should see A's edit after pull. Got: {b_text:?}"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Read the `content_raw` text of the node with `stable_id` from a specific
@@ -4304,8 +4316,8 @@ mod tests {
             "B must see A's routed edit after pull"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Share A's `shared-parent` subtree (root-a → shared-parent →
@@ -4403,8 +4415,8 @@ mod tests {
             .expect("get_block must resolve a shared stable id");
         assert_eq!(block.content, "original child");
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Group-A routed writers: `update_block_properties` and
@@ -4459,8 +4471,8 @@ mod tests {
             Some(&Value::String("A".to_string()))
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Create-family routing: a child created under a SHARED parent lands in
@@ -4511,8 +4523,8 @@ mod tests {
             Some("born in shared"),
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Delete of a shared block routes to the shared doc.
@@ -4532,8 +4544,8 @@ mod tests {
             "the shared child must be gone from the shared doc"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// The mount node's block URI in A's global tree after a share.
@@ -4604,8 +4616,8 @@ mod tests {
             "B must see the created child after a pull"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Read/write symmetry on the mount id: the write path takes a mount as a
@@ -4645,8 +4657,8 @@ mod tests {
             "the child created under the mount must be listed under it, got {via_mount:?}"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// A cross-doc move (out of a shared subtree into the global doc) rejects
@@ -4694,8 +4706,8 @@ mod tests {
             .await
             .expect("same-doc move within the shared subtree must succeed");
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// A content write to a mount node (the pointer A's global tree holds in
@@ -4717,8 +4729,8 @@ mod tests {
             "expected a mount-node rejection, got: {err}"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Drive many commits in rapid succession and assert the save
@@ -5704,8 +5716,10 @@ mod tests {
         // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
-        let n = rehydrate_shared_trees(&backend_a, doc).await.unwrap();
-        assert_eq!(n, 1, "A should rehydrate exactly 1 share");
+        let loaded = rehydrate_shared_trees(&backend_a, doc).await.unwrap();
+        assert_eq!(loaded.len(), 1, "A should rehydrate exactly 1 share");
+        let identity = backend_a.identity().unwrap();
+        backend_a.start_share_network(&identity, loaded).await;
 
         // Let the rehydrate kick-sync dial B so B records A's fresh
         // addr via the accept-loop callback.
@@ -5860,11 +5874,13 @@ mod tests {
         // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
         // writer exists to observe.
         let doc_arc = collab.doc();
-        let n = rehydrate_shared_trees(&backend_a, &doc_arc).await.unwrap();
-        assert_eq!(n, 1, "A should rehydrate exactly 1 share");
+        let loaded = rehydrate_shared_trees(&backend_a, &doc_arc).await.unwrap();
+        assert_eq!(loaded.len(), 1, "A should rehydrate exactly 1 share");
+        let identity = backend_a.identity().unwrap();
+        backend_a.start_share_network(&identity, loaded).await;
 
-        // The generation bump must have handed A a FRESH peer-id — this is
-        // what makes counter reuse structurally impossible.
+        // Each load mints a FRESH peer-id — this is what makes counter
+        // reuse structurally impossible.
         let a_peer_post = backend_a
             .manager_for_test()
             .get_doc(&shared_tree_id)
@@ -5872,7 +5888,7 @@ mod tests {
             .peer_id();
         assert_ne!(
             a_peer_pre, a_peer_post,
-            "rehydrate must mint a fresh peer-id via the generation bump"
+            "rehydrate must mint a fresh peer-id"
         );
 
         // Let A's rehydrate kick-sync refresh B's addr for A.
@@ -6195,15 +6211,14 @@ mod tests {
         ));
         let manager = Arc::new(SharedTreeSyncManager::new());
         let key = crate::device_key_custody::testing::stable_test_key(dir.path());
-        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
+        let identity = IdentitySlot::with_identity(ShareIdentity::new(key, bus.clone()));
         let sql = Arc::new(RecordingSqlOps::default());
         let backend = LoroShareBackend::new_with_sql(
             store,
             snapshot_store,
             manager,
-            advertiser,
+            identity,
             bus,
-            key,
             test_credentials(test_keychain()),
             Some(sql.clone() as Arc<dyn OriginTaggedWrites>),
             projection,
@@ -6722,7 +6737,7 @@ mod tests {
             Some("block:shared-parent")
         );
 
-        backend.advertiser.close_all().await;
+        backend.advertiser_for_test().close_all().await;
     }
 
     /// The global pass over the prune must reach SQL before the shared
@@ -6755,7 +6770,7 @@ mod tests {
             "the error must name the owed op count and what did not land: {msg}"
         );
 
-        backend.advertiser.close_all().await;
+        backend.advertiser_for_test().close_all().await;
     }
 
     /// The global projection wakes on the commit that prunes the shared
@@ -6788,7 +6803,7 @@ mod tests {
             Some(&1),
             "the prune commit must find the share registered"
         );
-        backend.advertiser.close_all().await;
+        backend.advertiser_for_test().close_all().await;
     }
 
     /// D198.a (page share, sharer side): P keeps its OWN row — same id, title
@@ -6832,7 +6847,7 @@ mod tests {
             "P's children keep P as their parent"
         );
 
-        backend.advertiser.close_all().await;
+        backend.advertiser_for_test().close_all().await;
     }
 
     /// The row a page share projects for its page: P's own id, title and Page
@@ -7008,8 +7023,8 @@ mod tests {
             "block:shelf-b",
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// A page share A → B: A shares page `shared-page` (child `p-child`) from
@@ -7152,15 +7167,14 @@ mod tests {
         }
 
         async fn close(self) {
-            self.a.advertiser.close_all().await;
-            self.b.advertiser.close_all().await;
+            self.a.advertiser_for_test().close_all().await;
+            self.b.advertiser_for_test().close_all().await;
         }
     }
 
     /// R5: the one-placement check holds under a race. Exactly one of two
     /// concurrent accepts places the share, and the other leaves nothing
-    /// behind: no minted peer id, and no doc of its own bound to the
-    /// advertiser.
+    /// behind: no doc of its own bound to the advertiser.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn two_concurrent_accepts_of_one_ticket_place_the_share_once() {
@@ -7195,15 +7209,6 @@ mod tests {
             "the losing accept is refused as a second placement: {outcomes:?}"
         );
         assert_eq!(fixture.mounts_on_b().await, 1, "one share, one mount");
-        assert_eq!(
-            fixture
-                .b
-                .snapshot_store
-                .load_generation(&fixture.shared_tree_id)
-                .unwrap(),
-            1,
-            "only the winning accept minted a peer id for the share"
-        );
 
         // The owner's next edit, pushed to B's advertiser, lands in the doc B
         // registered: the loser bound none of its own.
@@ -7757,7 +7762,11 @@ mod tests {
             a.manager.get_doc(&fixture.shared_tree_id).is_none(),
             "the revoked share's doc is unregistered on the owner"
         );
-        assert!(!a.advertiser.is_active(&fixture.shared_tree_id).await);
+        assert!(
+            !a.advertiser_for_test()
+                .is_active(&fixture.shared_tree_id)
+                .await
+        );
         assert!(!a.snapshot_store.exists(&fixture.shared_tree_id));
         let disclosed: Vec<_> = a
             .degraded_bus()
@@ -7887,8 +7896,8 @@ mod tests {
             a.manager.get_doc(&stid).is_some(),
             "the owner still shares the block"
         );
-        a.advertiser.close_all().await;
-        b.advertiser.close_all().await;
+        a.advertiser_for_test().close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// R1: a batch that left a share cannot be rolled back. Its leave is
@@ -7949,7 +7958,7 @@ mod tests {
             a.manager.get_doc(shared_tree_id).is_none(),
             "the revoked share's doc is still registered"
         );
-        assert!(!a.advertiser.is_active(shared_tree_id).await);
+        assert!(!a.advertiser_for_test().is_active(shared_tree_id).await);
         assert!(!a.snapshot_store.exists(shared_tree_id));
         let disclosed: Vec<_> = a
             .degraded_bus()
@@ -8071,7 +8080,7 @@ mod tests {
         assert!(
             fixture
                 .a
-                .advertiser
+                .advertiser_for_test()
                 .is_active(&fixture.shared_tree_id)
                 .await
         );
@@ -8198,7 +8207,7 @@ mod tests {
         seed_page(&a, "second-page", Some("root-a"), "Second").await;
         let (_, first) = share_and_ticket(&a, "block:first-page").await;
         let (_, second) = share_and_ticket(&a, "block:second-page").await;
-        a.advertiser.drop_share(&first).await.unwrap();
+        a.advertiser_for_test().drop_share(&first).await.unwrap();
 
         let registry = registry_of(&a).await;
         let ancestor = EntityUri::block("root-a");
@@ -8226,7 +8235,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        a.advertiser.close_all().await;
+        a.advertiser_for_test().close_all().await;
     }
 
     /// A share is never nested in another.
@@ -8330,8 +8339,8 @@ mod tests {
             "the block's own subtree is preserved under it"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// N3 / ADR 0028 H7 — recipient-side orphan fix. Accepting a share under a
@@ -8415,8 +8424,8 @@ mod tests {
             "'Shared with me' root must be tagged Page so it renders as a page"
         );
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// H7 idempotency: TWO orphan-target accepts on the SAME device must reuse
@@ -8523,8 +8532,8 @@ mod tests {
             );
         }
 
-        backend_a.advertiser.close_all().await;
-        backend_b.advertiser.close_all().await;
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
     }
 
     /// Fix 3: `unshare` stops advertising, unregisters the doc, removes the
@@ -8557,7 +8566,7 @@ mod tests {
         let stid: SharedTreeId = serde_json::from_value(json["shared_tree_id"].clone()).unwrap();
 
         // Preconditions.
-        assert!(backend.advertiser.is_active(&stid).await);
+        assert!(backend.advertiser_for_test().is_active(&stid).await);
         assert!(backend.manager.get_doc(&stid).is_some());
         assert!(backend.snapshot_store.exists(&stid));
         assert!(sql.get(&mount_id).is_some());
@@ -8568,7 +8577,7 @@ mod tests {
         backend.unshare(&mount_id).await.unwrap();
 
         assert!(
-            !backend.advertiser.is_active(&stid).await,
+            !backend.advertiser_for_test().is_active(&stid).await,
             "advertiser still active after unshare"
         );
         assert!(
@@ -8799,7 +8808,7 @@ mod tests {
             page_id(reads.owning_page("block:host").unwrap()),
             "block:host"
         );
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// A share whose mount is gone, or whose doc this device has not loaded,
@@ -8848,7 +8857,7 @@ mod tests {
                 shared_tree_id: st1.to_string()
             })
         );
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// ADR 0028 A7 on the recipient: accepting a share under a block that is
@@ -8883,8 +8892,8 @@ mod tests {
             }),
             "{refused}"
         );
-        a.advertiser.close_all().await;
-        b.advertiser.close_all().await;
+        a.advertiser_for_test().close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// A shared doc saved with another share's mount inside it (before the
@@ -8905,7 +8914,7 @@ mod tests {
             shared.commit();
         }
         b.snapshot_store.save(&st1, &shared).unwrap();
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
         b.flush_all().await;
         drop(shared);
         drop(b);
@@ -8923,7 +8932,7 @@ mod tests {
             }
         }
         assert_eq!(disclosed, vec![st1.to_string()]);
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// A mount whose synced meta records an id outside the charset is not
@@ -8954,7 +8963,7 @@ mod tests {
             })
             .unwrap();
         b.store.read().await.save_all().await.unwrap();
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
         b.flush_all().await;
         drop(b);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -8978,7 +8987,7 @@ mod tests {
             .filter(|path| path.to_string_lossy().contains("escape"))
             .collect();
         assert!(escaped.is_empty(), "files outside shares/: {escaped:?}");
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -9063,7 +9072,7 @@ mod tests {
             vec![st1.to_string()],
             "a second nested mount is disclosed too"
         );
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 
     /// Two paired devices that accept one ticket before they sync, each
@@ -9208,7 +9217,7 @@ mod tests {
         assert_eq!(d.warm(), m1, "warm after deleting the canonical mount");
         assert_eq!(d.cold(), m1, "cold after deleting the canonical mount");
         assert_eq!(d.events(), vec!["cleared".to_string()]);
-        d.b.advertiser.close_all().await;
+        d.b.advertiser_for_test().close_all().await;
     }
 
     /// A batch deletes the canonical mount, a read lands inside the batch, and
@@ -9237,7 +9246,7 @@ mod tests {
         d.delete(d.m2_tid);
         assert_eq!(d.warm(), m1, "warm after deleting the duplicate");
         assert_eq!(d.events(), vec!["cleared".to_string()]);
-        d.b.advertiser.close_all().await;
+        d.b.advertiser_for_test().close_all().await;
     }
 
     /// A paired device whose ops the global doc imports.
@@ -9284,7 +9293,7 @@ mod tests {
         assert_eq!(d.warm(), d.m1, "warm after the meta-only unmount");
         assert_eq!(d.warm(), d.m1, "warm again");
         assert_eq!(d.events(), vec!["cleared".to_string()]);
-        d.b.advertiser.close_all().await;
+        d.b.advertiser_for_test().close_all().await;
     }
 
     /// A peer turns a plain node with a smaller TreeID into a mount of the
@@ -9334,7 +9343,7 @@ mod tests {
         assert!(node < d.m2_tid);
         assert_eq!(d.cold(), "block:forged", "cold after the meta-only mount");
         assert_eq!(d.warm(), "block:forged", "warm after the meta-only mount");
-        d.b.advertiser.close_all().await;
+        d.b.advertiser_for_test().close_all().await;
     }
 
     fn duplicate_mount_events(
@@ -9383,6 +9392,6 @@ mod tests {
             reads.owning_page("block:gamma-one").unwrap(),
             OwningPage::Absent
         );
-        b.advertiser.close_all().await;
+        b.advertiser_for_test().close_all().await;
     }
 }

@@ -12,7 +12,7 @@
 //!
 //! The log arbitrates *policy*, which is not Loro's concern, so this is its own
 //! crate on top of the Loro substrate (`doc_lamport_height` for the owner-log
-//! clock, delta export/import for merge, `share_peer_id` for device keys).
+//! clock, delta export/import for merge).
 //!
 //! ## Modules
 //! - [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope; entries

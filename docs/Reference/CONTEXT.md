@@ -27,7 +27,7 @@ How to use it:
 |---|---|---|---|
 | **Authoring / Format** | `holon-org-format`, `holon-orgmode` | headline / heading / drawer / fence / frontmatter | **bare id** on disk |
 | **CRDT of record** | `holon-loro` | LoroTree **node** + meta `LoroMap` | `STABLE_ID` meta key |
-| **P2P transport** | `holon-loro` (Iroh) | version-vector delta bytes | per-share `stable_peer_id` |
+| **P2P transport** | `holon-loro` (Iroh) | version-vector delta bytes | random peer id per share load |
 | **Read projection** | `holon-turso` | **row** (`block` matview / `block_raw`) | `id` column |
 | **Interaction / Render** | `holon-frontend`, `frontends/*` | **row** → ViewModel → widget | `EntityUri` on the intent |
 | **Shared kernel** | `holon-api`, `holon-core` | **Block** | `EntityUri` (`block:`) |
@@ -106,7 +106,7 @@ terms at the boundary — never leaked outward.
 **P2P transport (Iroh)**
 - **version vector (VV) / delta / snapshot** — what actually crosses the wire (Loro
   update bytes), never Blocks.
-- **shared tree / ticket / ALPN / stable_peer_id** — sharing-transport vocabulary.
+- **shared tree / ticket / ALPN / peer id** — sharing-transport vocabulary.
 
 **Read projection (Turso)**
 - **row** — a `block` matview / `block_raw` row. One block, but **one block can

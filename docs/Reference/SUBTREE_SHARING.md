@@ -91,12 +91,11 @@ global doc.
 
 ### B2 — stable peer-id + debounced/unsynced snapshot saves ⇒ counter reuse ⇒ silent permanent divergence ✅EXP
 
-`share_peer_id::stable_peer_id` makes the CRDT peer-id deterministic per
-`(device, share)`; `rehydrate_shared_trees` re-applies it over whatever
-snapshot is on disk. Saves are **debounced** and `flush_all` runs only on
-*graceful* shutdown.
+Each load of a share on a device (share, accept, rehydrate) draws a random
+CRDT peer-id, so a stale snapshot loaded after a crash authors under a new id.
+Saves are **debounced** and `flush_all` runs only on *graceful* shutdown.
 
-**Sequence:** edit shared doc → sync worker pushes ops `(P, 0..N)` to the peer
+**Sequence (when a load reuses a peer-id):** edit shared doc → sync worker pushes ops `(P, 0..N)` to the peer
 → crash before the debounced save → restart loads a stale snapshot whose VV for
 `P` is `< N` → new edits mint `(P, k)` for an already-used counter `k` with
 *different* content. ✅EXP: two docs with the same peer-id and divergent ops at
@@ -107,9 +106,9 @@ does not detect the collision. The same fires if two processes open one vault
 concurrently (the code even anticipates "two rehydration paths got wired up")
 or a user re-accepts after wiping local state.
 
-**Fix (pick one, ideally both):** fsync the snapshot before ack'ing any
-outbound sync; and mint peer-id from `(device, share, boot-epoch)` or persist a
-monotonic counter-floor per share so a reused counter is impossible.
+**Fix:** the random peer-id per load closes the counter reuse. Open: fsync the
+snapshot before ack'ing any outbound sync, so a peer never holds ops this device
+lost.
 
 ### B3 — structural writes go to the global doc and never reach the peer
 
@@ -249,11 +248,11 @@ freezes the projection watermark so no clobbering write reaches SQL. Covered by
 between two *different* shared docs' ids are not yet guarded (both are foreign);
 only shared-vs-local shadowing is closed here.
 
-## Peer-id derivation
+## Peer-id source
 
-Derived from `(device_secret.public(), shared_tree_id)` via
-`share_peer_id::stable_peer_id`; deterministic so a device rejoining the same
-share keeps CRDT lineage stable.
+A random `u64` per load of a share on a device (`fresh_peer_id`,
+`loro_share_backend.rs`). It is not a device identity: the iroh endpoint key is.
+Two loads that draw one id hit B2, at a chance of 2^-64 per pair.
 
 ## Device key custody
 
@@ -266,17 +265,20 @@ The session picks the keychain by the same rule as the integration secrets
 (`holon_secrets::backend_from_env`); a test boot injects an in-memory store and
 makes no machine-keychain attempt.
 
+The key loads off the boot path, in the device-key net
+(`holon-loro-wiring/src/device_key_net.rs`). Shares load and stay editable
+while it runs; the network legs (advertise, sync, pairing) start once the
+identity exists, and until then return "sharing is off: the device key is not
+available (<why>)". An absent entry is created without asking. An entry that
+holds no 32-byte key raises `DeviceKeyCorrupt`: only the user's confirmation in
+the desktop app creates a new key, after the old bytes are stored and read back
+under `<account>.unreadable-<stamp>`. A keychain that cannot be read raises
+`DeviceKeyUnavailable` and offers a retry of the load; nothing is written.
+A new key is a new device identity: paired peers and share rosters must pair or
+enroll it again.
+
 Known limit: the account follows the storage dir, so a moved vault looks up a
 new account, mints a new identity and orphans its old keychain entry.
-
-> ⚠ **`stable_peer_id` uses `std`'s `DefaultHasher`, whose algorithm/seed are
-> explicitly not guaranteed stable across Rust std versions.** The whole module
-> stakes correctness on "same device+share → same id forever"; a toolchain bump
-> can silently shift a device's id after restart → it rejoins its own share as
-> a stranger, with the divergence risk of B2. `DefaultHasher` also gives no
-> uniformity guarantee for the 64-bit space, and a collision is silent
-> unrecoverable divergence (B2). **Replace with an explicit stable hash
-> (SipHash with fixed keys, or blake3) plus a persisted per-install salt.**
 
 ## Mount nodes
 
@@ -483,7 +485,7 @@ divergent edits.
 - `crates/holon-loro/src/iroh_advertiser.rs` — persistent accepter pool.
 - `crates/holon-loro/src/iroh_sync_adapter.rs` — VV-based wire protocol,
   framing, endpoints.
-- `crates/holon-loro/src/share_peer_id.rs` — stable peer-id derivation.
+- `crates/holon-loro/src/share_identity.rs` — the device identity slot every network leg needs.
 - `crates/holon-loro/src/device_key_custody.rs` — device secret in the OS keychain.
 - `crates/holon-loro/src/shared_tree.rs` — fork-and-prune + mount nodes.
 - `crates/holon-loro/src/loro_share_backend.rs` — `SubtreeShareOperations`

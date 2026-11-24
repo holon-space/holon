@@ -16,8 +16,9 @@ use holon_loro::WriteOrigin;
 use holon_loro::device_pairing_op::DEVICE_ENTITY;
 use holon_loro::device_pairing_op::DevicePairing;
 use holon_loro::device_pairing_op::DevicePairingOperations;
-use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::peer_versions::Hello;
+use holon_loro::share_identity::IdentitySlot;
+use holon_loro::share_identity::ShareIdentity;
 use tempfile::TempDir;
 
 const EDITS: &str = "edits";
@@ -28,7 +29,7 @@ const JOINER_EDIT: &str = "joiner-before-pairing";
 fn pairing(store: LoroDocumentStore, bus: Arc<ConditionBus>) -> DevicePairing {
     DevicePairing::new(
         store,
-        Arc::new(IrohAdvertiser::new()),
+        IdentitySlot::with_identity(ShareIdentity::new(iroh::SecretKey::generate(), bus.clone())),
         Arc::new(
             || -> futures::future::BoxFuture<'static, Arc<dyn BlockOrdering>> {
                 panic!("the refused pair reached the re-import")

@@ -32,12 +32,13 @@ use holon_core::ReadOnlyMembers;
 use holon_core::Result;
 use holon_core::WriteTierAuthority;
 use holon_loro::device_key_custody::testing::stable_test_key;
-use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
 use holon_loro::loro_document_store::LoroDocumentStore;
 use holon_loro::loro_share_backend::LoroShareBackend;
 use holon_loro::multi_peer::STABLE_ID;
 use holon_loro::multi_peer::TREE_NAME;
+use holon_loro::share_identity::IdentitySlot;
+use holon_loro::share_identity::ShareIdentity;
 use loro::LoroDoc;
 use loro::LoroText;
 use loro::TreeID;
@@ -207,15 +208,14 @@ fn share_backend(
         bus.clone(),
     ));
     let manager = Arc::new(SharedTreeSyncManager::new());
-    let key = stable_test_key(dir.path());
-    let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
+    let identity =
+        IdentitySlot::with_identity(ShareIdentity::new(stable_test_key(dir.path()), bus.clone()));
     LoroShareBackend::new_with_sql(
         store,
         snapshot_store,
         manager,
-        advertiser,
+        identity,
         bus,
-        key,
         Arc::new(holon_loro::share_credentials::ShareCredentials::in_memory(
             &dir.path().to_string_lossy(),
         )),

@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use holon_loro::share_peer_id::stable_peer_id;
 use holon_sharing::BlockContent;
 use holon_sharing::BlockId;
 use holon_sharing::ContainerId;
@@ -34,8 +33,6 @@ use holon_sharing::types::StablePeerId;
 use iroh::SecretKey;
 use proptest::prelude::*;
 
-const SHARE: &str = "owner-log";
-
 #[test]
 fn undo_of_an_uncommitted_crossing_is_refused() {
     let log = new_log(&SecretKey::generate());
@@ -50,11 +47,13 @@ fn undo_of_an_uncommitted_crossing_is_refused() {
     assert_eq!(log.entries(), before, "a refused undo appends nothing");
 }
 
+/// One device's log. The peer component derives from the key so that two
+/// logs built from one key author under one id, as a rebuild in the harness
+/// requires.
 fn new_log(sk: &SecretKey) -> CrossingLog {
-    CrossingLog::new(
-        StablePeerId(stable_peer_id(sk, SHARE, 0)),
-        Box::new(UnverifiedAuthority),
-    )
+    let public = sk.public();
+    let peer = u64::from_le_bytes(public.as_bytes()[..8].try_into().expect("8 bytes"));
+    CrossingLog::new(StablePeerId(peer), Box::new(UnverifiedAuthority))
 }
 
 /// Assert arbitration TOTALITY: every input crossing lands in exactly one of

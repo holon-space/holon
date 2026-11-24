@@ -9,7 +9,7 @@ mod boot_scan_bad_file_survives;
 mod boot_seed_outcome;
 mod boot_step_fault_degrades;
 mod cold_boot_share_disclosure;
-mod device_key_legacy_file;
+mod device_key_entry_boot;
 mod failed_ingest_disclosed_across_restarts;
 mod forward_edge_ingest_regression;
 mod idonly_folder_companion_identity_collision;

@@ -787,6 +787,29 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     DeviceKeyFileNotRemoved { files: Vec<String> },
+    /// The device-key entry `account` in `service` holds `len` bytes, which is
+    /// not a key, so sharing and pairing are off. Subject:
+    /// [`DEVICE_KEY_SUBJECT`].
+    ///
+    /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — the
+    /// user confirms a new device key.
+    DeviceKeyCorrupt {
+        service: String,
+        account: String,
+        len: usize,
+    },
+    /// The keychain could not be read, so sharing and pairing are off.
+    /// `cause` names service, account and step. Subject:
+    /// [`DEVICE_KEY_SUBJECT`].
+    ///
+    /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — a
+    /// read of the device key that succeeds.
+    DeviceKeyUnavailable { cause: String },
+    /// A new device key replaced an unreadable entry, which is kept in
+    /// `service` under `aside`. Subject: [`DEVICE_KEY_SUBJECT`].
+    ///
+    /// All-clear: none in this process.
+    DeviceKeyReplaced { service: String, aside: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -813,6 +836,9 @@ pub const OPERATION_CATALOG_SUBJECT: &str = "operation-catalog";
 /// Subject prefix of [`ConditionKind::DatabaseStuck`] and
 /// [`ConditionKind::DatabaseWatchFailed`]; the subject names one SQL actor.
 pub const DATABASE_SUBJECT: &str = "database";
+
+/// Subject of the device-key conditions.
+pub const DEVICE_KEY_SUBJECT: &str = "device";
 
 impl ConditionKind {
     /// Kind constants, so an all-clear site names the condition it lifts
@@ -907,6 +933,9 @@ impl ConditionKind {
     pub const CONFIG_FILE_UNUSABLE: &'static str = "config-file-unusable";
     pub const DEVICE_KEY_FILE_REMOVED: &'static str = "device-key-file-removed";
     pub const DEVICE_KEY_FILE_NOT_REMOVED: &'static str = "device-key-file-not-removed";
+    pub const DEVICE_KEY_CORRUPT: &'static str = "device-key-corrupt";
+    pub const DEVICE_KEY_UNAVAILABLE: &'static str = "device-key-unavailable";
+    pub const DEVICE_KEY_REPLACED: &'static str = "device-key-replaced";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -1008,6 +1037,9 @@ impl ConditionKind {
             Self::ConfigFileUnusable { .. } => Self::CONFIG_FILE_UNUSABLE,
             Self::DeviceKeyFileRemoved { .. } => Self::DEVICE_KEY_FILE_REMOVED,
             Self::DeviceKeyFileNotRemoved { .. } => Self::DEVICE_KEY_FILE_NOT_REMOVED,
+            Self::DeviceKeyCorrupt { .. } => Self::DEVICE_KEY_CORRUPT,
+            Self::DeviceKeyUnavailable { .. } => Self::DEVICE_KEY_UNAVAILABLE,
+            Self::DeviceKeyReplaced { .. } => Self::DEVICE_KEY_REPLACED,
         }
     }
 }

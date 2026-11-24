@@ -1,7 +1,7 @@
 //! The iroh types Holon persists (the device key entry, ticket strings, the
-//! peers sidecar) keep their bytes across iroh upgrades. The fixtures below were
-//! written by iroh 0.96.1; a round trip alone cannot see a format change, so
-//! each fixture must also decode, and re-encode byte for byte.
+//! peers sidecar) keep their bytes across iroh upgrades. The fixtures below
+//! were written by iroh 0.96.1; a round trip alone cannot see a format change,
+//! so each fixture must also decode, and re-encode byte for byte.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;

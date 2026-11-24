@@ -167,6 +167,15 @@ impl DeviceKeyCustody {
     }
 }
 
+/// The stamp of an aside account for a replacement at `now_millis` since the
+/// Unix epoch, in UTC to the millisecond.
+pub fn aside_stamp(now_millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(now_millis)
+        .unwrap_or_else(|| panic!("{now_millis} ms is not a representable instant"))
+        .format("%Y%m%dT%H%M%S%.3fZ")
+        .to_string()
+}
+
 fn keychain_error(account: &str, step: &'static str, cause: anyhow::Error) -> DeviceKeyError {
     DeviceKeyError::Keychain {
         account: account.to_string(),

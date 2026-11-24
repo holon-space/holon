@@ -9,6 +9,8 @@
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-net "transition-net executor" "Rust"
+//! @c4 uses holon-net-shell "async net driver" "Rust"
 //!
 //! The wiring that binds the Loro CRDT backend to the `holon` engine.
 //!
@@ -17,6 +19,11 @@
 //! parallel with `holon-loro` instead of waiting for it.
 #![recursion_limit = "256"]
 
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub mod device_key_net;
 pub mod event_infra_module;
 pub mod focus_roots_feed;
 pub mod loro_block_query_source;

@@ -303,6 +303,9 @@ pub struct ShareUiState {
     /// field rather than a toast, because the banner it draws carries the
     /// action that lifts it and must not be dismissable.
     pub deferred_reimport: Option<DeferredReimport>,
+    /// The device-key condition in effect. A banner for the same reason as
+    /// `deferred_reimport`: it carries the remedy.
+    pub device_key: Option<DeviceKeyBar>,
     pub share_error: Option<String>,
     pub accept_error: Option<String>,
     /// Modal and banner kinds already logged as drawn in the toast stack.
@@ -321,6 +324,24 @@ pub struct DeferredReimport {
     pub archive: String,
 }
 
+/// Why sharing is off for want of the device key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKeyProblem {
+    /// The entry is not a key; the remedy replaces it after a confirmation.
+    Corrupt,
+    /// The keychain failed; the remedy reads it again.
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceKeyBar {
+    pub problem: DeviceKeyProblem,
+    pub headline: String,
+    pub body: Vec<String>,
+    /// The user asked for a new key and has not yet confirmed or cancelled.
+    pub confirming: bool,
+}
+
 impl ShareUiState {
     pub fn new() -> Self {
         Self {
@@ -329,6 +350,7 @@ impl ShareUiState {
             toasts: Vec::new(),
             quarantines: Vec::new(),
             deferred_reimport: None,
+            device_key: None,
             share_error: None,
             accept_error: None,
             surfaceless_as_toasts: HashSet::new(),
@@ -407,8 +429,26 @@ impl ShareUiState {
             // A banner, because the condition offers a remedy the user has to
             // reach: a toast's ✕ would dismiss the only way back.
             ConditionPlacement::Banner => {
+                let device_key = match &event.reason {
+                    ConditionKind::DeviceKeyCorrupt { .. } => Some(DeviceKeyProblem::Corrupt),
+                    ConditionKind::DeviceKeyUnavailable { .. } => {
+                        Some(DeviceKeyProblem::Unavailable)
+                    }
+                    _ => None,
+                };
                 if let ConditionKind::PairingReimportDeferred { orphans, archive } = event.reason {
                     self.deferred_reimport = Some(DeferredReimport { orphans, archive });
+                } else if let Some(problem) = device_key {
+                    let confirming = self
+                        .device_key
+                        .as_ref()
+                        .is_some_and(|bar| bar.problem == problem && bar.confirming);
+                    self.device_key = Some(DeviceKeyBar {
+                        problem,
+                        headline: detail.headline,
+                        body: detail.body,
+                        confirming,
+                    });
                 } else {
                     self.push_surfaceless_toast("banner", event, profile, condition, detail);
                 }
@@ -463,6 +503,14 @@ impl ShareUiState {
         self.toasts.retain(|t| t.condition.as_ref() != Some(key));
         if key.kind == ConditionKind::PAIRING_REIMPORT_DEFERRED {
             self.deferred_reimport = None;
+        }
+        let cleared = match key.kind {
+            ConditionKind::DEVICE_KEY_CORRUPT => Some(DeviceKeyProblem::Corrupt),
+            ConditionKind::DEVICE_KEY_UNAVAILABLE => Some(DeviceKeyProblem::Unavailable),
+            _ => None,
+        };
+        if cleared.is_some() && self.device_key.as_ref().map(|bar| bar.problem) == cleared {
+            self.device_key = None;
         }
     }
 
@@ -1394,6 +1442,172 @@ fn deferred_reimport_location(deferred: &DeferredReimport) -> String {
     )
 }
 
+/// Bounds-tracked ids of the device-key banner and its buttons.
+pub const DEVICE_KEY_BANNER: &str = "device-key-banner";
+pub const DEVICE_KEY_ACTION: &str = "device-key-action";
+pub const DEVICE_KEY_CONFIRM: &str = "device-key-confirm";
+pub const DEVICE_KEY_CANCEL: &str = "device-key-cancel";
+
+const DEVICE_KEY_RETRY_LABEL: &str = "Read the device key again";
+const DEVICE_KEY_NEW_LABEL: &str = "Create a new device key…";
+const DEVICE_KEY_CONFIRM_LABEL: &str = "Create a new device key";
+const DEVICE_KEY_CANCEL_LABEL: &str = "Cancel";
+const DEVICE_KEY_CONFIRM_TEXT: &str = "Create a new device key? This device gets a new peer \
+     identity: paired devices and share rosters must pair or enroll it again. The unreadable \
+     entry is kept in the keychain.";
+
+fn device_key_button(
+    id: &'static str,
+    label: &'static str,
+    color: u32,
+    bounds: crate::geometry::BoundsRegistry,
+    on_click: impl Fn(&mut gpui::App) + 'static,
+) -> AnyElement {
+    crate::geometry::TransparentTracker::new(
+        id.to_string(),
+        "device_key_button",
+        bounds,
+        div()
+            .id(id)
+            .ml_3()
+            .px_3()
+            .py_1()
+            .rounded(px(6.0))
+            .bg(gpui::rgba(color))
+            .text_color(gpui::rgba(0x000000cc))
+            .cursor_pointer()
+            .child(label)
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| on_click(cx))
+            .into_any_element(),
+    )
+    .with_displayed_text(label)
+    .into_any_element()
+}
+
+/// The banner of a device-key condition. A new key replaces the peer
+/// identity, so the corrupt case asks for a confirmation before it runs.
+#[allow(clippy::too_many_arguments)]
+pub fn render_device_key_bar(
+    state: &ShareUiState,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+    bounds: crate::geometry::BoundsRegistry,
+    theme: OverlayTheme,
+) -> Option<AnyElement> {
+    let bar = state.device_key.as_ref()?;
+    let async_cx = async_cx.clone();
+    let text = if bar.confirming {
+        DEVICE_KEY_CONFIRM_TEXT.to_string()
+    } else {
+        bar.body.join(" ")
+    };
+    let set_confirming = |share_state: Entity<ShareUiState>, confirming: bool| {
+        move |cx: &mut gpui::App| {
+            share_state.update(cx, |s, cx| {
+                if let Some(bar) = s.device_key.as_mut() {
+                    bar.confirming = confirming;
+                }
+                cx.notify();
+            });
+        }
+    };
+    let remedy_state = share_state.clone();
+    let remedy = move |op: &'static str| {
+        let (session, rt_handle, share_state, async_cx) = (
+            session.clone(),
+            rt_handle.clone(),
+            remedy_state.clone(),
+            async_cx.clone(),
+        );
+        move |_: &mut gpui::App| {
+            dispatch_device_remedy(
+                op,
+                session.clone(),
+                rt_handle.clone(),
+                share_state.clone(),
+                window_handle,
+                &async_cx,
+            )
+        }
+    };
+    let buttons: Vec<AnyElement> = match (bar.problem, bar.confirming) {
+        (DeviceKeyProblem::Unavailable, _) => vec![device_key_button(
+            DEVICE_KEY_ACTION,
+            DEVICE_KEY_RETRY_LABEL,
+            0x22c55eff,
+            bounds.clone(),
+            remedy("load_device_key"),
+        )],
+        (DeviceKeyProblem::Corrupt, false) => vec![device_key_button(
+            DEVICE_KEY_ACTION,
+            DEVICE_KEY_NEW_LABEL,
+            0x22c55eff,
+            bounds.clone(),
+            set_confirming(share_state.clone(), true),
+        )],
+        (DeviceKeyProblem::Corrupt, true) => vec![
+            device_key_button(
+                DEVICE_KEY_CONFIRM,
+                DEVICE_KEY_CONFIRM_LABEL,
+                0xef4444ff,
+                bounds.clone(),
+                remedy("create_device_key"),
+            ),
+            device_key_button(
+                DEVICE_KEY_CANCEL,
+                DEVICE_KEY_CANCEL_LABEL,
+                0xa3a3a3ff,
+                bounds.clone(),
+                set_confirming(share_state.clone(), false),
+            ),
+        ],
+    };
+    let banner = div()
+        .id(DEVICE_KEY_BANNER)
+        .w_full()
+        .flex_shrink_0()
+        .px_3()
+        .py_2()
+        .bg(theme.bg)
+        .border_l_4()
+        .border_b_1()
+        .border_color(gpui::rgba(0xef4444ff))
+        .text_color(theme.fg)
+        .text_size(px(12.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(gpui::rgba(0xef4444ff))
+                        .child(bar.headline.clone()),
+                )
+                .child(div().text_color(theme.muted_fg).child(text.clone())),
+        )
+        .child(div().flex().flex_row().children(buttons))
+        .into_any_element();
+    Some(
+        crate::geometry::TransparentTracker::new(
+            DEVICE_KEY_BANNER.to_string(),
+            "device_key_banner",
+            bounds,
+            banner,
+        )
+        .with_displayed_text(format!("{} {text}", bar.headline))
+        .into_any_element(),
+    )
+}
+
 /// Re-run the re-import a boot deferred. The banner clears itself only through
 /// the bus (the op clears the condition on success), so a retry that refuses
 /// again leaves it standing and adds a toast saying why.
@@ -1404,10 +1618,30 @@ pub fn dispatch_retry_reimport(
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
+    dispatch_device_remedy(
+        "pair_retry_reimport",
+        session,
+        rt_handle,
+        share_state,
+        window_handle,
+        async_cx,
+    );
+}
+
+/// Runs the parameterless `device` op `op` as the user's gesture. Success
+/// lifts its banner through the bus; a refusal adds a toast saying why.
+fn dispatch_device_remedy(
+    op: &'static str,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let run = session.execute_operation(
         &EntityName::new("device"),
-        "pair_retry_reimport",
+        op,
         std::collections::HashMap::new(),
     );
     rt_handle.spawn(async move {
@@ -1421,7 +1655,7 @@ pub fn dispatch_retry_reimport(
             let detail = match outcome {
                 Ok(Ok(())) => return,
                 Ok(Err(e)) => e,
-                Err(_cancelled) => "pair_retry_reimport task dropped before responding".to_string(),
+                Err(_cancelled) => format!("{op} task dropped before responding"),
             };
             let _ = cx.update_window(window_handle, |_, _window, cx| {
                 share_state.update(cx, |s, cx| {

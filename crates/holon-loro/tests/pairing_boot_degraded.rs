@@ -26,10 +26,11 @@ use holon_loro::LoroDocumentStore;
 use holon_loro::device_pairing_op::DevicePairing;
 use holon_loro::device_pairing_op::DevicePairingOperations;
 use holon_loro::device_pairing_op::PairingCompletion;
-use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::loro_backend::LoroBackend;
 use holon_loro::loro_backend::NewBlockWithProperties;
 use holon_loro::pairing_swap::PairingMarker;
+use holon_loro::share_identity::IdentitySlot;
+use holon_loro::share_identity::ShareIdentity;
 
 /// The archived phone content: a journal day the owner does not have, under the
 /// journals block the owner does not have either. `own_content` keeps a day
@@ -212,7 +213,7 @@ async fn interrupted_pair(also_archived: Vec<NewBlockWithProperties>) -> Result<
     let ordering_store = store.clone();
     let pairing = DevicePairing::new(
         store.clone(),
-        Arc::new(IrohAdvertiser::new()),
+        IdentitySlot::with_identity(ShareIdentity::new(iroh::SecretKey::generate(), bus.clone())),
         Arc::new(move || {
             let store = ordering_store.clone();
             Box::pin(async move { Arc::new(LiveOrdering(store)) as Arc<dyn BlockOrdering> })

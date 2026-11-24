@@ -254,10 +254,7 @@ impl SharedSnapshotStore {
         Ok(Some(port))
     }
 
-    /// Sidecar path for the per-share monotonic peer-id generation.
-    /// Bumped on every peer-id mint (share/accept/rehydrate) so that a
-    /// stale loaded snapshot cannot re-mint an already-used
-    /// `(peer_id, counter)` after a crash — see [`crate::share_peer_id`].
+    /// Sidecar path for the per-share monotonic generation counter.
     pub fn gen_path(&self, shared_tree_id: &SharedTreeId) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.gen"))
     }
@@ -288,8 +285,7 @@ impl SharedSnapshotStore {
     }
 
     /// Monotonic bump: load the current generation (default 0), add 1,
-    /// durably persist it, and return the new value. Every peer-id mint
-    /// site calls this before deriving `stable_peer_id`.
+    /// durably persist it, and return the new value.
     pub fn next_generation(&self, shared_tree_id: &SharedTreeId) -> Result<u64> {
         let next = self.load_generation(shared_tree_id)? + 1;
         self.save_generation(shared_tree_id, next)?;

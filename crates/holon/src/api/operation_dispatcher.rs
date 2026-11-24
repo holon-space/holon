@@ -1868,6 +1868,14 @@ impl OperationDispatcher {
                     })
                     .ok_or_else(|| format!("No provider registered for entity: {}", entity_name))?;
 
+                if provider.user_gesture_only_ops().contains(&op_name) && !origin.is_user() {
+                    return Err(format!(
+                        "{entity_name}.{op_name} runs only on the user's own gesture in a \
+                         frontend; it is refused for origin {origin:?}"
+                    )
+                    .into());
+                }
+
                 // ADR 0028 C3 — THE boundary/authz seam, before the provider
                 // runs and before any I/O.
                 self.enforce_boundary(&available_ops, resolved_entity_name, op_name, &params)?;

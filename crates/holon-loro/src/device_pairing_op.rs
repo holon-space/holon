@@ -55,7 +55,6 @@ use serde::Serialize;
 
 use crate::container_registry::ContainerRegistry;
 use crate::iroh_advertiser::ALPN_PREFIX;
-use crate::iroh_advertiser::IrohAdvertiser;
 use crate::iroh_advertiser::SharedRoster;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::make_alpn;
@@ -65,6 +64,8 @@ use crate::loro_document_store::LoroDocumentStore;
 use crate::share_enrollment::CapabilitySecret;
 use crate::share_enrollment::ExpiryTime;
 use crate::share_enrollment::ShareRoster;
+use crate::share_identity::IdentitySlot;
+use crate::share_identity::ShareIdentity;
 use crate::shared_tree::SharedTreeId;
 use crate::ticket::Ticket;
 use crate::write_origin::WriteOrigin;
@@ -543,7 +544,7 @@ pub type ProjectionResolver = std::sync::Arc<
 /// The pairing operations' production home.
 pub struct DevicePairing {
     store: LoroDocumentStore,
-    advertiser: std::sync::Arc<IrohAdvertiser>,
+    identity: std::sync::Arc<IdentitySlot>,
     offer: tokio::sync::Mutex<Option<LiveOffer>>,
     ordering: OrderingResolver,
     projection: ProjectionResolver,
@@ -554,7 +555,7 @@ pub struct DevicePairing {
 impl DevicePairing {
     pub fn new(
         store: LoroDocumentStore,
-        advertiser: std::sync::Arc<IrohAdvertiser>,
+        identity: std::sync::Arc<IdentitySlot>,
         ordering: OrderingResolver,
         projection: ProjectionResolver,
         write_tier: WriteTierResolver,
@@ -562,7 +563,7 @@ impl DevicePairing {
     ) -> Self {
         Self {
             store,
-            advertiser,
+            identity,
             offer: tokio::sync::Mutex::new(None),
             ordering,
             projection,
@@ -601,14 +602,24 @@ impl DevicePairing {
     /// Stop advertising `containers`, returning the ones that could not be
     /// stopped. A container that stays advertised holds a live capability with
     /// no way left to withdraw it, so the caller must surface the list.
-    async fn stop_advertising(&self, containers: &[String]) -> Vec<String> {
+    async fn stop_advertising(
+        &self,
+        identity: &ShareIdentity,
+        containers: &[String],
+    ) -> Vec<String> {
         let mut stranded = Vec::new();
         for id in containers {
-            if let Err(e) = self.advertiser.drop_share(id).await {
+            if let Err(e) = identity.advertiser().drop_share(id).await {
                 stranded.push(format!("{id} ({e:#})"));
             }
         }
         stranded
+    }
+
+    /// This device's identity; every pairing op that reaches the network
+    /// needs it.
+    fn identity(&self) -> anyhow::Result<std::sync::Arc<ShareIdentity>> {
+        Ok(self.identity.require()?)
     }
 
     fn registry(&self) -> ContainerRegistry {
@@ -1185,6 +1196,7 @@ pub struct Reimported {
 #[async_trait]
 impl DevicePairingOperations<()> for DevicePairing {
     async fn pair_offer(&self, capability: String) -> Result<OperationResult> {
+        let identity = self.identity()?;
         let capability = PairCapability::parse(&capability)?;
         if capability == PairCapability::Read {
             return Err(PairingRefused::ReadOnlyPairingUnsupported.into());
@@ -1216,8 +1228,8 @@ impl DevicePairingOperations<()> for DevicePairing {
                     expires_at,
                     INVITE_MAX_PEERS,
                 )));
-            let advertised = self
-                .advertiser
+            let advertised = identity
+                .advertiser()
                 .start_share_gated(
                     container.id.clone(),
                     // ALLOW(loro_doc_escape): the advertiser retains the
@@ -1235,7 +1247,7 @@ impl DevicePairingOperations<()> for DevicePairing {
             let addr = match advertised {
                 Ok(addr) => addr,
                 Err(e) => {
-                    let stranded = self.stop_advertising(&minted.containers).await;
+                    let stranded = self.stop_advertising(&identity, &minted.containers).await;
                     let mut msg = format!(
                         "advertising container `{}` for pairing: {e:#}",
                         container.id
@@ -1280,11 +1292,12 @@ impl DevicePairingOperations<()> for DevicePairing {
     }
 
     async fn pair_cancel(&self) -> Result<OperationResult> {
+        let identity = self.identity()?;
         let Some(offer) = self.offer.lock().await.take() else {
             return Err(PairingRefused::NoLiveOffer.into());
         };
         let count = offer.containers.len();
-        let stranded = self.stop_advertising(&offer.containers).await;
+        let stranded = self.stop_advertising(&identity, &offer.containers).await;
         if !stranded.is_empty() {
             return Err(anyhow::anyhow!(
                 "the offer's rosters are gone but these containers are still advertised, so this \
@@ -1330,6 +1343,7 @@ impl DevicePairingOperations<()> for DevicePairing {
     }
 
     async fn pair_with_owner(&self, invite: String) -> Result<OperationResult> {
+        self.identity()?;
         let invite = PairingInvite::decode(&invite)?;
         self.refuse_unpairable(&invite).await?;
 

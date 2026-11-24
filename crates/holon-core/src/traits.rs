@@ -157,6 +157,13 @@ pub trait OperationProvider: Send + Sync {
         None
     }
 
+    /// The operations of this provider that only a direct user gesture in a
+    /// frontend ([`holon_api::OpOrigin::User`]) may run. The dispatcher refuses
+    /// every other origin before the provider runs.
+    fn user_gesture_only_ops(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// The identity minter for this provider, present **only** when this
     /// provider is the Turso block-identity authority (ADR 0029 D1c: the active
     /// consolidator selects the mint EXECUTOR, never the id VALUE). Mirrors

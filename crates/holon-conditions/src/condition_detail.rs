@@ -820,6 +820,33 @@ impl ConditionKind {
                 ),
                 files.clone(),
             ),
+
+            Self::DeviceKeyCorrupt {
+                service,
+                account,
+                len,
+            } => ConditionDetail::with_body(
+                format!(
+                    "Sharing and pairing are off: the device key entry holds {len} bytes, which \
+                     is not a key. Shared content stays editable. A new device key gives this \
+                     device a new peer identity, so paired devices and share rosters must pair \
+                     or enroll it again. The old entry is kept as \
+                     {account}.unreadable-<time of the replacement>. Keychain entry:"
+                ),
+                vec![format!("{service} / {account}")],
+            ),
+
+            Self::DeviceKeyUnavailable { cause } => ConditionDetail::with_body(
+                "Sharing and pairing are off: the keychain could not be read. Nothing was \
+                 changed. Retry when the keychain is available.",
+                vec![cause.clone()],
+            ),
+
+            Self::DeviceKeyReplaced { service, aside } => ConditionDetail::with_body(
+                "This device has a new device key, so paired devices and share rosters must \
+                 pair or enroll it again. The unreadable entry is kept as:",
+                vec![format!("{service} / {aside}")],
+            ),
         }
     }
 }

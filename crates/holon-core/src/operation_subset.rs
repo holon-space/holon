@@ -97,6 +97,10 @@ impl OperationProvider for OperationSubset {
     fn get_last_created_id(&self) -> Option<String> {
         self.inner.get_last_created_id()
     }
+
+    fn user_gesture_only_ops(&self) -> &'static [&'static str] {
+        self.inner.user_gesture_only_ops()
+    }
 }
 
 #[cfg(test)]

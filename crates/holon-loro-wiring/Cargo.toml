@@ -14,7 +14,7 @@ ignored = ["workspace-hack"]
 default = ["iroh-sync"]
 # Iroh P2P transport for syncing Loro documents across devices. Moves here with
 # `loro_module.rs`, the only file that binds an iroh endpoint.
-iroh-sync = ["iroh", "holon-loro/iroh-sync"]
+iroh-sync = ["iroh", "holon-loro/iroh-sync", "holon-net", "holon-net-shell", "holon-secrets"]
 test-helpers = ["holon/test-helpers", "holon-loro/test-helpers", "testing"]
 # proptest-backed test utilities (`pbt_infrastructure`). Keeps proptest out of
 # production builds.
@@ -32,7 +32,6 @@ holon-conditions.workspace = true
 holon-core.workspace = true
 holon-loro.workspace = true
 holon-profiles.workspace = true
-holon-secrets.workspace = true
 holon-sharing.workspace = true
 holon-turso.workspace = true
 holon-views.workspace = true
@@ -50,6 +49,9 @@ tokio = { workspace = true, features = ["full"] }
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
 iroh = { workspace = true, features = ["default"], optional = true }
+holon-net = { workspace = true, optional = true }
+holon-net-shell = { workspace = true, optional = true }
+holon-secrets = { workspace = true, optional = true }
 
 [dev-dependencies]
 holon-loro = { workspace = true, features = ["test-helpers"] }

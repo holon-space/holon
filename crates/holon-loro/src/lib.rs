@@ -128,7 +128,7 @@ pub mod share_enrollment;
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
-pub mod share_peer_id;
+pub mod share_identity;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
