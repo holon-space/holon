@@ -445,7 +445,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
-- `tour-spike-create-op-not-observable-load`
 - `tui-dead-terminal-shutdown-over-60s-load`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`

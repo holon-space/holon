@@ -29,7 +29,13 @@ use holon_frontend::tour::StatePredicate;
 use holon_frontend::tour::TourViewModel;
 use holon_frontend::tour::WellKnownPanel;
 use holon_frontend::tour::parse_tour;
+use holon_integration_tests::Probe;
 use holon_integration_tests::TestEnvironmentBuilder;
+use holon_integration_tests::wait_until;
+
+/// Hang detector for a write to reach the block snapshot; reads after a write
+/// are eventually consistent.
+const PROJECTION_HANG: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -85,27 +91,32 @@ async fn children_of(env: &holon_integration_tests::TestEnvironment, parent: &st
         .count()
 }
 
-/// Whether the cursor shows up in the snapshot within two seconds. Separates a
-/// read that lags the write from a write that never landed.
-async fn cursor_visible_late(harness: &holon_integration_tests::TestEnvironment) -> bool {
-    for _ in 0..20 {
-        let snap = harness
-            .session()
-            .block_query()
-            .snapshot()
-            .await
-            .expect("block snapshot");
-        if snap
-            .iter_blocks()
-            .find(|b| b.id.id() == "tour-welcome")
-            .and_then(|b| b.properties.get("tour_active_step"))
-            == Some(&Value::String("1".into()))
-        {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+/// The tour root's `tour_active_step` as the block snapshot sees it, or where
+/// the snapshot stands when it does not hold the given value.
+async fn persisted_cursor(
+    env: &holon_integration_tests::TestEnvironment,
+    expected: &Value,
+) -> Probe<Option<Value>> {
+    let snap = env
+        .session()
+        .block_query()
+        .snapshot()
+        .await
+        .expect("block snapshot");
+    let welcome = snap.iter_blocks().find(|b| b.id.id() == "tour-welcome");
+    let cursor = welcome.and_then(|b| b.properties.get("tour_active_step").cloned());
+    if cursor.as_ref() == Some(expected) {
+        return Probe::Reached(cursor);
     }
-    false
+    Probe::NotYet(format!(
+        "cursor={cursor:?} block_in_snapshot={} property_keys={:?}",
+        welcome.is_some(),
+        welcome.map(|b| {
+            let mut keys: Vec<_> = b.properties.keys().cloned().collect();
+            keys.sort();
+            keys
+        }),
+    ))
 }
 
 #[test]
@@ -161,26 +172,16 @@ fn tour_spike_parses_advances_and_gates_on_real_engine() {
             .await
             .expect("set_field advance op");
 
-        let snap = env
-            .session()
-            .block_query()
-            .snapshot()
-            .await
-            .expect("snapshot after advance");
-        let welcome = snap.iter_blocks().find(|b| b.id.id() == "tour-welcome");
-        let persisted = welcome.and_then(|b| b.properties.get("tour_active_step").cloned());
+        let cursor = Value::String("1".into());
+        let persisted = wait_until("tour cursor persisted", PROJECTION_HANG, || {
+            persisted_cursor(&env, &cursor)
+        })
+        .await
+        .unwrap_or_else(|hung| panic!("advance op must persist the progress cursor: {hung}"));
         assert_eq!(
             persisted,
             Some(Value::String("1".into())),
-            "advance op must persist the progress cursor; block_in_snapshot={} property_keys={:?} \
-             visible_within_2s={}",
-            welcome.is_some(),
-            welcome.map(|b| {
-                let mut keys: Vec<_> = b.properties.keys().cloned().collect();
-                keys.sort();
-                keys
-            }),
-            cursor_visible_late(&env).await,
+            "advance op must persist the progress cursor"
         );
 
         // Mirror it in the pure projection.
@@ -208,7 +209,14 @@ fn tour_spike_parses_advances_and_gates_on_real_engine() {
             .await
             .expect("create block under target");
 
-        let after = children_of(&env, "target-page").await;
+        let after = wait_until("tour target child visible", PROJECTION_HANG, || async {
+            match children_of(&env, "target-page").await {
+                1 => Probe::Reached(1),
+                n => Probe::NotYet(format!("{n} children")),
+            }
+        })
+        .await
+        .unwrap_or_else(|hung| panic!("the create op is observable in engine state: {hung}"));
         assert_eq!(after, 1, "the create op is observable in engine state");
         assert!(
             vm.observed_gate_open(after),
