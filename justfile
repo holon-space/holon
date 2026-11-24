@@ -1508,11 +1508,10 @@ check-web-arm:
     cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
-# The gate's checks that read the tree and build nothing (about 12 min at a host
-# load near 55, the known-reds property checks the longest step): the
-# integrate gate's feature-map step, landing-gate and prepush run them, each
-# once. The only cargo command allowed here is `cargo fmt` (it reads the tree
-# and builds nothing): any other fails scripts/test-cargo-free-checks.py.
+# The gate's checks that read the tree and build nothing: the integrate gate's
+# feature-map step, landing-gate and prepush run them, each once. The only
+# cargo command allowed here is `cargo fmt` (it reads the tree and builds
+# nothing): any other fails scripts/test-cargo-free-checks.py.
 # Every script runs and prints one `PASS <name>` or `FAIL <name> (exit N)` line.
 cargo-free-checks:
     #!/usr/bin/env bash
