@@ -283,7 +283,9 @@ const WRITEBACK_QUIET_FLOOR: std::time::Duration = std::time::Duration::from_mil
 /// Wait until every change the store holds has reached its org file: the Loro
 /// projection caught up with the document, CDC stopped moving, and the
 /// write-back has nothing queued, folding or rendering — all at once, for
-/// [`WRITEBACK_QUIET_FLOOR`].
+/// [`WRITEBACK_QUIET_FLOOR`]. The backlog import is sealed first: while it
+/// runs, every file it imports moves the Loro document and the projection
+/// never catches up.
 async fn wait_for_writeback(
     injector: &fluxdi::Injector,
     budget: std::time::Duration,
@@ -296,6 +298,15 @@ async fn wait_for_writeback(
                  but resolution failed: {e}"
             )
         })?;
+    let sealed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn({
+        let idle = idle.clone();
+        let sealed = sealed.clone();
+        async move {
+            idle.seal_backlog().await;
+            sealed.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
     let loro_sync = if injector
         .try_resolve::<holon_loro_wiring::LoroConfig>()
         .is_ok()
@@ -323,19 +334,23 @@ async fn wait_for_writeback(
         let idle = idle.clone();
         let loro_sync = loro_sync.clone();
         let engine = engine.clone();
+        let sealed = sealed.clone();
         async move {
             let mut busy: Vec<String> = idle
                 .writeback_stop_waits_for()
                 .into_iter()
                 .map(str::to_string)
                 .collect();
-            if let Some(sync) = &loro_sync {
-                if !sync.is_settled().await? {
-                    busy.push("the Loro projection is behind the document".to_string());
-                }
+            if !sealed.load(std::sync::atomic::Ordering::Acquire) {
+                busy.push("the backlog import has not stopped".to_string());
             }
+            let read_model_behind = match &loro_sync {
+                Some(sync) => !sync.is_settled().await?,
+                None => false,
+            };
             Ok(WritebackProbe {
                 busy,
+                read_model_behind,
                 cdc: engine
                     .as_ref()
                     .map(|e| e.db_handle().cdc_emitted_watermark()),
@@ -369,14 +384,18 @@ async fn wait_for_writeback(
 
 #[derive(Debug, PartialEq, Eq)]
 struct WritebackProbe {
-    /// What is still running; empty when nothing is.
+    /// What the write-back is still doing; empty when nothing.
     busy: Vec<String>,
+    /// The Loro projection has not caught up with the document. The Loro
+    /// checkpoint keeps every edit, so this alone loses nothing.
+    read_model_behind: bool,
     cdc: Option<u64>,
     tick: u64,
 }
 
 /// Poll `probe` until it reports nothing busy and the same watermarks for
-/// `floor`, or `budget` runs out — then name what was not written.
+/// `floor`, or `budget` runs out. Then it is an error naming what was not
+/// written, unless only the read model is still moving: that is logged.
 async fn settle<P, F>(
     mut probe: P,
     unwritten: impl Fn() -> Vec<String>,
@@ -393,16 +412,23 @@ where
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let now = probe().await?;
-        if !now.busy.is_empty() || now != last {
+        if !now.busy.is_empty() || now.read_model_behind || now != last {
             quiet_since = tokio::time::Instant::now();
         } else if quiet_since.elapsed() >= floor {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            let unwritten = unwritten();
+            if now.busy.is_empty() && now.tick == last.tick && unwritten.is_empty() {
+                tracing::warn!(
+                    "shutdown: the read model is still behind the document after {budget:?}; \
+                     every document is written and the Loro checkpoint keeps every edit"
+                );
+                return Ok(());
+            }
             return Err(anyhow::anyhow!(
                 "shutdown: the org write-back did not settle within {budget:?}, so edits may be \
-                 missing from disk. Documents not written: {:?}. Still running: {:?}",
-                unwritten(),
+                 missing from disk. Documents not written: {unwritten:?}. Still running: {:?}",
                 now.busy
             ));
         }
@@ -420,6 +446,7 @@ mod settle_tests {
             || async {
                 Ok(WritebackProbe {
                     busy: vec!["document re-renders are queued".to_string()],
+                    read_model_behind: true,
                     cdc: Some(1),
                     tick: 1,
                 })
@@ -443,6 +470,7 @@ mod settle_tests {
             || async {
                 Ok(WritebackProbe {
                     busy: Vec::new(),
+                    read_model_behind: false,
                     cdc: Some(7),
                     tick: 3,
                 })
@@ -464,6 +492,7 @@ mod settle_tests {
                 async move {
                     Ok(WritebackProbe {
                         busy: Vec::new(),
+                        read_model_behind: false,
                         cdc: Some(0),
                         tick,
                     })
@@ -478,5 +507,27 @@ mod settle_tests {
             err.is_err(),
             "a tick that advances on every probe is activity, not quiet"
         );
+    }
+    #[tokio::test]
+    async fn a_read_model_still_catching_up_with_every_document_written_is_ok() {
+        let mut cdc = 0;
+        settle(
+            move || {
+                cdc += 1;
+                async move {
+                    Ok(WritebackProbe {
+                        busy: Vec::new(),
+                        read_model_behind: true,
+                        cdc: Some(cdc),
+                        tick: 4,
+                    })
+                }
+            },
+            Vec::new,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("a lagging read model loses no edit: the Loro checkpoint keeps them");
     }
 }

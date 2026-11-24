@@ -14,6 +14,7 @@
 //! or deletes the copy, with Holon's edits in between.
 
 use holon_api::EntityUri;
+use holon_api::types::TaskState;
 use holon_orgmode::OrgDocumentExt;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
@@ -29,6 +30,7 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
+use crate::pbt::block_state::BlockState;
 use crate::pbt::block_state::Placement;
 use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
@@ -59,63 +61,69 @@ fn movable_doc(state: &ReferenceState, doc: &EntityUri) -> bool {
         && !state.sharing.page_shares.contains_key(doc)
 }
 
+fn todo_keywords_of(state: &ReferenceState, doc: &EntityUri) -> Option<Vec<TaskState>> {
+    state
+        .domain
+        .block_state
+        .blocks
+        .get(doc)
+        .and_then(|page| page.todo_keywords())
+}
+
 /// The heading's task keywords must mean the same in both files, or the paste
 /// would re-parse them as heading text.
 fn same_keywords(state: &ReferenceState, a: &EntityUri, b: &EntityUri) -> bool {
-    let keywords = |doc: &EntityUri| {
-        state
-            .domain
-            .block_state
-            .blocks
-            .get(doc)
-            .and_then(|page| page.todo_keywords())
-    };
-    keywords(a) == keywords(b)
+    todo_keywords_of(state, a) == todo_keywords_of(state, b)
 }
 
 /// A plain text subtree: no page, no source block, nothing the layout or a
 /// peer owns.
-fn movable_block(state: &ReferenceState, id: &EntityUri) -> bool {
-    let peer_modified = state.peer_modified_stable_ids();
-    state
-        .domain
-        .block_state
-        .subtree_ids(id)
-        .iter()
-        .all(|member| {
-            state.is_text_block(member)
-                && !state.is_page_block(member)
-                && !state.is_layout_block(member)
-                && !state.is_no_content_update(member)
-                && !peer_modified.contains(member.id())
-                && !state.sharing.policy_audience.contains_key(member)
-        })
+fn movable_subtree(
+    state: &ReferenceState,
+    peer_modified: &std::collections::HashSet<String>,
+    subtree: &[EntityUri],
+) -> bool {
+    subtree.iter().all(|member| {
+        state.is_text_block(member)
+            && !state.is_page_block(member)
+            && !state.is_layout_block(member)
+            && !state.is_no_content_update(member)
+            && !peer_modified.contains(member.id())
+            && !state.sharing.policy_audience.contains_key(member)
+    })
 }
 
 /// The cut & paste moves of a block no copy involves, from its file to
 /// another page file.
 pub(super) fn candidates(state: &ReferenceState) -> Vec<(EntityUri, EntityUri, EntityUri)> {
-    let docs: Vec<EntityUri> = state
+    let docs: Vec<(EntityUri, Option<Vec<TaskState>>)> = state
         .files
         .documents
         .keys()
         .filter(|doc| movable_doc(state, doc))
-        .cloned()
+        .map(|doc| (doc.clone(), todo_keywords_of(state, doc)))
         .collect();
+    let peer_modified = state.peer_modified_stable_ids();
+    let children = state.domain.block_state.children_index();
     let mut out = Vec::new();
     for id in state.all_non_seed_block_ids() {
         let DrawnHome::File(source) = state.file_home_of(&id) else {
             continue;
         };
-        if !docs.contains(&source)
-            || !owned_by_its_file(state, &id, &source)
-            || !movable_block(state, &id)
-            || involves_a_copy(state, &id)
+        let Some((_, source_keywords)) = docs.iter().find(|(doc, _)| *doc == source) else {
+            continue;
+        };
+        if !owned_by_its_file(state, &id, &source) {
+            continue;
+        }
+        let subtree = BlockState::subtree_ids_in(&children, &id);
+        if !movable_subtree(state, &peer_modified, &subtree)
+            || subtree_involves_a_copy(state, &id, &subtree)
         {
             continue;
         }
-        for target in docs.iter().filter(|t| **t != source) {
-            if same_keywords(state, &source, target) {
+        for (target, keywords) in &docs {
+            if *target != source && keywords == source_keywords {
                 out.push((id.clone(), source.clone(), target.clone()));
             }
         }
@@ -230,9 +238,17 @@ fn owned_by_its_file(state: &ReferenceState, id: &EntityUri, doc: &EntityUri) ->
 pub(super) fn another_copy_candidates(
     state: &ReferenceState,
 ) -> Vec<(EntityUri, EntityUri, EntityUri)> {
+    let peer_modified = state.peer_modified_stable_ids();
     let mut out = Vec::new();
     for (id, copy) in &state.files.copies {
-        if copy.conflict || !copy.undone.is_empty() || !movable_block(state, id) {
+        if copy.conflict
+            || !copy.undone.is_empty()
+            || !movable_subtree(
+                state,
+                &peer_modified,
+                &state.domain.block_state.subtree_ids(id),
+            )
+        {
             continue;
         }
         let Some(owner) = state.owner_doc_of(id) else {
@@ -253,13 +269,16 @@ pub(super) fn another_copy_candidates(
 
 /// Whether a copy holds `id`, a block above it, or a block below it.
 pub(super) fn involves_a_copy(state: &ReferenceState, id: &EntityUri) -> bool {
-    state.copied_heading_above(id).is_some()
-        || state
-            .domain
-            .block_state
-            .subtree_ids(id)
-            .iter()
-            .any(|member| state.files.copies.contains_key(member))
+    subtree_involves_a_copy(state, id, &state.domain.block_state.subtree_ids(id))
+}
+
+/// `involves_a_copy`, given `id`'s subtree.
+fn subtree_involves_a_copy(state: &ReferenceState, id: &EntityUri, subtree: &[EntityUri]) -> bool {
+    !state.files.copies.is_empty()
+        && (state.copied_heading_above(id).is_some()
+            || subtree
+                .iter()
+                .any(|member| state.files.copies.contains_key(member)))
 }
 
 pub(super) fn preconditions_of_a_cut(
@@ -274,7 +293,11 @@ pub(super) fn preconditions_of_a_cut(
             state.block_content(block_id).is_some()
                 && state.file_home_of(block_id) == DrawnHome::File(source_doc.clone())
                 && owned_by_its_file(state, block_id, source_doc)
-                && movable_block(state, block_id)
+                && movable_subtree(
+                    state,
+                    &state.peer_modified_stable_ids(),
+                    &state.domain.block_state.subtree_ids(block_id),
+                )
                 && !involves_a_copy(state, block_id),
             Reason::PreconditionFailed,
         ),

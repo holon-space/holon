@@ -21,6 +21,7 @@ Suppression:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -159,7 +160,8 @@ OK_UNIVERSAL_FILE_MARKERS = ("build.rs", "holon-macros/", "theme.rs")
 FILTER_MAP_OK_UNIVERSAL_FILE_MARKERS = ("build.rs", "holon-macros/")
 
 
-def matches_glob(rel: str, pattern: str) -> bool:
+@functools.cache
+def glob_variants(pattern: str) -> frozenset[str]:
     # fnmatch has no `**` semantics: `src/**/*.rs` forces at least one
     # directory between src/ and the file, silently exempting top-level
     # files (e.g. crates/holon-orgmode/src/di.rs). Expand variants where
@@ -180,7 +182,11 @@ def matches_glob(rel: str, pattern: str) -> bool:
                 variants.add(v)
                 queue.append(v)
             idx = p.find("/**/", idx + 1)
-    return any(fnmatch(rel, v) for v in variants)
+    return frozenset(variants)
+
+
+def matches_glob(rel: str, pattern: str) -> bool:
+    return any(fnmatch(rel, v) for v in glob_variants(pattern))
 
 
 def matches_any(rel: str, patterns: list[str]) -> bool:
@@ -194,6 +200,7 @@ def is_default_skipped(rel: str) -> bool:
 WORKTREE_PREFIX_RE = re.compile(r"^.*\.claude/worktrees/[^/]+/")
 
 
+@functools.cache
 def relpath(p: Path) -> str:
     try:
         rel = str(p.resolve().relative_to(REPO_ROOT))

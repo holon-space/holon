@@ -345,6 +345,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 ### Known reds
 
+- `adoption-missing-owner-disclosure-load`
 - `advice-dismiss-prod-session-row-missing`
 - `advice-gate-weave-row-missing`
 - `bad-render-quick-open`
@@ -353,7 +354,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `catalog-advice-step6-weave-dismiss`
 - `cmd-click-open-tab-integration-state-write`
 - `concurrent-keystroke-undo-steps-load`
-- `cook-vault-ingest-layout-seed-timeout`
 - `cook-vault-rename-refusal-load-flake`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
@@ -463,7 +463,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
 - `wide-e2e-shrinker-list-app-item-missing`
-- `wide-e2e-sqlonly-typing-share-load-timeout`
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-breadcrumb-home-bar-keeps-view-root`
 - `windowed-chrome-one-row-timeout-load`

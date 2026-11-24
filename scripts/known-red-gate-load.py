@@ -79,16 +79,12 @@ def gpui(name):
     return Test("holon-gpui::main", name, env=(("HOLON_PBT_TIMING", "measure"),))
 
 
-WIDE = "holon-integration-tests"
 INTEG = "holon-integration-tests::integration"
 TOLERANT = "load-tolerant"
 PER_CASE_BOOT = gpui("gpui_composed_windowed_loop::benchmark_windowed_per_case_boot_cost")
 COMPOSED_WINDOWED = gpui("gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed")
 # Each bound is the one the row's red names; each rate is the red share of the row's Evidence cell.
 ROWS = {
-    "wide-e2e-sqlonly-typing-share-load-timeout": Row(("bound", 600.0), (Test(
-        WIDE, "pbt::composed::wide_e2e::tests::sqlonly_typing_share_meets_its_floor_beside_the_loro_control",
-        TOLERANT),)),
     "logseq-parity-corpus-replay-load-timeout": Row(("bound", 600.0), (Test(
         INTEG, "catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay", TOLERANT),)),
     "dense-patch-cross-document-write-back-late-load": Row(("bound", 30.0), (Test(

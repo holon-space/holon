@@ -355,7 +355,13 @@ pub struct OrgSyncIdleSignal {
     /// shutdown must name what it would leave unwritten.
     queued_renders: Arc<QueuedRenders>,
     writeback_net: holon_net_shell::Shell,
+    /// Requests to the watch loop to drop its ingest writer. Set once, at
+    /// wiring; unset in a container whose loop is never built.
+    backlog_seal: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<BacklogSealRequest>>,
 }
+
+/// Answered by the watch loop once its ingest writer is dropped.
+type BacklogSealRequest = tokio::sync::oneshot::Sender<()>;
 
 /// Re-render requests in the write-back channel, counted per document.
 #[derive(Debug, Default)]
@@ -414,6 +420,7 @@ impl OrgSyncIdleSignal {
             in_pass: std::sync::atomic::AtomicUsize::new(0),
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
+            backlog_seal: std::sync::OnceLock::new(),
             queued_renders: Arc::new(QueuedRenders::default()),
             writeback_net: holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
                 .expect("the write-back net loads"),
@@ -478,6 +485,29 @@ impl OrgSyncIdleSignal {
             .set(progress)
             .map_err(|_| "writeback fold progress already attached")
             .expect("attach_writeback_fold is called once per container");
+    }
+
+    fn attach_backlog_seal(&self, seal: tokio::sync::mpsc::UnboundedSender<BacklogSealRequest>) {
+        self.backlog_seal
+            .set(seal)
+            .map_err(|_| "backlog seal already attached")
+            .expect("the watch loop is built once per container");
+    }
+
+    /// Stop the read-only backlog import: the watch loop drops its ingest
+    /// writer between two files, so no file is left half imported, and keeps
+    /// running the write-back. Returns once no import can start any more.
+    #[tracing::instrument(skip(self), name = "OrgSyncIdleSignal.seal_backlog")]
+    pub async fn seal_backlog(&self) {
+        // No loop was built, or it has ended (its receiver or the answer
+        // dropped): either way nothing imports.
+        let Some(seal) = self.backlog_seal.get() else {
+            return;
+        };
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        if seal.send(answer).is_ok() {
+            let _ = answered.await;
+        }
     }
 
     /// `true` while the write-back's `home_by` fold owes its consumer output —
@@ -1066,6 +1096,8 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
                 let (rerender_tx, rerender_rx) =
                     tokio::sync::mpsc::unbounded_channel::<RerenderMsg>();
+                let (seal_tx, seal_rx) = tokio::sync::mpsc::unbounded_channel();
+                idle_signal.attach_backlog_seal(seal_tx);
                 if let Some(feed) = block_feed.clone() {
                     let tx = rerender_tx.clone();
                     let queued = idle_signal.queued_renders.clone();
@@ -1229,6 +1261,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         config.root_directory.clone(),
                         idle_signal_weak,
                         rerender_rx,
+                        seal_rx,
                         (ready_sender, drained_sender),
                         seed_handover,
                         asset_seed,
@@ -1768,6 +1801,7 @@ async fn run_file_sync_controller(
     root_directory: PathBuf,
     idle_signal_weak: std::sync::Weak<OrgSyncIdleSignal>,
     mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
+    mut seal_rx: tokio::sync::mpsc::UnboundedReceiver<BacklogSealRequest>,
     (ready_sender, drained_sender): (FileWatcherReadySender, FileWatcherReadySender),
     mut seed_handover: Option<SeedHandover>,
     asset_seed: Option<AssetSeedGate>,
@@ -2106,6 +2140,7 @@ async fn run_file_sync_controller(
     let mut backlog_disclosed_at = std::time::Instant::now();
     let mut backlog_read = backlog.read_next(&fs);
     let mut drained_sender = Some(drained_sender);
+    let mut ingest_writer = Some(controller.take_ingest_writer());
     if backlog_read.is_some() {
         info!(
             "[OrgMode] read-only backlog: {} file(s) after the boot",
@@ -2140,6 +2175,26 @@ async fn run_file_sync_controller(
                 }
                 info!("[OrgMode] file-watcher loop exiting (session shutdown)");
                 return;
+            }
+            // Before the backlog arm, else a long backlog starves the seal; between
+            // two arms, so the backlog file in flight is complete.
+            Some(answer) = seal_rx.recv() => {
+                ingest_writer = None;
+                let left = backlog.len() + usize::from(backlog_read.take().is_some());
+                if left > 0 {
+                    let msg = format!(
+                        "the read-only backlog stopped at shutdown: {} of {backlog_total} \
+                         file(s) ingested, the next boot ingests the other {left}",
+                        backlog_total - left
+                    );
+                    info!("[OrgMode] {msg}");
+                    drained_sender
+                        .take()
+                        .expect("a backlog with files left has not ended")
+                        .signal_error(msg);
+                }
+                // The shutdown may have stopped waiting; the seal stands either way.
+                let _ = answer.send(());
             }
             Some((maybe_evt, change_seq)) = file_rx.recv() => {
                 let _pass = idle_signal_for_task.enter_pass();
@@ -2321,10 +2376,11 @@ async fn run_file_sync_controller(
             // writes, not for the backlog.
             path = async {
                 backlog_read.as_mut().expect("the arm runs only with a pending read").await
-            }, if backlog_read.is_some() => {
+            }, if backlog_read.is_some() && ingest_writer.is_some() => {
                 backlog_read = backlog.read_next(&fs);
                 let t_file = std::time::Instant::now();
-                let result = controller.ingest_backlog_file(&path).await;
+                let writer = ingest_writer.as_mut().expect("the arm guard holds the writer");
+                let result = controller.ingest_backlog_file(writer.doc(&path)).await;
                 record_boot_ingest(path, t_file, result, &mut backlog_failures);
                 let done = backlog_total - backlog.len() - usize::from(backlog_read.is_some());
                 if backlog_read.is_none() {

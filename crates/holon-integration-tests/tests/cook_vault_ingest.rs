@@ -2892,38 +2892,173 @@ fn the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held() {
 }
 
 /// D108.a end to end with an unheld backlog: the seed is answered before the
-/// last recipe is ingested. Prints the time to the seed and to the end of the
-/// backlog.
+/// last recipe is ingested, and the app stops cleanly with the rest of the
+/// backlog still in flight. The `held` sibling proves the backlog drains.
 #[test]
 fn the_default_layout_seed_does_not_wait_for_the_recipe_backlog() {
-    init_tracing();
+    use tracing::Instrument;
+
     const RECIPES: usize = 500;
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
     let rt = runtime();
     rt.clone().block_on(async {
-        let t0 = std::time::Instant::now();
-        let app = backlog_vault(RECIPES)
+        let mut app = backlog_vault(RECIPES)
             .build(rt.clone())
+            .instrument(tracing::info_span!("backlog.boot"))
             .await
             .expect("a vault of org files and recipes must boot");
-        wait_scanned(&app).await;
-        let seed = t0.elapsed();
+        wait_scanned(&app)
+            .instrument(tracing::info_span!("backlog.seed"))
+            .await;
         let at_seed = ingested_recipes(&app).await;
-        wait_for_backlog(&app, RECIPES).await;
-        let backlog = t0.elapsed();
-        eprintln!(
-            "BOOT-TIMING recipes={RECIPES} seed_ms={} recipes_at_seed={at_seed} \
-             backlog_done_ms={}",
-            seed.as_millis(),
-            backlog.as_millis()
+        app.stop_app()
+            .instrument(tracing::info_span!(
+                "backlog.teardown",
+                recipes_in_flight = RECIPES - at_seed
+            ))
+            .await
+            .expect("the app stops with the recipe backlog in flight");
+        let millis = |name: &str| {
+            let spans = collector.spans_named(name);
+            assert_eq!(spans.len(), 1, "one {name} span: {spans:?}");
+            spans[0]
+                .end_time
+                .duration_since(spans[0].start_time)
+                .expect("a span ends after it starts")
+                .as_millis()
+        };
+        let timing = format!(
+            "boot {} ms, seed {} ms, teardown {} ms with {} of {RECIPES} recipes in flight",
+            millis("backlog.boot"),
+            millis("backlog.seed"),
+            millis("backlog.teardown"),
+            RECIPES - at_seed
         );
+        eprintln!("[backlog] {timing}");
         assert!(
             at_seed < RECIPES,
             "the default-layout seed was answered only after all {RECIPES} recipes were \
-             ingested ({} ms to the seed, {} ms to the last recipe)",
-            seed.as_millis(),
-            backlog.as_millis()
+             ingested ({timing})"
+        );
+        let panics: Vec<_> = collector
+            .captured_problems()
+            .into_iter()
+            .filter(|p| p.kind == holon_integration_tests::test_tracing::ProblemKind::Panic)
+            .collect();
+        assert!(
+            panics.is_empty(),
+            "stopping the app with the backlog in flight panicked: {panics:#?}"
         );
     });
+}
+
+/// Stopping the app at any point of the recipe backlog seals its import:
+/// the file in flight completes, no file is imported after the seal, the
+/// shutdown reports no lost edit, and no recipe file changes on disk.
+fn stop_at_any_point_of_the_backlog(recipes: usize, quit_after: usize) {
+    use holon_filesystem::FileSystem;
+    use tracing::Instrument;
+
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = backlog_vault(recipes)
+            .build(rt.clone())
+            .await
+            .expect("a vault of org files and recipes must boot");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            collector.wait_for_spans("FileSyncController.ingest_backlog_file", quit_after),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the backlog did not reach {quit_after} of {recipes} recipes: {} imported",
+                collector.count_spans("FileSyncController.ingest_backlog_file")
+            )
+        });
+        let stopped = app
+            .stop_app()
+            .instrument(tracing::info_span!("backlog.stop"))
+            .await;
+        assert!(
+            stopped.is_ok(),
+            "stopping with the backlog at {quit_after} of {recipes} recipes reported lost \
+             edits: {stopped:?}"
+        );
+        let ingests = collector.spans_named("FileSyncController.ingest_backlog_file");
+        let stop = collector.spans_named("backlog.stop");
+        // One file may start before the loop sees the seal; it completes.
+        let started_after_stop = ingests
+            .iter()
+            .filter(|ingest| ingest.start_time > stop[0].start_time)
+            .count();
+        assert!(
+            started_after_stop <= 1,
+            "{started_after_stop} backlog files were imported after the shutdown began"
+        );
+        let seals = collector.spans_named("OrgSyncIdleSignal.seal_backlog");
+        assert_eq!(
+            seals.len(),
+            1,
+            "the shutdown seals the backlog once: {seals:?}"
+        );
+        let late: Vec<_> = ingests
+            .into_iter()
+            .filter(|ingest| ingest.end_time > seals[0].end_time)
+            .collect();
+        assert!(
+            late.is_empty(),
+            "files were imported after the seal: {late:?}"
+        );
+        for i in 0..recipes {
+            let path = app.org_root().join(format!("Resources/R{i:04}.cook"));
+            assert_eq!(
+                app.org_fs
+                    .read_to_string(&path)
+                    .await
+                    .expect("the recipe stays on disk"),
+                recipe(&format!("R{i:04}"), "Stir"),
+                "the shutdown rewrote {}",
+                path.display()
+            );
+        }
+        let panics: Vec<_> = collector
+            .captured_problems()
+            .into_iter()
+            .filter(|p| p.kind == holon_integration_tests::test_tracing::ProblemKind::Panic)
+            .collect();
+        assert!(
+            panics.is_empty(),
+            "the sealed shutdown panicked: {panics:#?}"
+        );
+    });
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4))]
+    #[test]
+    fn stopping_mid_backlog_imports_nothing_after_the_seal_and_loses_no_edit(
+        // Only the files before the stop cost import work: the seal stops the rest.
+        quit_after in 0usize..=100,
+        behind in 0usize..=400,
+    ) {
+        let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after);
+    }
+}
+
+/// The generator's edges, run through the same properties: an empty backlog,
+/// a stop before the first file, and a stop after the last one.
+#[test]
+fn stopping_at_the_backlog_edges_imports_nothing_after_the_seal() {
+    for (quit_after, behind) in [(0, 0), (0, 400), (100, 0)] {
+        let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after);
+    }
 }
 
 /// A boot over a fresh database knows no file of the recipe's document, while

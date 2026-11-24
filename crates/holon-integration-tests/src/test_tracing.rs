@@ -459,6 +459,10 @@ fn route_span(span: SpanData) {
 /// Span names of the per-case timing tree of the hand-authored replay.
 pub const CASE_SPAN_NAMES: [&str; 4] = ["hand_authored_case", "boot", "body", "check"];
 
+/// Woken when a span of their name ends, for [`SpanCollector::wait_for_spans`].
+static SPAN_WAITERS: Mutex<Vec<(&'static str, std::sync::Arc<tokio::sync::Notify>)>> =
+    Mutex::new(Vec::new());
+
 /// Every finished [`CASE_SPAN_NAMES`] span of the process, kept outside the
 /// scope windows because the SUT resets those between transitions.
 static CASE_SPANS: Mutex<Vec<SpanData>> = Mutex::new(Vec::new());
@@ -509,7 +513,13 @@ impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
                 .expect("case span log poisoned")
                 .push(span.clone());
         }
+        let ended = span.name.clone();
         route_span(span);
+        for (name, notify) in SPAN_WAITERS.lock().expect("span waiters poisoned").iter() {
+            if *name == ended.as_ref() {
+                notify.notify_waiters();
+            }
+        }
     }
 
     fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
@@ -841,6 +851,27 @@ impl SpanCollector {
             .iter()
             .filter(|s| s.name.as_ref() == name)
             .count()
+    }
+
+    /// Wait until the calling thread's scope holds `n` finished spans named
+    /// `name`; it wakes on each such span's end, never on a clock.
+    pub async fn wait_for_spans(&self, name: &'static str, n: usize) {
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        SPAN_WAITERS
+            .lock()
+            .expect("span waiters poisoned")
+            .push((name, notify.clone()));
+        loop {
+            let ended = notify.notified();
+            if self.count_spans(name) >= n {
+                break;
+            }
+            ended.await;
+        }
+        SPAN_WAITERS
+            .lock()
+            .expect("span waiters poisoned")
+            .retain(|(_, waiter)| !std::sync::Arc::ptr_eq(waiter, &notify));
     }
 
     /// Get spans matching a name, sorted by start time.

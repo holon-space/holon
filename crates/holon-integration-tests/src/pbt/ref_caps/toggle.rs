@@ -96,39 +96,7 @@ impl RefTaskState for ReferenceState {
 
 impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
     fn rendered_state_toggle_ids(&self) -> Vec<EntityUri> {
-        // Interpreting the RAW panel expr yields an empty VM — zero
-        // `state_toggle` widgets and a spurious `NoTogglableStates` — because
-        // both `collection_view()` and `live_block()` stand for a render the
-        // expression itself does not carry. `resolved_main_panel_render_expr`
-        // substitutes each the way prod resolves it, so the oracle's
-        // interpreted tree matches the SUT's.
-        let owned_render_expr = self.resolved_main_panel_render_expr();
-
-        let main_focus_roots = self.rendered_focus_root(holon_api::Region::Main);
-        let visible_text_block_ids: Vec<EntityUri> = self
-            .domain
-            .block_state
-            .blocks
-            .values()
-            .filter(|b| {
-                b.content_type == holon_api::ContentType::Text
-                    && !b.is_page()
-                    && !self.domain.layout_blocks.contains(&b.id)
-                    && self.is_descendant_of_any(&b.id, &main_focus_roots)
-            })
-            .map(|b| b.id.clone())
-            .collect();
-
-        let rows: Vec<holon_api::widget_spec::DataRow> = visible_text_block_ids
-            .iter()
-            .filter_map(|id| self.domain.block_state.blocks.get(id))
-            .map(super::super::reference_state::block_to_data_row)
-            .collect();
-        let arc_rows: Vec<Arc<_>> = rows.into_iter().map(Arc::new).collect();
-        // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render
-        // lookup
-        let vm = holon_frontend::interpret_pure(&owned_render_expr, &arc_rows, self);
-        vm.snapshot().state_toggle_block_ids().into_iter().collect()
+        self.held_state_toggles(|| interpreted_state_toggle_ids(self))
     }
 
     fn apply_toggle_state(
@@ -228,4 +196,41 @@ impl ReferenceState {
         }
         None
     }
+}
+
+/// The block ids the main panel draws a state toggle for, interpreted.
+fn interpreted_state_toggle_ids(state: &ReferenceState) -> Vec<EntityUri> {
+    // Interpreting the RAW panel expr yields an empty VM — zero
+    // `state_toggle` widgets and a spurious `NoTogglableStates` — because
+    // both `collection_view()` and `live_block()` stand for a render the
+    // expression itself does not carry. `resolved_main_panel_render_expr`
+    // substitutes each the way prod resolves it, so the oracle's
+    // interpreted tree matches the SUT's.
+    let owned_render_expr = state.resolved_main_panel_render_expr();
+
+    let main_focus_roots = state.rendered_focus_root(holon_api::Region::Main);
+    let visible_text_block_ids: Vec<EntityUri> = state
+        .domain
+        .block_state
+        .blocks
+        .values()
+        .filter(|b| {
+            b.content_type == holon_api::ContentType::Text
+                && !b.is_page()
+                && !state.domain.layout_blocks.contains(&b.id)
+                && state.is_descendant_of_any(&b.id, &main_focus_roots)
+        })
+        .map(|b| b.id.clone())
+        .collect();
+
+    let rows: Vec<holon_api::widget_spec::DataRow> = visible_text_block_ids
+        .iter()
+        .filter_map(|id| state.domain.block_state.blocks.get(id))
+        .map(super::super::reference_state::block_to_data_row)
+        .collect();
+    let arc_rows: Vec<Arc<_>> = rows.into_iter().map(Arc::new).collect();
+    // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render
+    // lookup
+    let vm = holon_frontend::interpret_pure(&owned_render_expr, &arc_rows, state);
+    vm.snapshot().state_toggle_block_ids().into_iter().collect()
 }

@@ -11,6 +11,7 @@
 //!   canonicalizer derives sequence numbers from iteration order.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use holon_api::ContentType;
@@ -221,10 +222,9 @@ impl BlockState {
             .values()
             .filter(|b| b.parent_id == *parent_id)
             .collect();
-        children.sort_by(|a, b| {
-            a.sequence()
-                .cmp(&b.sequence())
-                .then_with(|| a.id.cmp(&b.id))
+        children.sort_by_cached_key(|b| {
+            let b: &Block = b;
+            (b.sequence(), &b.id)
         });
         children
     }
@@ -300,6 +300,32 @@ impl BlockState {
             }
         }
         false
+    }
+
+    /// Every parent's children, for a caller that walks many subtrees of one
+    /// state: `subtree_ids` scans every block per member.
+    pub fn children_index(&self) -> HashMap<&EntityUri, Vec<&EntityUri>> {
+        let mut index: HashMap<&EntityUri, Vec<&EntityUri>> = HashMap::new();
+        for block in self.blocks.values() {
+            index.entry(&block.parent_id).or_default().push(&block.id);
+        }
+        index
+    }
+
+    /// `subtree_ids`, read from a `children_index` of this state.
+    pub fn subtree_ids_in(
+        index: &HashMap<&EntityUri, Vec<&EntityUri>>,
+        id: &EntityUri,
+    ) -> Vec<EntityUri> {
+        let mut out = vec![id.clone()];
+        let mut i = 0;
+        while i < out.len() {
+            if let Some(children) = index.get(&out[i]) {
+                out.extend(children.iter().map(|&child| child.clone()));
+            }
+            i += 1;
+        }
+        out
     }
 
     /// `id` and every block below it.

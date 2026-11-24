@@ -370,6 +370,26 @@ impl ClaimedId {
     }
 }
 
+/// The store's file-side write access: whoever holds it may import a file
+/// into the store. One per controller; a shutdown drops it to seal the import.
+pub struct IngestWriter(());
+
+impl IngestWriter {
+    /// Access for the one document a file import writes.
+    pub fn doc<'w>(&'w mut self, path: &'w Path) -> DocIngest<'w> {
+        DocIngest {
+            path,
+            _writer: std::marker::PhantomData,
+        }
+    }
+}
+
+/// [`IngestWriter`] access for one document, borrowed for one import.
+pub struct DocIngest<'w> {
+    path: &'w Path,
+    _writer: std::marker::PhantomData<&'w mut IngestWriter>,
+}
+
 /// What an ingest attempt leaves behind for the NEXT attempt at the same file.
 ///
 /// The discovery pump re-walks the whole vault on every tick, so it needs to
@@ -1013,6 +1033,9 @@ pub struct FileSyncController {
     /// Set only while [`ingest_backlog_file`](Self::ingest_backlog_file) runs,
     /// so a runtime ingest between two backlog files keeps its own barrier.
     in_backlog_ingest: bool,
+    /// Minted once and taken by the watch loop
+    /// ([`take_ingest_writer`](Self::take_ingest_writer)).
+    ingest_writer: Option<IngestWriter>,
 
     /// Write-back quarantine (dogfood 2026-07-10 region data-loss guard). A
     /// file whose ingest FAILED partway (`ingest_file` returned `Err` — a
@@ -1293,6 +1316,7 @@ impl FileSyncController {
             backlog_pending: HashSet::new(),
             backlog_feed_ids: Vec::new(),
             in_backlog_ingest: false,
+            ingest_writer: Some(IngestWriter(())),
             quarantined: HashMap::new(),
             readonly_rerender_skipped: HashSet::new(),
             gate_skips: HashMap::new(),
@@ -1521,7 +1545,9 @@ impl FileSyncController {
     /// [`finish_backlog`](Self::finish_backlog) and its creates stay out of
     /// history, as in the initial scan; everything else is a runtime
     /// ingest.
-    pub async fn ingest_backlog_file(&mut self, path: &Path) -> Result<IngestOutcome> {
+    #[tracing::instrument(skip_all, name = "FileSyncController.ingest_backlog_file")]
+    pub async fn ingest_backlog_file(&mut self, doc: DocIngest<'_>) -> Result<IngestOutcome> {
+        let path = doc.path;
         assert!(
             self.backlog_pending.remove(&CanonicalPath::new(path)),
             "{} is not pending in the backlog",
@@ -1531,6 +1557,14 @@ impl FileSyncController {
         let outcome = self.on_file_changed(path).await;
         self.in_backlog_ingest = false;
         outcome
+    }
+
+    /// The store's file-side write access for the backlog import. Its owner
+    /// seals the import by dropping it, which can only happen between files.
+    pub fn take_ingest_writer(&mut self) -> IngestWriter {
+        self.ingest_writer
+            .take()
+            .expect("the ingest writer is taken once per controller")
     }
 
     /// The backlog is ingested: one feed-convergence wait over the ids its

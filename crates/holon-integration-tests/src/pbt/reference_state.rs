@@ -439,7 +439,14 @@ impl std::fmt::Debug for ProfileEngineCache {
 /// `Clone` yields an EMPTY cell rather than sharing one: proptest clones the
 /// reference per step, and a clone must not inherit another state's set.
 #[derive(Default)]
-pub struct RenderedSetCache(std::sync::Mutex<Option<BTreeSet<EntityUri>>>);
+pub struct RenderedSetCache(std::sync::Mutex<Option<HeldRender>>);
+
+/// What one hold carries: the rendered set, and the state-toggle ids the first
+/// generator that asks interprets (two generators ask per alphabet build).
+struct HeldRender {
+    ids: BTreeSet<EntityUri>,
+    state_toggles: Option<Vec<EntityUri>>,
+}
 
 impl Clone for RenderedSetCache {
     fn clone(&self) -> Self {
@@ -1943,8 +1950,8 @@ impl ReferenceState {
     /// direct children, an all-blocks layout renders everything).
     /// Answered off a [`RenderedSetHold`] when one stands, else walked afresh.
     pub fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
-        if let Some(ids) = self.rendered_set_slot().as_ref() {
-            return ids.clone();
+        if let Some(held) = self.rendered_set_slot().as_ref() {
+            return held.ids.clone();
         }
         self.compute_main_rendered_block_ids()
     }
@@ -1954,8 +1961,8 @@ impl ReferenceState {
     /// actually asks. Reads a held set WITHOUT cloning it, so asking once per
     /// block costs no allocation.
     pub fn main_renders_block(&self, block_id: &EntityUri) -> bool {
-        if let Some(ids) = self.rendered_set_slot().as_ref() {
-            return ids.contains(block_id);
+        if let Some(held) = self.rendered_set_slot().as_ref() {
+            return held.ids.contains(block_id);
         }
         self.compute_main_rendered_block_ids().contains(block_id)
     }
@@ -1976,12 +1983,41 @@ impl ReferenceState {
             "hold_rendered_set is already held — a nested hold would be dropped by the inner \
              guard and leave the outer one reading a walked-fresh set"
         );
-        *slot = Some(ids);
+        *slot = Some(HeldRender {
+            ids,
+            state_toggles: None,
+        });
         drop(slot);
         RenderedSetHold(self)
     }
 
-    fn rendered_set_slot(&self) -> std::sync::MutexGuard<'_, Option<BTreeSet<EntityUri>>> {
+    /// The state-toggle ids of a standing hold, interpreting them on the first
+    /// ask; interpreted afresh when no hold stands.
+    pub(crate) fn held_state_toggles(
+        &self,
+        interpret: impl FnOnce() -> Vec<EntityUri>,
+    ) -> Vec<EntityUri> {
+        let held = self
+            .rendered_set_slot()
+            .as_ref()
+            .map(|held| held.state_toggles.clone());
+        match held {
+            None => interpret(),
+            Some(Some(ids)) => ids,
+            Some(None) => {
+                // The slot is unlocked while interpreting: the render asks
+                // `main_renders_block`, which locks it.
+                let ids = interpret();
+                self.rendered_set_slot()
+                    .as_mut()
+                    .expect("the hold stands while its state borrows")
+                    .state_toggles = Some(ids.clone());
+                ids
+            }
+        }
+    }
+
+    fn rendered_set_slot(&self) -> std::sync::MutexGuard<'_, Option<HeldRender>> {
         self.harness
             .rendered_main_set
             .0
