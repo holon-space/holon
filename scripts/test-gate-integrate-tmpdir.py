@@ -18,12 +18,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 INTEGRATE = HERE / "gate-integrate.sh"
 ORCH = Path.home() / ".claude/skills/orchestrator/scripts"
+JOB_END = ORCH.parent.parent / "gh-kanban/flow/job_end.py"
 KINDS = ["exit0", "exit1", "term"]
 _block = re.search(r"^TRACKS=\(\n(.*?)^\)", INTEGRATE.read_text(), re.M | re.S).group(1)
 TRACKS = [[e.split(":")[1] for e in line.strip().strip('"').split()] for line in _block.splitlines()]
@@ -93,6 +95,7 @@ def case_env(home, stubs, job_tmp, probe, case):
         # An explicit empty wrapper skips the slot script's sccache probe compile; nothing here compiles.
         RUSTC_WRAPPER="",
         FLOW_RUNTIME_DIR=str(home / "flow-runtime"), FLOW_JOB_ID=f"tmpdir-prop.{home.name}",
+        FLOW_JOB_STATUS=str(home / "status.json"), FLOW_JOB_END=str(JOB_END),
         FLOW_JOB_TMPDIR=str(job_tmp), TMPDIR=str(job_tmp), PROBE_DIR=str(job_tmp), PROBE=str(probe),
         HOLON_BUILD_SLOTS=str(case["slots"]), GATE_DISK_FLOOR_GIB="0", GATE_STEP_POLL_S="0.1",
     )
@@ -125,9 +128,21 @@ def run_case(stubs, n, case):
             'echo "gate-end exit=$rc $s" >>"$PROBE"; exit $rc')
     argv = [str(ORCH / "with-build-slot.sh"), "bash", "-c", gate, str(INTEGRATE), f"gate{n}", "1", tip]
     out = home / "out.log"
-    with out.open("w") as f:
-        subprocess.run(argv, cwd=repo, env=case_env(home, stubs, job_tmp, probe, case), stdout=f,
-                       stderr=subprocess.STDOUT, timeout=300)
+    # As `flow job run` detaches a job: a launcher in a session of its own starts it in the background and exits,
+    # so the job end finds the session without a live leader.
+    launch = subprocess.run(["/bin/sh", "-c", '"$@" >"$0" 2>&1 </dev/null & echo $!', str(out), *argv], cwd=repo,
+                            env=case_env(home, stubs, job_tmp, probe, case), capture_output=True, text=True,
+                            start_new_session=True, timeout=30, check=True)
+    pid = int(launch.stdout)
+    deadline = time.monotonic() + 300
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, f"case {n}: the job {pid} did not end, log {out}"
+        time.sleep(0.1)
+    assert (home / "status.json").exists(), f"case {n}: the job wrote no status file, log {out}"
     return probe.read_text().split("\n")[:-1], job_tmp.exists(), out
 
 
