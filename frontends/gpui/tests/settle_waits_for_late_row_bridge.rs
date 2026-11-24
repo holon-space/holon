@@ -17,7 +17,6 @@ use holon_api::ContentType;
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_gpui::bridge_hold::hold_row_bridge;
-use holon_gpui::bridge_hold::lag_row_bridge;
 use holon_gpui::prewarm_seam::time_out_next_prewarm;
 use holon_integration_tests::pbt::ReferenceState;
 use holon_integration_tests::pbt::composed::case_budget::cases_or;
@@ -51,16 +50,6 @@ use crate::pbt_harness::windowed_wide::with_windowed_wide_sut_live;
 /// the held row, and this bounds how long each case waits for that.
 const HELD_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How the new row's bridge is late.
-#[derive(Clone, Copy, Debug)]
-enum Late {
-    /// Held where the epoch relay can see it.
-    Held,
-    /// Held where the epoch relay cannot see it: a bridge woken for the
-    /// insert that has not polled it yet.
-    Unpolled,
-}
-
 /// One late-bridge case on a fresh window, opened on the loading state when
 /// `prewarm_timed_out`, and the reference state it booted: a failure on the
 /// first divergence, also when the write never reached the bridge held
@@ -68,7 +57,6 @@ enum Late {
 fn late_bridge_case(
     parent: EntityUri,
     content: String,
-    late: Late,
     prewarm_timed_out: bool,
 ) -> (ReferenceState, Result<(), TestCaseError>) {
     if prewarm_timed_out {
@@ -80,7 +68,7 @@ fn late_bridge_case(
         let initial = booted.insert(wide_e2e_windowed_ref(narrow_to_windowed_alphabet(
             sut.cap_set(),
         )));
-        let (sut, verdict) = held_write(sut, initial, parent, content, late, sink, live);
+        let (sut, verdict) = held_write(sut, initial, parent, content, sink, live);
         out = verdict;
         sut
     });
@@ -92,7 +80,6 @@ fn held_write(
     initial: &ReferenceState,
     parent: EntityUri,
     content: String,
-    late: Late,
     sink: &FrameSink,
     live: &LivePanels,
 ) -> (Option<ComposedSut<WideE2E>>, Result<(), TestCaseError>) {
@@ -129,10 +116,7 @@ fn held_write(
         let ref_state =
             <WideE2EMachine as ReferenceStateMachine>::apply(initial.clone(), &transition);
 
-        let hold = match late {
-            Late::Held => hold_row_bridge(row.clone()),
-            Late::Unpolled => lag_row_bridge(row.clone()),
-        };
+        let hold = hold_row_bridge(row.clone());
         let sut = match catch_unwind(AssertUnwindSafe(|| {
             ComposedSut::<WideE2E>::apply(sut, &ref_state, transition)
         })) {
@@ -165,7 +149,7 @@ fn held_write(
                     panic_message(p)
                 ),
             };
-            let msg = format!("{write:?} never reached the {late:?} bridge: {why}");
+            let msg = format!("{write:?} never reached the held bridge: {why}");
             sink.capture_fail("ApplyMutation", &msg);
             return (Some(sut), Err(TestCaseError::fail(msg)));
         }
@@ -197,7 +181,7 @@ fn held_write(
         };
         hold.open();
         if let Some(msg) = verdict {
-            let msg = format!("{write:?} with a {late:?} bridge: {msg}");
+            let msg = format!("{write:?} with a held bridge: {msg}");
             sink.capture_fail("ApplyMutation", &msg);
             return (Some(sut), Err(TestCaseError::fail(msg)));
         }
@@ -213,13 +197,12 @@ fn held_write(
 #[test]
 fn settle_waits_for_a_late_row_bridge() {
     let parent = EntityUri::block("parent");
-    let examples = [(Late::Unpolled, true), (Late::Held, false)];
     let mut initial = None;
-    for (late, prewarm_timed_out) in examples {
+    for prewarm_timed_out in [true, false] {
         let (booted, verdict) =
-            late_bridge_case(parent.clone(), "late bridge".to_string(), late, prewarm_timed_out);
+            late_bridge_case(parent.clone(), "late bridge".to_string(), prewarm_timed_out);
         if let Err(e) = verdict {
-            panic!("[late-bridge] static example {late:?}, pre-warm timed out {prewarm_timed_out}: {e}");
+            panic!("[late-bridge] static example, pre-warm timed out {prewarm_timed_out}: {e}");
         }
         initial = Some(booted);
     }
@@ -230,7 +213,6 @@ fn settle_waits_for_a_late_row_bridge() {
     let strategy = (
         prop::sample::select(rows),
         "[a-z]{3,8}( [a-z]{3,8})?",
-        prop_oneof![Just(Late::Held), Just(Late::Unpolled)],
         any::<bool>(),
     );
     // Each case boots a window: the static examples and the cases stay under
@@ -241,8 +223,8 @@ fn settle_waits_for_a_late_row_bridge() {
         max_shrink_iters: 4,
         ..Config::default()
     });
-    let result = runner.run(&strategy, |(parent, content, late, prewarm_timed_out)| {
-        late_bridge_case(parent, content, late, prewarm_timed_out).1
+    let result = runner.run(&strategy, |(parent, content, prewarm_timed_out)| {
+        late_bridge_case(parent, content, prewarm_timed_out).1
     });
     if let Err(e) = result {
         panic!("[late-bridge] {e}");

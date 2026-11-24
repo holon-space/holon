@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use gpui::EntityId;
@@ -95,7 +96,7 @@ impl holon_api::QueryEngine for SeqEngine {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Arrival {
     /// The watcher thread delivered nothing before the pump parked.
     Idle,
@@ -115,6 +116,9 @@ enum Arrival {
     NotifyInEveryRender(usize),
     /// From now on view `k` notifies during every render and draws a change.
     ChangeInEveryRender(usize),
+    /// A task wakes itself on every poll from now on: no later arrival comes
+    /// and the executor never parks.
+    Spin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,12 +237,19 @@ impl ScriptedWindow {
 }
 
 impl Pump for ScriptedWindow {
-    fn run_until_parked(&self) {
+    fn run_until_parked(&self, until: Instant) -> bool {
+        if matches!(self.arrivals.borrow().front(), Some(Arrival::Spin)) {
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+            return false;
+        }
         let Some(arrival) = self.arrivals.borrow_mut().pop_front() else {
-            return;
+            return true;
         };
         match arrival {
-            Arrival::Idle => return,
+            Arrival::Idle => return true,
+            Arrival::Spin => unreachable!("a spinning task stays at the front"),
             Arrival::Route(k) => self.emit(k),
             Arrival::Admit => {
                 self.engine.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -262,6 +273,7 @@ impl Pump for ScriptedWindow {
             }
         }
         self.draw();
+        true
     }
 
     fn pending_views(&self) -> Vec<EntityId> {
@@ -272,8 +284,9 @@ impl Pump for ScriptedWindow {
             .collect()
     }
 
-    fn force_frame(&self) {
+    fn force_frame(&self, _: Instant) -> bool {
         self.draw();
+        true
     }
 }
 
@@ -335,6 +348,7 @@ fn schedule() -> impl Strategy<Value = (usize, Vec<Arrival>)> {
             4 => Just(Arrival::Idle),
             4 => (0..n).prop_map(Arrival::NotifyInRender),
             1 => (0..n).prop_map(Arrival::ChangeInEveryRender),
+            1 => Just(Arrival::Spin),
         ];
         (
             proptest::collection::vec(arrival(n), 0..30),
@@ -390,9 +404,10 @@ fn views_that_never_settle(modes: &[RenderNotify]) -> Option<BTreeSet<usize>> {
 }
 
 fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), TestCaseError> {
+    let spins = arrivals.contains(&Arrival::Spin);
     let deadline = match views_that_never_settle(&modes_after_every_arrival(n, &arrivals)) {
-        None => Duration::from_secs(5),
-        Some(_) => PREDICTED_TIMEOUT,
+        None if !spins => Duration::from_secs(5),
+        _ => PREDICTED_TIMEOUT,
     };
     let window = ScriptedWindow::new(n, arrivals.clone());
     let settled = settle_window(
@@ -410,6 +425,19 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
     let epoch = match settled {
         Ok(epoch) => epoch,
         Err(SettleError::Timeout(t)) => {
+            if matches!(window.arrivals.borrow().front(), Some(Arrival::Spin)) {
+                prop_assert!(
+                    t.runnable,
+                    "{arrivals:?}: a task wakes itself on every poll, yet the timeout says the \
+                     executor parked: {}",
+                    SettleError::Timeout(t)
+                );
+                return Ok(());
+            }
+            prop_assert!(
+                !t.runnable,
+                "{arrivals:?}: the timeout says a task is runnable, yet none wakes itself"
+            );
             let Some(never_settle) = never_settle else {
                 return Err(TestCaseError::fail(format!(
                     "{arrivals:?}: every view settles once no arrival is left, yet the settle \
@@ -479,6 +507,12 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
         "{arrivals:?}: still loading {loading:?}"
     );
     Ok(())
+}
+
+#[test]
+fn settle_times_out_on_a_task_that_wakes_itself() {
+    settles_on_every_shown_view(1, vec![Arrival::Apply(0), Arrival::Route(0), Arrival::Spin])
+        .expect("the property holds");
 }
 
 /// A view's last render notifies with a change, and nothing else draws the
@@ -1333,9 +1367,10 @@ mod driver_hop {
                         }
                     ) =>
                 {
-                    // The hold stops every tokio task, so a late watcher is as
+                    // The hold stops every tokio task, so a late watcher or a
+                    // window task still running at the deadline is as
                     // legitimate a cause as a late driver.
-                    if t.owed.is_empty() {
+                    if t.owed.is_empty() && !t.runnable {
                         Err(TestCaseError::fail(format!(
                             "{step}: the settle timed out while the tokio workers were held, yet \
                              names nothing it waits for: {}",

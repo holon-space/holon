@@ -29,8 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::pbt_harness::settle::HANG_DEADLINE;
-
 use gpui::TestAppContext;
 use gpui::VisualTestContext;
 use holon_frontend::geometry::GeometryProvider;
@@ -40,6 +38,8 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::soft_keyboard;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
+
+use crate::pbt_harness::settle::HANG_DEADLINE;
 
 #[test]
 fn spurious_blur_does_not_dismiss_the_soft_keyboard() {

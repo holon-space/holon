@@ -32,6 +32,7 @@ use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 
 use super::settle::HANG_DEADLINE;
+use super::settle::Pump;
 use super::settle::SettleError;
 use super::settle::settle_window;
 
@@ -43,10 +44,17 @@ fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
     // advances on its own worker threads — no block_on needed (and driver
     // methods may already be inside a tokio context where block_on panics).
     std::thread::sleep(Duration::from_millis(10));
-    app.run_until_parked();
+    pump_until_parked(app);
     app.advance_clock(Duration::from_millis(500));
-    app.run_until_parked();
+    pump_until_parked(app);
     bounds.flush();
+}
+
+fn pump_until_parked(app: &HeadlessAppContext) {
+    assert!(
+        Pump::run_until_parked(app, std::time::Instant::now() + HANG_DEADLINE),
+        "a window task is still runnable after {HANG_DEADLINE:?} of pumping"
+    );
 }
 
 /// How many times [`SimUserDriver::send_key_chord`] re-clicks when the click
@@ -123,7 +131,7 @@ impl SimUserDriver {
     /// promote staged bounds — otherwise polls spin on a frozen frame.
     fn pump(&self) {
         let app = unsafe { &*self.app_ptr };
-        app.run_until_parked();
+        pump_until_parked(app);
         self.bounds.flush();
     }
 

@@ -13,6 +13,7 @@ use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+use holon_frontend::render_epoch::hand_off;
 
 use crate::entity_view_registry::CacheKey;
 use crate::entity_view_registry::EntityCache;
@@ -198,9 +199,13 @@ impl ReactiveShell {
         let bid = block_id.clone();
         let svc = services.clone();
         let rt = services.runtime_handle();
+        let mut stream = hand_off(
+            services.ui_watermark(),
+            format!("structure of {block_id}"),
+            structural_changes,
+        );
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
-            let mut stream = structural_changes;
             while let Some(new_tree) = stream.next().await {
                 let _ = this.update(cx, |view, cx| {
                     tracing::info!(
@@ -290,11 +295,16 @@ impl ReactiveShell {
         let item_count = items.len();
 
         // Subscribe to the chained signal vec (real items + trailing slot).
-        let signal_vec = reactive_view.children_signal_vec();
+        let mut stream = {
+            use futures_signals::signal_vec::SignalVecExt;
+            hand_off(
+                services.ui_watermark(),
+                "collection rows",
+                reactive_view.children_signal_vec().to_stream(),
+            )
+        };
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
-            use futures_signals::signal_vec::SignalVecExt;
-            let mut stream = signal_vec.to_stream();
             while let Some(diff) = stream.next().await {
                 #[cfg(feature = "pbt")]
                 crate::bridge_hold::wait_while_diff_held(&diff).await;
@@ -581,11 +591,16 @@ impl ReactiveShell {
         let mut views: Vec<Arc<ReactiveView>> = Vec::new();
         walk_for_collections(tree, &mut views);
         for view in views {
-            let signal_vec = view.items.signal_vec_cloned();
+            let mut stream = {
+                use futures_signals::signal_vec::SignalVecExt;
+                hand_off(
+                    self.services.ui_watermark(),
+                    "nested collection rows",
+                    view.items.signal_vec_cloned().to_stream(),
+                )
+            };
             let task = cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
-                use futures_signals::signal_vec::SignalVecExt;
-                let mut stream = signal_vec.to_stream();
                 while let Some(_diff) = stream.next().await {
                     #[cfg(feature = "pbt")]
                     crate::bridge_hold::wait_while_diff_held(&_diff).await;
@@ -618,13 +633,17 @@ impl ReactiveShell {
         item: &Arc<ReactiveViewModel>,
         cx: &mut Context<Self>,
     ) -> [Task<()>; 2] {
-        let props_signal = item.props.signal_cloned();
+        use futures_signals::signal::SignalExt;
+        let row = item.row_id();
+        let mut props = hand_off(
+            self.services.ui_watermark(),
+            format!("props of {row:?}"),
+            item.props.signal_cloned().to_stream(),
+        );
         let props_task = cx.spawn(async move |this, cx| {
             use futures::StreamExt;
-            use futures_signals::signal::SignalExt;
-            let mut stream = props_signal.to_stream();
-            stream.next().await; // skip initial value
-            while stream.next().await.is_some() {
+            props.next().await; // skip initial value
+            while props.next().await.is_some() {
                 match this.update(cx, |_, cx| cx.notify()) {
                     Ok(_) => {}
                     Err(_) => break,
@@ -632,17 +651,17 @@ impl ReactiveShell {
             }
         });
 
-        let data_signal = item.data.signal_cloned();
-        #[cfg(feature = "pbt")]
-        let held_row = item.row_id();
+        let mut data = hand_off(
+            self.services.ui_watermark(),
+            format!("data of {row:?}"),
+            item.data.signal_cloned().to_stream(),
+        );
         let data_task = cx.spawn(async move |this, cx| {
             use futures::StreamExt;
-            use futures_signals::signal::SignalExt;
-            let mut stream = data_signal.to_stream();
-            stream.next().await; // skip initial value (same as the props path)
-            while stream.next().await.is_some() {
+            data.next().await; // skip initial value (same as the props path)
+            while data.next().await.is_some() {
                 #[cfg(feature = "pbt")]
-                if let Some(row) = &held_row {
+                if let Some(row) = &row {
                     crate::bridge_hold::wait_while_held(row).await;
                 }
                 match this.update(cx, |_, cx| cx.notify()) {

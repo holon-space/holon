@@ -1,17 +1,22 @@
-//! The UI watermark over random schedules of routing, applying and sampling.
+//! The UI watermark over random schedules of routing, applying, handing on
+//! to a consumer on another executor, and sampling.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
+use futures::StreamExt;
+use futures::channel::mpsc;
 use holon_api::live_data::DeliveryCursor;
 use holon_api::live_data::OwedChild;
 use holon_api::live_data::reporting_cursor;
 use holon_api::live_data::reporting_to;
 use holon_frontend::render_epoch::EngineSeq;
+use holon_frontend::render_epoch::HandedOff;
 use holon_frontend::render_epoch::UiSubscription;
 use holon_frontend::render_epoch::UiWatermark;
+use holon_frontend::render_epoch::hand_off;
 use proptest::prelude::*;
 
 /// An engine that routes every change it emits at once.
@@ -69,8 +74,12 @@ enum Event {
     /// The engine emits the next change, with rows for subscription `k` only:
     /// routed to its own cursor (`None`) or to one of its live owed children.
     Route(usize, Option<proptest::sample::Index>),
-    /// Subscription `k` shows every batch routed to it and its live children.
+    /// Subscription `k` applies every batch routed to it and its live
+    /// children, and hands the result on to its consumer.
     Apply(usize),
+    /// The consumer of subscription `k` shows the item it took last, if any,
+    /// and polls for the next one.
+    Consume(usize),
     /// Subscription `k` starts a render with its own owed child cursor.
     Child(usize),
     /// A live child of subscription `k` ends unapplied, like a superseded
@@ -88,6 +97,7 @@ fn event(subscriptions: usize) -> impl Strategy<Value = Event> {
         )
             .prop_map(|(k, child)| Event::Route(k, child)),
         (0..subscriptions).prop_map(Event::Apply),
+        (0..subscriptions).prop_map(Event::Consume),
         (0..subscriptions).prop_map(Event::Child),
         (0..subscriptions, any::<proptest::sample::Index>()).prop_map(|(k, i)| Event::End(k, i)),
         Just(Event::Publish),
@@ -104,6 +114,30 @@ fn schedule() -> impl Strategy<Value = (usize, Vec<Event>)> {
     (1usize..4).prop_flat_map(|n| (Just(n), proptest::collection::vec(event(n), 0..40)))
 }
 
+/// The consumer side of one subscription: a GPUI bridge, say.
+struct Consumer {
+    stream: HandedOff<mpsc::UnboundedReceiver<u64>>,
+    taken: Option<u64>,
+    shown: u64,
+}
+
+impl Consumer {
+    fn consume(&mut self) -> std::task::Poll<()> {
+        if let Some(through) = self.taken.take() {
+            self.shown = through;
+        }
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        match self.stream.poll_next_unpin(&mut cx) {
+            std::task::Poll::Ready(Some(through)) => {
+                self.taken = Some(through);
+                std::task::Poll::Ready(())
+            }
+            std::task::Poll::Ready(None) => unreachable!("the test keeps every sender"),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
 fn take_cursor(subscription: &UiSubscription) {
     let taken = futures::executor::block_on(reporting_to(subscription.cursor().clone(), async {
         reporting_cursor()
@@ -115,10 +149,10 @@ fn take_cursor(subscription: &UiSubscription) {
 }
 
 proptest! {
-    /// A published watermark never claims a seq whose rows a subscription has
-    /// not shown, and every publish is monotonic. Once every subscription
-    /// showed what its live cursors were routed, nothing is owed: an ended
-    /// child holds no one.
+    /// A published watermark never claims a seq whose rows a subscription's
+    /// consumer has not shown, and every publish is monotonic. Once every
+    /// subscription applied what its live cursors were routed and every
+    /// consumer showed it, nothing is owed: an ended child holds no one.
     #[test]
     fn the_published_watermark_never_runs_ahead_of_a_view((n, events) in schedule()) {
         let engine = Arc::new(RoutedEngine::default());
@@ -126,6 +160,17 @@ proptest! {
         let subscriptions: Vec<UiSubscription> =
             (0..n).map(|k| watermark.register(format!("view-{k}"))).collect();
         subscriptions.iter().for_each(take_cursor);
+        let (senders, mut consumers): (Vec<_>, Vec<_>) = (0..n)
+            .map(|k| {
+                let (sender, receiver) = mpsc::unbounded();
+                let consumer = Consumer {
+                    stream: hand_off(Some(watermark.clone()), format!("consumer-{k}"), receiver),
+                    taken: None,
+                    shown: 0,
+                };
+                (sender, consumer)
+            })
+            .unzip();
         let mut routed_to: Vec<Vec<u64>> = vec![Vec::new(); n];
         let mut children: Vec<Vec<Child>> = (0..n).map(|_| Vec::new()).collect();
         let mut shown = vec![0u64; n];
@@ -158,8 +203,12 @@ proptest! {
                 }
                 Event::Apply(k) => {
                     let through = subscriptions[k].cursor().sent_with_children();
+                    senders[k].unbounded_send(through).expect("the consumer lives");
                     subscriptions[k].applied(through);
                     shown[k] = through;
+                }
+                Event::Consume(k) => {
+                    let _ = consumers[k].consume();
                 }
                 Event::Child(k) => {
                     let cursor = subscriptions[k].cursor().owed_child();
@@ -185,11 +234,11 @@ proptest! {
                         let unshown = routed_to[k]
                             .iter()
                             .chain(children[k].iter().flat_map(|child| &child.routed))
-                            .find(|s| **s > shown[k] && **s <= published);
+                            .find(|s| **s > consumers[k].shown && **s <= published);
                         prop_assert!(
                             unshown.is_none(),
-                            "published {published}, but view-{k} shows through {} and was routed {unshown:?}",
-                            shown[k]
+                            "published {published}, but consumer-{k} shows through {} and was routed {unshown:?}",
+                            consumers[k].shown
                         );
                     }
                 }
@@ -202,7 +251,10 @@ proptest! {
                 .max()
                 .copied()
                 .unwrap_or(0);
-            subscription.applied(live.max(shown[k]));
+            let through = live.max(shown[k]);
+            senders[k].unbounded_send(through).expect("the consumer lives");
+            subscription.applied(through);
+            while consumers[k].consume().is_ready() {}
         }
         prop_assert_eq!(watermark.owed(), Vec::<String>::new());
     }

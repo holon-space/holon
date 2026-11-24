@@ -347,7 +347,10 @@ impl Harness {
             );
             self.app.run_until_parked();
         }
-        self.app.force_frame();
+        assert!(
+            self.app.force_frame(Instant::now() + HANG_DEADLINE),
+            "the forced frame did not park within {HANG_DEADLINE:?}"
+        );
     }
 
     fn dispatch_nav_unsettled(&self, op: &str, params: Vec<(&str, Value)>) {
@@ -1255,7 +1258,10 @@ impl Harness {
             );
             self.app.run_until_parked();
         }
-        self.app.force_frame();
+        assert!(
+            self.app.force_frame(Instant::now() + HANG_DEADLINE),
+            "the forced frame did not park within {HANG_DEADLINE:?}"
+        );
         let gap =
             (watermark.owed().is_empty() && watermark.operations_in_flight() == 0).then(|| {
                 format!(

@@ -6,10 +6,8 @@
 //! stale frame. A content write is no such case: a row's text reads the shared
 //! row cell at paint, so any repaint shows it.
 //!
-//! An engaged hold is a bridge in flight: the epoch relay publishes no new
-//! watermark while one is engaged, as a bridge that awaits before its apply
-//! would need. A lag is a hold that the relay cannot see: it stands for a
-//! bridge woken for a diff that has not polled it yet.
+//! The hold sits between a bridge taking a change and applying it, where the
+//! epoch relay learns of it only through the bridge's hand-off.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,12 +26,9 @@ use holon_frontend::ReactiveViewModel;
 struct Gate {
     opened: Mutable<bool>,
     engaged: Arc<AtomicBool>,
-    announced: bool,
 }
 
 static HOLDS: LazyLock<Mutex<HashMap<EntityUri, Gate>>> = LazyLock::new(Default::default);
-static RELEASES: LazyLock<tokio::sync::watch::Sender<u64>> =
-    LazyLock::new(|| tokio::sync::watch::channel(0).0);
 
 /// Shut until [`BridgeHold::open`] or drop.
 #[must_use = "dropping the hold opens it"]
@@ -44,20 +39,9 @@ pub struct BridgeHold {
 
 /// Hold `row`'s data bridge from its next data change on.
 pub fn hold_row_bridge(row: EntityUri) -> BridgeHold {
-    shut(row, true)
-}
-
-/// Hold `row`'s data bridge like [`hold_row_bridge`], but leave it out of
-/// [`engaged_rows`].
-pub fn lag_row_bridge(row: EntityUri) -> BridgeHold {
-    shut(row, false)
-}
-
-fn shut(row: EntityUri, announced: bool) -> BridgeHold {
     let gate = Gate {
         opened: Mutable::new(false),
         engaged: Arc::default(),
-        announced,
     };
     let previous = HOLDS.lock().unwrap().insert(row.clone(), gate.clone());
     assert!(previous.is_none(), "{row} already has a bridge hold");
@@ -78,36 +62,18 @@ impl Drop for BridgeHold {
     fn drop(&mut self) {
         HOLDS.lock().unwrap().remove(&self.row);
         self.gate.opened.set(true);
-        RELEASES.send_modify(|n| *n += 1);
     }
 }
 
-/// The rows whose bridge waits on a shut hold that is not a lag.
-pub fn engaged_rows() -> Vec<EntityUri> {
-    waiting_rows(|gate| gate.announced)
-}
-
-/// The rows whose bridge waits on a shut hold or lag.
+/// The rows whose bridge waits on a shut hold.
 pub fn held_rows() -> Vec<EntityUri> {
-    waiting_rows(|_| true)
-}
-
-fn waiting_rows(keep: impl Fn(&Gate) -> bool) -> Vec<EntityUri> {
     HOLDS
         .lock()
         .unwrap()
         .iter()
-        .filter(|(_, gate)| keep(gate) && gate.engaged.load(Ordering::SeqCst))
+        .filter(|(_, gate)| gate.engaged.load(Ordering::SeqCst))
         .map(|(row, _)| row.clone())
         .collect()
-}
-
-/// Resolves after the next hold opens.
-pub(crate) fn released() -> impl std::future::Future<Output = ()> + 'static {
-    let mut rx = RELEASES.subscribe();
-    async move {
-        rx.changed().await.expect("the release sender is static");
-    }
 }
 
 /// Waits while `row` has a shut hold.

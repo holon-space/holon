@@ -2,11 +2,18 @@
 //! applied, and the epoch a frontend stamps on each committed frame.
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Wake;
+use std::task::Waker;
 
+use futures::Stream;
 use holon_api::live_data::DeliveryCursor;
 
 /// A frontend's count of committed frames.
@@ -38,11 +45,13 @@ type Checks = (u64, BTreeMap<u64, (String, Pending)>);
 /// The engine seq the UI subscriptions of one session have applied.
 ///
 /// A subscription holds the watermark until it applied its first event, and
-/// below the first batch it owes after that.
+/// below the first batch it owes after that. A hand-off holds it where it is
+/// while a consumer has not yet applied what its subscription handed on.
 pub struct UiWatermark {
     engine: Option<Arc<dyn holon_api::QueryEngine>>,
     subscriptions: Mutex<(u64, BTreeMap<u64, Entry>)>,
     checks: Mutex<Checks>,
+    handoffs: Mutex<Checks>,
     published: AtomicU64,
     changed: tokio::sync::watch::Sender<u64>,
 }
@@ -55,6 +64,7 @@ impl UiWatermark {
             engine,
             subscriptions: Mutex::new((0, BTreeMap::new())),
             checks: Mutex::new((0, BTreeMap::new())),
+            handoffs: Mutex::new((0, BTreeMap::new())),
             published: AtomicU64::new(0),
             changed: tokio::sync::watch::channel(0).0,
         })
@@ -103,20 +113,58 @@ impl UiWatermark {
         }
     }
 
+    /// A consumer that applies, on its own executor, what a UI subscription
+    /// handed on: while `pending()` holds, [`Self::sample`] stays at the
+    /// published seq. The consumer calls [`Self::poke`] after each apply.
+    pub fn register_handoff(
+        self: &Arc<Self>,
+        key: impl Into<String>,
+        pending: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> UiHandoff {
+        let mut guard = self.handoffs.lock().unwrap();
+        let (next, handoffs) = &mut *guard;
+        let id = *next;
+        *next += 1;
+        handoffs.insert(id, (key.into(), Arc::new(pending)));
+        UiHandoff {
+            watermark: self.clone(),
+            id,
+        }
+    }
+
+    /// The hand-offs whose consumer has not applied what it was handed.
+    fn pending_handoffs(&self) -> Vec<String> {
+        // Cloned out of the lock: a hand-off takes its consumer's locks.
+        let handoffs: Vec<(String, Pending)> =
+            self.handoffs.lock().unwrap().1.values().cloned().collect();
+        handoffs
+            .into_iter()
+            .filter(|(_, pending)| pending())
+            .map(|(key, _)| key)
+            .collect()
+    }
+
     /// The seq the UI could show now. Reads the routed seq before the
     /// subscriptions, so a batch routed in between is still counted as owed.
     pub fn sample(&self) -> anyhow::Result<EngineSeq> {
         let EngineSeq(routed) = self.routed()?;
         let published = self.published.load(Ordering::Acquire);
-        let (_, entries) = &*self.subscriptions.lock().unwrap();
-        let floor = entries
-            .values()
-            .map(|entry| match entry.primed {
-                true => entry.cursor.owed_floor().unwrap_or(u64::MAX),
-                false => published,
-            })
-            .fold(routed, u64::min);
-        Ok(EngineSeq(floor))
+        let floor = {
+            let (_, entries) = &*self.subscriptions.lock().unwrap();
+            entries
+                .values()
+                .map(|entry| match entry.primed {
+                    true => entry.cursor.owed_floor().unwrap_or(u64::MAX),
+                    false => published,
+                })
+                .fold(routed, u64::min)
+        };
+        // Read after the subscriptions: a subscription hands on before it
+        // reports applied, so a hand-off for any seq counted above is seen.
+        match self.pending_handoffs().is_empty() {
+            true => Ok(EngineSeq(floor)),
+            false => Ok(EngineSeq(floor.min(published))),
+        }
     }
 
     /// The seq through which the engine routed every change to its watchers.
@@ -174,6 +222,11 @@ impl UiWatermark {
                 .into_iter()
                 .filter(|(_, pending)| pending())
                 .map(|(key, _)| format!("{key}: not applied yet")),
+        );
+        owed.extend(
+            self.pending_handoffs()
+                .into_iter()
+                .map(|key| format!("{key}: handed on, not applied yet")),
         );
         owed
     }
@@ -246,5 +299,100 @@ impl Drop for UiCheck {
     fn drop(&mut self) {
         self.watermark.checks.lock().unwrap().1.remove(&self.id);
         self.watermark.poke();
+    }
+}
+
+/// One registered hand-off; dropping it unregisters.
+pub struct UiHandoff {
+    watermark: Arc<UiWatermark>,
+    id: u64,
+}
+
+impl Drop for UiHandoff {
+    fn drop(&mut self) {
+        self.watermark.handoffs.lock().unwrap().1.remove(&self.id);
+        self.watermark.poke();
+    }
+}
+
+#[derive(Default)]
+struct HandoffFlags {
+    /// The producer woke the consumer, or the consumer holds the item it
+    /// took last: both end with a poll that finds nothing ready.
+    owed: AtomicBool,
+    /// The consumer is inside a poll.
+    polling: AtomicBool,
+}
+
+struct FlagWaker {
+    flags: Arc<HandoffFlags>,
+    inner: Waker,
+}
+
+impl Wake for FlagWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.flags.owed.store(true, Ordering::SeqCst);
+        self.inner.wake_by_ref();
+    }
+}
+
+/// `stream` as a UI consumer reads it on its own executor, one item applied
+/// before it polls for the next: the watermark holds from the producer's wake
+/// until a poll finds nothing ready. Without a watermark nothing is held.
+pub fn hand_off<S: Stream + Unpin>(
+    watermark: Option<Arc<UiWatermark>>,
+    key: impl Into<String>,
+    stream: S,
+) -> HandedOff<S> {
+    let flags = Arc::new(HandoffFlags {
+        owed: AtomicBool::new(true),
+        polling: AtomicBool::new(false),
+    });
+    let registration = watermark.map(|watermark| {
+        let pending = flags.clone();
+        let handoff = watermark.register_handoff(key, move || {
+            pending.owed.load(Ordering::SeqCst) || pending.polling.load(Ordering::SeqCst)
+        });
+        (watermark, handoff)
+    });
+    HandedOff {
+        stream,
+        flags,
+        registration,
+    }
+}
+
+/// A stream read through [`hand_off`]; dropping it unregisters.
+pub struct HandedOff<S> {
+    stream: S,
+    flags: Arc<HandoffFlags>,
+    registration: Option<(Arc<UiWatermark>, UiHandoff)>,
+}
+
+impl<S: Stream + Unpin> Stream for HandedOff<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        let flags = self.flags.clone();
+        flags.polling.store(true, Ordering::SeqCst);
+        flags.owed.store(false, Ordering::SeqCst);
+        let waker = Waker::from(Arc::new(FlagWaker {
+            flags: flags.clone(),
+            inner: cx.waker().clone(),
+        }));
+        let polled = Pin::new(&mut self.stream).poll_next(&mut Context::from_waker(&waker));
+        let took = matches!(polled, Poll::Ready(Some(_)));
+        if took {
+            flags.owed.store(true, Ordering::SeqCst);
+        }
+        flags.polling.store(false, Ordering::SeqCst);
+        if let (false, Some((watermark, _))) = (took, &self.registration) {
+            watermark.poke();
+        }
+        polled
     }
 }

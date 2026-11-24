@@ -538,9 +538,13 @@ impl EditorView {
                     (content, echo_seq, task_state)
                 })
                 .dedupe_cloned();
+            let mut stream = holon_frontend::render_epoch::hand_off(
+                services.ui_watermark(),
+                format!("editor data of {row_uri}"),
+                signal.to_stream(),
+            );
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
-                let mut stream = signal.to_stream();
                 // OP-VERSIONED ECHO SUPPRESSION (replaces the old
                 // `user_idle`/`last_synced` heuristic, which mistook the moment
                 // between two keystrokes for "idle" and therefore let a stale
@@ -622,9 +626,13 @@ impl EditorView {
                         .to_string()
                 })
                 .dedupe_cloned();
+            let mut stream = holon_frontend::render_epoch::hand_off(
+                services.ui_watermark(),
+                format!("editor task state of {row_uri}"),
+                signal.to_stream(),
+            );
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
-                let mut stream = signal.to_stream();
                 while stream.next().await.is_some() {
                     if this.upgrade().is_none() {
                         break;

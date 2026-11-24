@@ -472,6 +472,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-keyword-surface-stale-done-text`
 - `windowed-nested-page-no-chevron-under-load`
 - `windowed-previous-run-toast-box-under-load`
+- `windowed-quick-open-enter-slot-pre-warm-timeout`
 - `windowed-quick-open-fresh-slot-first-key-lost`
 - `windowed-quick-open-fresh-slot-pre-warm-timeout`
 - `windowed-quick-open-typing-slot-pre-warm-timeout`

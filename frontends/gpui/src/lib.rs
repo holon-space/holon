@@ -20,10 +20,10 @@ pub mod inspector;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 pub mod navigation_state;
-#[cfg(feature = "pbt")]
-pub mod prewarm_seam;
 #[cfg(debug_assertions)]
 pub mod oracles_ui;
+#[cfg(feature = "pbt")]
+pub mod prewarm_seam;
 pub mod reactive_vm_poc;
 pub mod render;
 pub mod reset;
@@ -928,23 +928,10 @@ fn spawn_epoch_relay(
     cx.spawn(async move |this, cx| {
         loop {
             let changed = watermark.changed();
-            #[cfg(feature = "pbt")]
-            let changed = futures::future::select(
-                Box::pin(changed),
-                Box::pin(crate::bridge_hold::released()),
-            );
             let reached = watermark
                 .sample()
                 .expect("the query engine reports its routed seq");
-            tokio::task::yield_now().await;
-            #[cfg(feature = "pbt")]
-            let in_flight = !crate::bridge_hold::engaged_rows().is_empty();
-            #[cfg(not(feature = "pbt"))]
-            let in_flight = false;
-            if !in_flight
-                && watermark.publish(reached)
-                && this.update(cx, |_, cx| cx.notify()).is_err()
-            {
+            if watermark.publish(reached) && this.update(cx, |_, cx| cx.notify()).is_err() {
                 return;
             }
             changed.await;
@@ -2474,41 +2461,45 @@ fn spawn_root_layout_signal(
     cx: &mut App,
 ) {
     let root_uri = holon_api::root_layout_block_uri();
-    let root_signal = engine.watch_signal(&root_uri);
+    let mut root_layouts = {
+        use futures_signals::signal::SignalExt;
+        holon_frontend::render_epoch::hand_off(
+            Some(engine.ui_watermark().clone()),
+            "root layout",
+            engine.watch_signal(&root_uri).to_stream(),
+        )
+    };
     let driver_services: Arc<dyn BuilderServices> = engine.clone();
     cx.spawn(async move |cx| {
-        use futures_signals::signal::SignalExt;
-        root_signal
-            .for_each(move |rvm| {
-                // The root layout is re-interpreted on every emission, so any
-                // collection it carries — the action bar's ops row — arrives
-                // with a fresh, unstarted `ReactiveView`. Without this its
-                // driver never subscribes and the collection stays empty
-                // forever, which is what `ReactiveShell` does for the trees it
-                // owns.
-                holon_frontend::reactive_view::start_reactive_views(
-                    &rvm,
-                    &driver_services,
-                    &driver_services.runtime_handle(),
-                );
-                let _ = cx.update_window(wh, |_, _, cx| {
-                    app_model.update(cx, |m, cx| {
-                        // Only the loop bound to the currently-active engine
-                        // drives the window; stale loops (prior rebinds) no-op.
-                        if !Arc::ptr_eq(&m.engine, &engine) {
-                            return;
-                        }
-                        m.root_vm = Arc::new(rvm);
-                        m.reconcile_root_live_blocks(cx);
-                        m.view_model =
-                            resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
-                        m.nav.set_root(m.root_vm.clone());
-                        cx.notify();
-                    });
+        use futures::StreamExt;
+        while let Some(rvm) = root_layouts.next().await {
+            // The root layout is re-interpreted on every emission, so any
+            // collection it carries — the action bar's ops row — arrives
+            // with a fresh, unstarted `ReactiveView`. Without this its
+            // driver never subscribes and the collection stays empty
+            // forever, which is what `ReactiveShell` does for the trees it
+            // owns.
+            holon_frontend::reactive_view::start_reactive_views(
+                &rvm,
+                &driver_services,
+                &driver_services.runtime_handle(),
+            );
+            let _ = cx.update_window(wh, |_, _, cx| {
+                app_model.update(cx, |m, cx| {
+                    // Only the loop bound to the currently-active engine
+                    // drives the window; stale loops (prior rebinds) no-op.
+                    if !Arc::ptr_eq(&m.engine, &engine) {
+                        return;
+                    }
+                    m.root_vm = Arc::new(rvm);
+                    m.reconcile_root_live_blocks(cx);
+                    m.view_model =
+                        resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
+                    m.nav.set_root(m.root_vm.clone());
+                    cx.notify();
                 });
-                async {}
-            })
-            .await;
+            });
+        }
     })
     .detach();
 }
