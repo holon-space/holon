@@ -2122,10 +2122,11 @@ pub struct UiState {
     /// `focused_block`, which also moves on same-page block clicks (which
     /// must NOT reset scroll). Not a render signal; polled during render.
     main_nav_generation: Mutable<u64>,
-    /// Bumped by every op that can move the `main` region's cursor — including
-    /// `go_back`/`go_forward`/`activate`/`close`, which move it WITHOUT a page
-    /// change. Chrome that mirrors the view root (the breadcrumb) keys on this;
-    /// scroll reset must not, or a tab switch would lose the tab's scroll.
+    /// Bumped once a `main`-region navigation op has committed — including
+    /// `go_back`/`go_forward`/`activate`/`close`, which move the cursor WITHOUT
+    /// a page change — so a reader woken by it reads the new view root. Chrome
+    /// that mirrors the view root (the breadcrumb) keys on this; scroll reset
+    /// must not, or a tab switch would lose the tab's scroll.
     main_view_generation: Mutable<u64>,
     /// View-local expansion state for `expand_toggle` widgets, keyed by the
     /// widget's `target_id` (bare block id). Purely a VIEW concern (RATIFIED
@@ -2284,14 +2285,11 @@ impl UiState {
         self.main_nav_generation.get()
     }
 
-    /// Record that a *page navigation* landed in the `main` region. Bumps
-    /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll,
-    /// and [`Self::main_view_generation`] because a page change also moves the
-    /// view root.
+    /// Record that a *page navigation* was dispatched into the `main` region,
+    /// so the frontend resets main-panel scroll.
     fn bump_main_nav(&self) {
         self.main_nav_generation
             .set(self.main_nav_generation.get() + 1);
-        self.bump_main_view();
     }
 
     /// Current main-region view generation; see [`Self::main_view_generation`].
@@ -2305,10 +2303,22 @@ impl UiState {
         self.main_view_generation.signal()
     }
 
-    /// Record that the `main` region's cursor may have moved.
-    fn bump_main_view(&self) {
-        self.main_view_generation
-            .set(self.main_view_generation.get() + 1);
+    /// The [`Self::main_view_generation`] handle to bump once `intent` has
+    /// committed, if it is a navigation of the `main` region. `close` names no
+    /// region and counts as one, so a bump means the root MAY have moved.
+    fn main_view_bump_on_commit(
+        &self,
+        intent: &crate::operations::OperationIntent,
+    ) -> Option<Mutable<u64>> {
+        if intent.entity_name != "navigation" || NavigationOp::from_str(&intent.op_name).is_err() {
+            return None;
+        }
+        let region = intent
+            .params
+            .get("region")
+            .and_then(|v| v.as_string())
+            .unwrap_or("main");
+        (region == "main").then(|| self.main_view_generation.clone())
     }
 
     /// SPIKE: set the focused occurrence alongside the focused block. `None`
@@ -4289,6 +4299,7 @@ impl BuilderServices for ReactiveEngine {
         // A `main` navigation must leave the keyboard live: seat the caret in
         // the destination's first editable row (D97.a). The root itself
         // renders through the editor-less `page_title` variant.
+        let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4368,6 +4379,9 @@ impl BuilderServices for ReactiveEngine {
                         // this arm).
                         if let Some(target) = &clear_focus_target {
                             clear_focus_after_delete(&focused_block, target);
+                        }
+                        if let Some(view) = &main_view_bump {
+                            *view.lock_mut() += 1;
                         }
                         journal.settle(journal_seq, Ok(()));
                     }
@@ -4457,6 +4471,7 @@ impl BuilderServices for ReactiveEngine {
             return Box::pin(std::future::ready(Ok(())));
         }
 
+        let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4545,6 +4560,9 @@ impl BuilderServices for ReactiveEngine {
                 if let Some(target) = &clear_focus_target {
                     clear_focus_after_delete(&focused_block, target);
                 }
+                if let Some(view) = &main_view_bump {
+                    *view.lock_mut() += 1;
+                }
                 Ok(())
             }
             .instrument(dispatch_span),
@@ -4559,6 +4577,7 @@ impl BuilderServices for ReactiveEngine {
     > {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
+        let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4603,6 +4622,9 @@ impl BuilderServices for ReactiveEngine {
                         if let Some(target) = &clear_focus_target {
                             clear_focus_after_delete(&focused_block, target);
                         }
+                        if let Some(view) = &main_view_bump {
+                            *view.lock_mut() += 1;
+                        }
                         journal.settle(journal_seq, Ok(()));
                         Ok(response.delivery)
                     }
@@ -4642,6 +4664,7 @@ impl BuilderServices for ReactiveEngine {
     > {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
+        let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4680,6 +4703,9 @@ impl BuilderServices for ReactiveEngine {
                             &op_name,
                             &outcome.response,
                         );
+                        if let Some(view) = &main_view_bump {
+                            *view.lock_mut() += 1;
+                        }
                         journal.settle(journal_seq, Ok(()));
                         Ok(outcome.response)
                     }
@@ -5442,29 +5468,14 @@ fn seat_caret_for_navigation(
         // naming a target, so `focused_block` cannot be mirrored here (knowing
         // the target needs a `navigation_history` read) and
         // `main_nav_generation` must NOT move (the switched-to tab keeps its
-        // scroll). The view root does move, hence `main_view_generation`.
-        //
-        // `close` carries no region and names a row, not a cursor, so it bumps
-        // without knowing whether the cursor moved. Readers must therefore
-        // treat a bump as "the root MAY have moved" and compare the resolved
-        // root before acting on it (`breadcrumb::resolve_trail`).
+        // scroll).
         Ok(
             NavigationOp::FocusPin
             | NavigationOp::Close
             | NavigationOp::GoBack
             | NavigationOp::GoForward
             | NavigationOp::Activate,
-        ) => {
-            let region = intent
-                .params
-                .get("region")
-                .and_then(|v| v.as_string())
-                .unwrap_or("main");
-            if region == "main" {
-                ui_state.bump_main_view();
-            }
-            None
-        }
+        ) => None,
         // A non-navigation op; the `entity_name` guard above keeps it out here.
         Err(_) => None,
     }
@@ -5703,7 +5714,6 @@ async fn navigate_to_created_page(
     if reset_scroll {
         nav.main_nav.set(nav.main_nav.get() + 1);
     }
-    nav.main_view.set(nav.main_view.get() + 1);
 
     let nav_params = [
         (
@@ -5725,6 +5735,9 @@ async fn navigate_to_created_page(
         )
         .await
         .context("navigation.focus after create_page_from_link")?;
+    if region == "main" {
+        *nav.main_view.lock_mut() += 1;
+    }
     Ok(())
 }
 

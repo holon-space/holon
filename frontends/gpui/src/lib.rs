@@ -1135,9 +1135,8 @@ impl Render for HolonApp {
                 let ui = self.app_model.read(cx).engine.ui_state();
                 (ui.focused_block(), ui.main_view_generation())
             };
-            // A dropped stale read asks to be retried: the generation bumps
-            // when the op is DISPATCHED, so the first read can beat the write
-            // to the database. Re-reading on the next frame lets it catch up.
+            // A read dropped while a tab write was in flight asks to be
+            // retried once that write completes.
             let recheck = self.tab_strip.read(cx).needs_recheck;
             if self.last_tab_strip_focus.as_ref() != Some(&key) || recheck {
                 self.last_tab_strip_focus = Some(key);

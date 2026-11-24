@@ -249,6 +249,7 @@ frontends/gpui/tests/mcp_write_repaints_windowed.rs	liveness	Instant::now() < de
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	lower-bound	elapsed >= CLICK_BOUNDS_TIMEOUT,
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	harness	elapsed < CLICK_BOUNDS_TIMEOUT * 2,
+frontends/gpui/tests/overlay_sidebar_dismisses_windowed.rs	liveness	start.elapsed() < HANG_DEADLINE,
 frontends/gpui/tests/pbt_harness/settle.rs	harness	deadline <= HANG_DEADLINE,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
