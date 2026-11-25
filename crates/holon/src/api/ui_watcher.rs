@@ -1356,7 +1356,8 @@ mod handover {
                 failures.push(format!("{name}: {e}"));
             }
         }
-        // An under-claim shows only in a few schedules: 256 cases missed it.
+        // An under-claim shows only in a few schedules, so the case count is
+        // high.
         let mut runner = TestRunner::new(Config {
             cases: 2048,
             failure_persistence: None,
