@@ -18,12 +18,18 @@
 //! production can each supply their own without this module pulling in those
 //! dependencies or risking divergence.
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_api::live_data::DeliveryCursor;
+use holon_api::live_data::reporting_to;
+use holon_api::streaming::BatchWithMetadata;
 use holon_core::storage::block_query::BlockQuerySource;
 use holon_core::storage::block_query::BlockSnapshot;
 use holon_core::storage::block_query::FocusRoot;
@@ -32,6 +38,7 @@ use holon_core::storage::types::StorageEntity;
 
 use crate::api::BackendEngine;
 use crate::storage::BLOCK_READ_TABLE;
+use crate::storage::turso::RowChangeStream;
 use crate::sync::LiveData;
 
 /// A parsed block paired with the substrate `sort_key` that orders it among its
@@ -106,10 +113,10 @@ impl TursoBlockQuerySource {
         // among them and drives the canonical sibling re-order at snapshot
         // time.
         let blocks_sql = format!("SELECT * FROM {BLOCK_READ_TABLE}");
-        let blocks_watch = engine.watch_view(&blocks_sql).await.map_err(to_boxed_err)?;
+        let (blocks_initial, blocks_stream) = watch_reporting(engine, &blocks_sql).await?;
         let parse_for_mirror = Arc::clone(&parse_block);
         let blocks = LiveData::new(
-            blocks_watch.initial_rows,
+            blocks_initial,
             |row| {
                 row.get("id")
                     .and_then(|v| v.as_string())
@@ -126,14 +133,12 @@ impl TursoBlockQuerySource {
                 Ok(OrderedBlock { block, sort_key })
             },
         );
-        blocks.subscribe("block", blocks_watch.stream);
+        blocks.subscribe("block", blocks_stream);
 
-        let roots_watch = engine
-            .watch_view("SELECT region, root_id FROM focus_roots")
-            .await
-            .map_err(to_boxed_err)?;
+        let (roots_initial, roots_stream) =
+            watch_reporting(engine, "SELECT region, root_id FROM focus_roots").await?;
         let focus_roots = LiveData::new(
-            roots_watch.initial_rows,
+            roots_initial,
             |row| {
                 let region = row
                     .get("region")
@@ -158,10 +163,7 @@ impl TursoBlockQuerySource {
         );
         // The source name is what tells the e2e correlator this mirror's rows
         // are focus roots (a navigation's observable), not block rows.
-        focus_roots.subscribe(
-            holon_api::latency_e2e::FOCUS_ROOTS_SOURCE,
-            roots_watch.stream,
-        );
+        focus_roots.subscribe(holon_api::latency_e2e::FOCUS_ROOTS_SOURCE, roots_stream);
 
         Ok(Self {
             blocks,
@@ -226,6 +228,51 @@ pub fn register_turso_block_query_source(injector: &fluxdi::Injector) {
                 .expect("register_turso_block_query_source: watch_default failed"),
         ) as Arc<dyn BlockQuerySource>
     }));
+}
+
+/// Open a watch whose stream reports each batch its consumer applied to the
+/// engine's delivery bookkeeping, so a settle on the engine waits for the
+/// mirror.
+async fn watch_reporting(
+    engine: &BackendEngine,
+    sql: &str,
+) -> BlockQueryResult<(Vec<StorageEntity>, AppliedOnNextPull<RowChangeStream>)> {
+    let cursor = Arc::new(DeliveryCursor::default());
+    let watch = reporting_to(cursor.clone(), engine.watch_view(sql))
+        .await
+        .map_err(to_boxed_err)?;
+    let stream = AppliedOnNextPull {
+        inner: watch.stream,
+        cursor,
+        handed: None,
+    };
+    Ok((watch.initial_rows, stream))
+}
+
+/// Reports a batch applied when its consumer pulls the next one: the
+/// `LiveData` actor pulls only after it applied the batch it holds.
+struct AppliedOnNextPull<S> {
+    inner: S,
+    cursor: Arc<DeliveryCursor>,
+    handed: Option<u64>,
+}
+
+impl<S, C> tokio_stream::Stream for AppliedOnNextPull<S>
+where
+    S: tokio_stream::Stream<Item = BatchWithMetadata<C>> + Unpin,
+{
+    type Item = BatchWithMetadata<C>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(seq) = self.handed.take() {
+            self.cursor.applied_through(seq);
+        }
+        let next = Pin::new(&mut self.inner).poll_next(cx);
+        if let Poll::Ready(Some(batch)) = &next {
+            self.handed = Some(batch.metadata.seq);
+        }
+        next
+    }
 }
 
 fn value_as_string(v: &Value) -> Option<String> {

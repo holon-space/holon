@@ -18,15 +18,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Barrier;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
+use std::time::Duration;
 
+use holon::api::QueryEngine;
 use holon::api::backend_engine::BackendEngine;
 use holon::core::SqlOperationProvider;
 use holon::di::test_helpers::create_test_engine_with_path;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
+use holon::sync::turso_block_query_source::BlockRowParser;
 use holon::sync::turso_block_query_source::TursoBlockQuerySource;
 use holon_api::BlockContent;
 use holon_api::ContentType;
@@ -43,6 +47,7 @@ use holon_block_roundtrip_testing::assert_sibling_order_matches;
 use holon_block_roundtrip_testing::build_blocks;
 use holon_block_roundtrip_testing::root_headlines_strategy;
 use holon_core::OperationProvider;
+use holon_core::storage::BlockQuery;
 use holon_core::storage::BlockQuerySource;
 use holon_core::storage::types::StorageEntity;
 use holon_loro::LoroBackend;
@@ -428,5 +433,354 @@ fn shared_engine_isolates_the_two_properties() {
             .join()
             .expect("agreement thread")
             .expect("agreement case reads only its own blocks");
+    });
+}
+
+/// How long the slow mirror takes to apply one row: far beyond the quiet
+/// window `snapshot()` waits for, so a read that trusts quiet reads stale.
+const SLOW_APPLY: Duration = Duration::from_millis(300);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Apply {
+    Open,
+    Slow,
+    Held,
+}
+
+/// Switches how fast the block mirror applies, by gating its injected parser.
+struct ApplyGate {
+    mode: Mutex<Apply>,
+    changed: Condvar,
+}
+
+impl ApplyGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            mode: Mutex::new(Apply::Open),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn set(&self, mode: Apply) {
+        *self.mode.lock().unwrap() = mode;
+        self.changed.notify_all();
+    }
+
+    fn pass(&self) {
+        let mut mode = self.mode.lock().unwrap();
+        while *mode == Apply::Held {
+            mode = self.changed.wait(mode).unwrap();
+        }
+        if *mode == Apply::Slow {
+            drop(mode);
+            std::thread::sleep(SLOW_APPLY);
+        }
+    }
+
+    fn parser(self: &Arc<Self>) -> BlockRowParser {
+        let gate = Arc::clone(self);
+        Arc::new(move |row| {
+            gate.pass();
+            Block::try_from(row.clone())
+        })
+    }
+}
+
+/// The engine settle: poll what the engine still owes until nothing is owed on
+/// two reads in a row. Returns the reads it took, or the owed stages when
+/// `hang_after` passes first.
+async fn settle(engine: &BackendEngine, hang_after: Duration) -> Result<u32, Vec<String>> {
+    let deadline = tokio::time::Instant::now() + hang_after;
+    let mut reads = 0;
+    let mut clear_in_a_row = 0;
+    loop {
+        reads += 1;
+        let owed = engine.delivery_owed().await.expect("read delivery_owed");
+        if owed.is_empty() {
+            clear_in_a_row += 1;
+            if clear_in_a_row == 2 {
+                return Ok(reads);
+            }
+        } else {
+            clear_in_a_row = 0;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(owed);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// One write of the case. `Ui` and `Sql` are the app and raw-SQL writes of the
+/// org-suite settle PBT; its external org edit needs the org ingest, which
+/// this crate does not run. A target index picks a live block modulo the
+/// live count; with no live block the write creates one instead.
+#[derive(Clone, Debug)]
+enum Write {
+    Create(String),
+    Ui(usize, String),
+    Sql(usize, String),
+    Delete(usize),
+    Navigate(usize),
+}
+
+fn write() -> impl Strategy<Value = Write> {
+    prop_oneof![
+        "[a-z]{3,10}".prop_map(Write::Create),
+        (any::<usize>(), "[a-z]{3,10}").prop_map(|(i, c)| Write::Ui(i, c)),
+        (any::<usize>(), "[a-z]{3,10}").prop_map(|(i, c)| Write::Sql(i, c)),
+        any::<usize>().prop_map(Write::Delete),
+        any::<usize>().prop_map(Write::Navigate),
+    ]
+}
+
+/// What the case wrote: live blocks in creation order, and the focus roots it
+/// opened in its own region.
+struct WriteModel {
+    doc_id: EntityUri,
+    region: String,
+    blocks: Vec<(EntityUri, String)>,
+    roots: std::collections::BTreeSet<String>,
+}
+
+async fn apply_write(
+    engine: &BackendEngine,
+    model: &mut WriteModel,
+    write: &Write,
+) -> Result<(), TestCaseError> {
+    let provider = SqlOperationProvider::with_edge_fields(
+        engine.db_handle().clone(),
+        BLOCK_WRITE_TABLE.to_string(),
+        "block".to_string(),
+        "block".to_string(),
+        BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
+    let entity: EntityName = "block".to_string().into();
+    let live = model.blocks.len();
+    match write {
+        Write::Ui(i, content) if live > 0 => {
+            let id = model.blocks[i % live].0.clone();
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.as_str().to_string()));
+            params.insert("content".into(), Value::String(content.clone()));
+            provider
+                .execute_operation(&entity, "update", params)
+                .await
+                .map_err(failed(format!("update {id}")))?;
+            model.blocks[i % live].1 = content.clone();
+        }
+        Write::Sql(i, content) if live > 0 => {
+            let id = model.blocks[i % live].0.clone();
+            engine
+                .db_handle()
+                .execute(
+                    &format!("UPDATE {BLOCK_WRITE_TABLE} SET content = ? WHERE id = ?"),
+                    vec![
+                        turso::Value::Text(content.clone()),
+                        turso::Value::Text(id.as_str().to_string()),
+                    ],
+                )
+                .await
+                .map_err(failed(format!("raw update {id}")))?;
+            model.blocks[i % live].1 = content.clone();
+        }
+        Write::Delete(i) if live > 0 => {
+            let (id, _) = model.blocks.remove(i % live);
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.as_str().to_string()));
+            provider
+                .execute_operation(&entity, "delete", params)
+                .await
+                .map_err(failed(format!("delete {id}")))?;
+        }
+        Write::Navigate(i) => {
+            let root = if live > 0 {
+                model.blocks[i % live].0.clone()
+            } else {
+                model.doc_id.clone()
+            };
+            engine
+                .db_handle()
+                .execute(
+                    "INSERT INTO navigation_history (region, block_id) VALUES (?, ?)",
+                    vec![
+                        turso::Value::Text(model.region.clone()),
+                        turso::Value::Text(root.as_str().to_string()),
+                    ],
+                )
+                .await
+                .map_err(failed(format!("navigate to {root}")))?;
+            model.roots.insert(root.as_str().to_string());
+        }
+        Write::Create(content) | Write::Ui(_, content) | Write::Sql(_, content) => {
+            create_child(&provider, model, content).await?;
+        }
+        Write::Delete(_) => create_child(&provider, model, "recreated").await?,
+    }
+    Ok(())
+}
+
+fn failed<E: std::fmt::Display>(what: String) -> impl FnOnce(E) -> TestCaseError {
+    move |e| TestCaseError::fail(format!("{what}: {e}"))
+}
+
+async fn create_child(
+    provider: &SqlOperationProvider,
+    model: &mut WriteModel,
+    content: &str,
+) -> Result<(), TestCaseError> {
+    let id = EntityUri::block(&Uuid::new_v4().to_string());
+    let mut params = StorageEntity::new();
+    params.insert("id".into(), Value::String(id.as_str().to_string()));
+    params.insert(
+        "parent_id".into(),
+        Value::String(model.doc_id.as_str().to_string()),
+    );
+    params.insert("content".into(), Value::String(content.to_string()));
+    params.insert(
+        "sort_key".into(),
+        Value::String(format!("{:010}", model.blocks.len() + 1)),
+    );
+    provider
+        .execute_operation(&"block".to_string().into(), "create", params)
+        .await
+        .map_err(|e| TestCaseError::fail(format!("create {id}: {e}")))?;
+    model.blocks.push((id, content.to_string()));
+    Ok(())
+}
+
+/// One case of [`settled_snapshot_reads_every_write`]: with a block mirror
+/// that applies far slower than the snapshot's quiet window, each write,
+/// then a settle, then ONE snapshot read must show every write.
+fn settled_snapshot_case(
+    rt: &Runtime,
+    engine: &BackendEngine,
+    writes: &[Write],
+) -> Result<(), TestCaseError> {
+    rt.block_on(async {
+        let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
+        let gate = ApplyGate::new();
+
+        let outcome = async {
+            write_blocks(engine, &doc_id, &[]).await?;
+            let source = TursoBlockQuerySource::watch(engine, gate.parser())
+                .await
+                .map_err(|e| TestCaseError::fail(format!("watch: {e}")))?;
+            let hang_after = TursoBlockQuerySource::DEFAULT_SETTLE_TIMEOUT;
+            settle(engine, hang_after)
+                .await
+                .map_err(|owed| TestCaseError::fail(format!("settle hung: {owed:?}")))?;
+
+            gate.set(Apply::Slow);
+            let mut model = WriteModel {
+                region: format!("settle-probe-{}", Uuid::new_v4()),
+                doc_id: doc_id.clone(),
+                blocks: Vec::new(),
+                roots: Default::default(),
+            };
+            for (i, w) in writes.iter().enumerate() {
+                apply_write(engine, &mut model, w).await?;
+                if i % 2 == 1 {
+                    settle(engine, hang_after)
+                        .await
+                        .map_err(|owed| TestCaseError::fail(format!("settle hung: {owed:?}")))?;
+                }
+            }
+            let settled = settle(engine, hang_after).await;
+            let snapshot = source.snapshot().await;
+            gate.set(Apply::Open);
+            settled.map_err(|owed| TestCaseError::fail(format!("settle hung: {owed:?}")))?;
+            let snapshot = snapshot.map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
+
+            let expected: HashMap<String, String> = model
+                .blocks
+                .iter()
+                .map(|(id, content)| (id.as_str().to_string(), content.clone()))
+                .collect();
+            let actual: HashMap<String, String> = snapshot
+                .iter_blocks()
+                .filter(|b| b.parent_id == doc_id)
+                .map(|b| (b.id.as_str().to_string(), b.content.clone()))
+                .collect();
+            prop_assert_eq!(actual, expected, "blocks under the case document");
+            let roots: std::collections::BTreeSet<String> = snapshot
+                .focus_roots()
+                .into_iter()
+                .filter(|r| r.region == model.region)
+                .map(|r| r.root_id)
+                .collect();
+            prop_assert_eq!(roots, model.roots, "focus roots of the case region");
+
+            let reads = settle(engine, hang_after)
+                .await
+                .map_err(|owed| TestCaseError::fail(format!("second settle hung: {owed:?}")))?;
+            prop_assert_eq!(reads, 2, "a settle with no write since the last one");
+            Ok(())
+        }
+        .await;
+
+        gate.set(Apply::Open);
+        outcome.and(purge_document(engine, &doc_id).await)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 6,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// A settle waits for the block-query mirrors to apply, not for a quiet
+    /// period: the ONE snapshot read after it shows every write, and a second
+    /// settle with no write between returns at once.
+    #[test]
+    fn settled_snapshot_reads_every_write(writes in prop::collection::vec(write(), 1..5)) {
+        exclusive_case(|rt, engine| settled_snapshot_case(rt, engine, &writes))?;
+    }
+}
+
+/// A mirror that never applies makes the settle fail, naming the stage and
+/// the seq the mirror applied last. An example, not a property: the input is
+/// one state, a held mirror with one write pending.
+#[test]
+fn settle_names_a_mirror_that_never_applies() {
+    exclusive_case(|rt, engine| {
+        rt.block_on(async {
+            let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
+            let gate = ApplyGate::new();
+            write_blocks(engine, &doc_id, &[]).await.expect("doc root");
+            let _source = TursoBlockQuerySource::watch(engine, gate.parser())
+                .await
+                .expect("watch");
+            let hang_after = TursoBlockQuerySource::DEFAULT_SETTLE_TIMEOUT;
+            settle(engine, hang_after)
+                .await
+                .expect("settle before the hold");
+
+            gate.set(Apply::Held);
+            let mut model = WriteModel {
+                region: format!("settle-probe-{}", Uuid::new_v4()),
+                doc_id: doc_id.clone(),
+                blocks: Vec::new(),
+                roots: Default::default(),
+            };
+            apply_write(engine, &mut model, &Write::Create("held".into()))
+                .await
+                .expect("write");
+            let owed = settle(engine, hang_after).await;
+            gate.set(Apply::Open);
+            let owed = owed.expect_err("a held mirror must keep the settle owing");
+            assert!(
+                owed.iter()
+                    .any(|o| o.starts_with("cdc-applied:") && o.contains("at applied seq")),
+                "owed stages name the mirror's stage and applied seq: {owed:?}"
+            );
+            settle(engine, hang_after)
+                .await
+                .expect("settle after release");
+            purge_document(engine, &doc_id).await.expect("purge");
+        })
     });
 }

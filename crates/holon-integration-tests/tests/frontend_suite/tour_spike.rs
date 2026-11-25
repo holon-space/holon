@@ -31,11 +31,6 @@ use holon_frontend::tour::WellKnownPanel;
 use holon_frontend::tour::parse_tour;
 use holon_integration_tests::Probe;
 use holon_integration_tests::TestEnvironmentBuilder;
-use holon_integration_tests::wait_until;
-
-/// Hang detector for a write to reach the block snapshot; reads after a write
-/// are eventually consistent.
-const PROJECTION_HANG: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -173,11 +168,11 @@ fn tour_spike_parses_advances_and_gates_on_real_engine() {
             .expect("set_field advance op");
 
         let cursor = Value::String("1".into());
-        let persisted = wait_until("tour cursor persisted", PROJECTION_HANG, || {
-            persisted_cursor(&env, &cursor)
-        })
-        .await
-        .unwrap_or_else(|hung| panic!("advance op must persist the progress cursor: {hung}"));
+        env.settle().await;
+        let persisted = match persisted_cursor(&env, &cursor).await {
+            Probe::Reached(persisted) => persisted,
+            Probe::NotYet(at) => panic!("advance op must persist the progress cursor: {at}"),
+        };
         assert_eq!(
             persisted,
             Some(Value::String("1".into())),
@@ -209,14 +204,8 @@ fn tour_spike_parses_advances_and_gates_on_real_engine() {
             .await
             .expect("create block under target");
 
-        let after = wait_until("tour target child visible", PROJECTION_HANG, || async {
-            match children_of(&env, "target-page").await {
-                1 => Probe::Reached(1),
-                n => Probe::NotYet(format!("{n} children")),
-            }
-        })
-        .await
-        .unwrap_or_else(|hung| panic!("the create op is observable in engine state: {hung}"));
+        env.settle().await;
+        let after = children_of(&env, "target-page").await;
         assert_eq!(after, 1, "the create op is observable in engine state");
         assert!(
             vm.observed_gate_open(after),
