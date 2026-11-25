@@ -292,13 +292,15 @@ firing runs. The caller owns what the format cannot hold — the guard and
 binding of each transition, and the body of each transition that runs no
 effect — and hands them in per transition name as a `Logic`.
 
-The executor scans the transitions in file order. `priority` acts only among
-the producers of one place, the transitions whose `produces` names it
-(ADR 0032 §9.1): in a round, of the enabled producers of one place for one
-subject, only the one with the highest priority fires; on equal priority, the
-one declared first. The others decide again in the next round. The executor
-still takes the outputs from the firing itself; `produces` only names the
-producers.
+The executor scans the transitions in file order. In the current executor,
+`priority` acts only among the producers of one place, the transitions whose
+`produces` names it: in a round, of the enabled producers of one place for
+one subject, only the one with the highest priority fires; on equal priority,
+the one declared first. The others decide again in the next round. The
+executor still takes the outputs from the firing itself; `produces` only
+names the producers. The target firing rule is interleaving in priority
+order, with no per-place rule (ADR 0032 NET-level.a,
+[PetriNetLayers.md](PetriNetLayers.md)).
 
 Every refusal names the file, the line of the declaration it refused and the
 field, so a reader can open the file at that line:

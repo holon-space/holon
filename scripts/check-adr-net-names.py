@@ -34,7 +34,7 @@ EXEMPT = {
     # Names of nets the ADR designs that no net source defines.
     "AcquireWriterLock", "MakeLoroReady", "MakeTursoReady", "NotWritten", "OpenDeviceStore",
     "OpenTurso", "PromoteStandby", "Recover", "Rekey", "Running", "SecondaryStorage",
-    "Storage", "StorageCandidate", "StorageRequest", "SwapStorage", "WriterLock", "Writing",
+    "Storage", "StorageCandidate", "StorageRequest", "SwapStorage", "Tick", "WriterLock", "Writing",
 }
 
 

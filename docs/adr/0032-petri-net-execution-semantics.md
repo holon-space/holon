@@ -1,8 +1,10 @@
 # ADR 0032 — Petri-net execution semantics: one net, derived projection, dispatcher-enforced firing
 
 **Status:** Accepted (ratified by Martin, 2026-08-25). Amended in place
-2026-10-15 — net semantics revisions 1, 1.1 and 2 (§9; changes to §1, §3, §5,
-§7); holon-work #171, experiment #315, undo-over-a-held-row #191.
+2026-10-15 and 2026-11-25 — net semantics revisions 1, 1.1 and 2 (§9; changes
+to §1, §3, §5, §7), the layered engine and the interleaving firing rule (§8
+NET-layers.a, §9 NET-level.a); holon-work #171, experiment #315,
+undo-over-a-held-row #191.
 **Date:** 2026-08-24
 **Deciders:** Martin (design discussion "PN execution architecture", 2026-08-24)
 **Relates to:**
@@ -504,9 +506,22 @@ cross-device undo to be reachable.
 ### 8. Terminology: two vocabularies, one bridge
 
 Petri-net vocabulary — **Transition, Place, Arc, Marking, Occurrence,
-Binding** — is used in the **new projection and analysis layer only**. The
+Binding** — is used in the **net crates only**. The
 `Operation*` names stay exactly as they are in the dispatch layer. No file
 blends the two.
+
+**NET-layers.a.** The net crates are three layers with a strict boundary:
+
+- `petri-net` (L0, planned): an ordinary coloured Petri net.
+- `petri-workflow` (L1, planned): workflow features compiled to L0;
+  independent of Holon.
+- `holon-net` (L2): Holon values, the Loro store, Holon names, the derived
+  projection.
+
+`holon-net` is the single instantiation point of the two generic crates.
+Reason: a kernel that knows no workflow feature and no Holon name keeps the
+firing rule free of special cases (NET-run.a). Design:
+[PetriNetLayers.md](../Architecture/PetriNetLayers.md).
 
 The bridge:
 
@@ -528,7 +543,30 @@ Revisions 1, 1.1 and 2 of the net (#171). Every rule here is a **net
 construction** or a rule of the record step; the executor implements no
 special case for producer choice, run state, retry, failure or undo. Worked
 examples and the experiment evidence are in the design note
-`plans/PlacesTransitionsExpressions.md` (holon-work).
+plans/PlacesTransitionsExpressions.md (holon-work). The layering and its
+evidence are in [PetriNetLayers.md](../Architecture/PetriNetLayers.md).
+
+**NET-level.a.** The firing rule is level semantics with interleaving, on L0
+(`petri-net`):
+
+- The engine fires one enabled (transition, subject) pair, then checks
+  again, in priority order. No batched rounds.
+- **Auto transitions disable themselves by firing.** Law (Level-dead): at
+  quiescence no auto pair is enabled when checked again from scratch. So
+  re-checking only the pairs whose read footprint changed is a pure
+  optimisation.
+- **Every change from outside is a firing of an external transition** with a
+  binding the caller supplies: writes, effect results, answers, and the
+  `Tick` that advances the Clock place. There is no put, take or revert
+  outside a firing.
+- All durable state is marking; everything else is a rebuildable cache. Law
+  (Crash): dropping the driver and every cache and rebuilding gives the same
+  observable run.
+
+Reason: interleaving needs no per-place producer-priority rule. When two
+enabled pairs conflict over one token or one inhibited place, the engine
+checks again after the first firing, so the second fires only if it is still
+enabled.
 
 #### 9.1 Producers and runs (NET-run.a, NET-cand.a)
 
@@ -544,9 +582,10 @@ examples and the experiment evidence are in the design note
   places.
 - **Producers are chosen by priority, not by a declared order.** Priority is
   data on the provider token (§9.6), so it changes at runtime. Among the
-  enabled producers of one place the highest priority fires; on equal
-  priority, the one declared first. Priority orders no transitions that
-  produce no common place.
+  enabled producers of one place the highest priority fires first; on equal
+  priority, the one declared first (NET-level.a). Priority only orders which
+  enabled pair fires first. Exclusivity comes only from structure the net
+  declares: the firing that fills the output consumes `<Out>.Open`.
 - **A producer that cannot fire now does not hold the place.** The next
   priority fires at once and the preferred producer keeps attempting beside it,
   with its own request token; it takes over through the standby slot and the
@@ -577,7 +616,10 @@ examples and the experiment evidence are in the design note
   `tries` per producer, keyed by the producer's stable contribution id, and
   `next_try` when the author declares a wait. A guard bounds them, so a
   producer stops attempting when its own guard turns false. A take raises
-  `tries`, so a crash in the middle counts as a try.
+  `tries`, so a crash in the middle counts as a try. `tries`, `cause` and
+  `next_try` are header fields outside the content stamp, so a take raises
+  `tries` while it changes no content and no version (REV11-running.a;
+  [PetriNetLayers.md](../Architecture/PetriNetLayers.md#l1-petri-workflow-workflow-nets-independent-of-holon)).
 - **Example.** `MakeTursoReady` fails: its firing puts the request token back
   with `tries.turso = 1` and the cause, which is what its guard reads.
   `MakeLoroReady` reads `tries.loro` and is unaffected.
