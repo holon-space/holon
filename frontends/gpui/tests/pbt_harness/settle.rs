@@ -317,6 +317,10 @@ pub fn settle_window_until(
     delivered: &dyn Fn(&BoundsRegistry) -> bool,
     deadline: Duration,
 ) -> Result<RenderEpoch, SettleError> {
+    assert!(
+        deadline <= HANG_DEADLINE,
+        "a settle deadline of {deadline:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
+    );
     let clock = app.clock();
     let start = clock.now();
     loop {

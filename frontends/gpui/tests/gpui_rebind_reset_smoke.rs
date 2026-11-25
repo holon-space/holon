@@ -27,6 +27,8 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
+const FIXED_POINT_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Pump until the element count is stable and no `"loading"` placeholders
 /// remain. `settle_window` does not settle after an engine rebind: a CDC demux
 /// of the rebound database stops routing, so its watermark stays below emitted.
@@ -34,12 +36,11 @@ fn settle_to_fixed_point(
     app: &mut TestApp,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
 ) {
     let start = Instant::now();
     let mut last_count = 0usize;
     let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
+    while start.elapsed() < FIXED_POINT_DEADLINE {
         runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
         app.run_until_parked();
         app.advance_clock(Duration::from_secs(1));
@@ -61,7 +62,7 @@ fn settle_to_fixed_point(
         last_count = count;
     }
     panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
+        "window never reached a fixed point within {FIXED_POINT_DEADLINE:?}: {} elements",
         bounds.all_elements().len()
     );
 }
@@ -147,7 +148,7 @@ fn rebind_reset_smoke() {
         })
         .expect("window opened over SUT#1");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_to_fixed_point(&mut app, &bounds, &runtime);
     let texts1 = displayed_texts(&bounds);
     eprintln!("SUT#1 sidebar texts: {texts1:?}");
     assert!(
@@ -177,7 +178,7 @@ fn rebind_reset_smoke() {
     // Rebind the SAME window onto SUT#2 — the crux: `rebind` has no in-tree
     // caller, so this is the first proof it re-points a live window's render.
     app.update(|cx| rebind.rebind(sut2.session.clone(), sut2.engine.clone(), cx));
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_to_fixed_point(&mut app, &bounds, &runtime);
     let texts2 = displayed_texts(&bounds);
     eprintln!("SUT#2 sidebar texts: {texts2:?}");
     assert!(

@@ -324,6 +324,10 @@ impl SimUserDriver {
     ) -> Result<(), anyhow::Error> {
         let ks = Keystroke::parse(ks_str)
             .map_err(|e| anyhow::anyhow!("{context}: bad keystroke {ks_str:?}: {e}"))?;
+        assert!(
+            timeout <= HANG_DEADLINE,
+            "a keystroke deadline of {timeout:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
+        );
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if self.dispatch_keystroke_once(&ks) {

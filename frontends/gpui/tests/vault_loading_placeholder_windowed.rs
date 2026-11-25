@@ -73,20 +73,22 @@ fn pump(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, runtime: &tokio::
     bounds.flush();
 }
 
-/// Pump frames until `done` holds; panic with the painted text after `timeout`.
+const PUMP_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Pump frames until `done` holds; panic with the painted text after
+/// [`PUMP_DEADLINE`].
 fn pump_until(
     app: &mut HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
     what: &str,
     done: impl Fn(&BoundsRegistry) -> bool,
 ) {
     let start = Instant::now();
     while !done(bounds) {
         assert!(
-            start.elapsed() < timeout,
-            "the window did not reach `{what}` within {timeout:?}. Painted text: {:#?}",
+            start.elapsed() < PUMP_DEADLINE,
+            "the window did not reach `{what}` within {PUMP_DEADLINE:?}. Painted text: {:#?}",
             painted_text(bounds)
         );
         pump(app, bounds, runtime);
@@ -158,14 +160,9 @@ fn the_window_says_loading_until_the_layout_seed_lands() {
         &bounds,
         "Holon-VaultLoadingPlaceholder-Windowed",
     );
-    pump_until(
-        &mut app,
-        &bounds,
-        &runtime,
-        Duration::from_secs(20),
-        LOADING,
-        |b| painted_text(b).iter().any(|t| t.contains(LOADING)),
-    );
+    pump_until(&mut app, &bounds, &runtime, LOADING, |b| {
+        painted_text(b).iter().any(|t| t.contains(LOADING))
+    });
     assert_eq!(
         report.in_background(),
         vec![BootStep::SeedDefaultLayout, BootStep::PostReady],
@@ -173,14 +170,9 @@ fn the_window_says_loading_until_the_layout_seed_lands() {
     );
 
     env.org_fs.release_scans();
-    pump_until(
-        &mut app,
-        &bounds,
-        &runtime,
-        Duration::from_secs(30),
-        "the seeded layout",
-        |b| paints_main_panel(b) && !painted_text(b).iter().any(|t| t.contains(LOADING)),
-    );
+    pump_until(&mut app, &bounds, &runtime, "the seeded layout", |b| {
+        paints_main_panel(b) && !painted_text(b).iter().any(|t| t.contains(LOADING))
+    });
     let failed = report.failed();
     shut_down(app, rebind);
     assert_eq!(failed, Vec::new(), "the seed succeeded once the scan ran");
@@ -209,20 +201,13 @@ fn the_window_says_the_vault_failed_when_the_seed_cannot_run() {
         &bounds,
         "Holon-VaultLoadFailed-Windowed",
     );
-    pump_until(
-        &mut app,
-        &bounds,
-        &runtime,
-        Duration::from_secs(30),
-        FAILED,
-        |b| {
-            let painted = painted_text(b);
-            painted
-                .iter()
-                .any(|t| t.contains(FAILED) && t.contains(SCAN_CRASH))
-                && !painted.iter().any(|t| t.contains(LOADING))
-        },
-    );
+    pump_until(&mut app, &bounds, &runtime, FAILED, |b| {
+        let painted = painted_text(b);
+        painted
+            .iter()
+            .any(|t| t.contains(FAILED) && t.contains(SCAN_CRASH))
+            && !painted.iter().any(|t| t.contains(LOADING))
+    });
     let failed = report.failed();
     shut_down(app, rebind);
     assert!(
@@ -259,31 +244,19 @@ fn the_window_turns_from_loading_to_failed_when_the_seed_fails_after_launch() {
         &bounds,
         "Holon-VaultLoadFailedAfterLaunch-Windowed",
     );
-    pump_until(
-        &mut app,
-        &bounds,
-        &runtime,
-        Duration::from_secs(20),
-        LOADING,
-        |b| painted_text(b).iter().any(|t| t.contains(LOADING)),
-    );
+    pump_until(&mut app, &bounds, &runtime, LOADING, |b| {
+        painted_text(b).iter().any(|t| t.contains(LOADING))
+    });
 
     holon_filesystem::crash_injection::arm("initial_scan_ingest");
     env.org_fs.release_scans();
-    pump_until(
-        &mut app,
-        &bounds,
-        &runtime,
-        Duration::from_secs(30),
-        FAILED,
-        |b| {
-            let painted = painted_text(b);
-            painted
-                .iter()
-                .any(|t| t.contains(FAILED) && t.contains(CONTROLLER_DEAD))
-                && !painted.iter().any(|t| t.contains(LOADING))
-        },
-    );
+    pump_until(&mut app, &bounds, &runtime, FAILED, |b| {
+        let painted = painted_text(b);
+        painted
+            .iter()
+            .any(|t| t.contains(FAILED) && t.contains(CONTROLLER_DEAD))
+            && !painted.iter().any(|t| t.contains(LOADING))
+    });
     let failed = report.failed();
     let painted_main = paints_main_panel(&bounds);
     shut_down(app, rebind);
