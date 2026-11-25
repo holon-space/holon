@@ -32,8 +32,10 @@ use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 
 use super::settle::HANG_DEADLINE;
+use super::settle::PUMP_TICKS;
 use super::settle::Pump;
 use super::settle::SettleError;
+use super::settle::pump_parks;
 use super::settle::settle_window;
 
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
@@ -52,8 +54,8 @@ fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
 
 fn pump_until_parked(app: &HeadlessAppContext) {
     assert!(
-        Pump::run_until_parked(app, std::time::Instant::now() + HANG_DEADLINE),
-        "a window task is still runnable after {HANG_DEADLINE:?} of pumping"
+        pump_parks(|go_on| Pump::run_until_parked(app, go_on)),
+        "a window task is still runnable after {PUMP_TICKS} ticks"
     );
 }
 

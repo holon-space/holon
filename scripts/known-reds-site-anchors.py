@@ -36,6 +36,7 @@ EXEMPT = {
     "writeback-undone-deletion-prune-deadline-load-flake": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "writeback-churning-file-stall-disclosed-twice": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "two-instance-viewmodel-stale-displayed-text": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
+    "snapshot-boot-template-of-another-key-refusal": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "split-doc-root-setup-org-sync-under-load": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "split-overtakes-held-set-field": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "org-writeback-stream-dies-at-delete-document": 'its red does not reproduce and every red log predates the case naming the row, so the classifier binds no location',

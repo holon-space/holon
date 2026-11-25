@@ -164,6 +164,10 @@ fn held_write(
                     msg.contains("window did not settle") && msg.contains(row.as_str()),
                     live.take_settle_timeout(),
                 ) {
+                    (true, Some(t)) if t.runnable => Some(format!(
+                        "the held settle timed out on {row} saying a task is still runnable, \
+                         yet a held bridge waits on a signal and no task wakes itself"
+                    )),
                     (true, Some(t)) if t.epoch.reflects < t.target => None,
                     (true, Some(t)) => Some(format!(
                         "the held settle timed out on {row} with a frame that reflects {:?}, \

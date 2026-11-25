@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::future::Future as _;
 use std::task::Poll;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::App;
 use gpui::AppContext as _;
@@ -13,7 +12,9 @@ use gpui::BackgroundExecutor;
 use gpui::EntityId;
 use gpui::HeadlessAppContext;
 use gpui::TestAppContext;
+use holon_api::Clock;
 use holon_api::EntityUri;
+use holon_api::SystemClock;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::render_epoch::EngineSeq;
 use holon_frontend::render_epoch::RenderEpoch;
@@ -42,8 +43,8 @@ pub struct SettleTimeout {
     pub operations_in_flight: usize,
     /// The rows whose bridge waits on a shut test hold.
     pub held_bridges: Vec<EntityUri>,
-    /// A window task was still runnable at the deadline: a task that wakes
-    /// itself on every poll keeps the executor from parking.
+    /// A pump ran [`PUMP_TICKS`] tasks without the executor parking: a task
+    /// wakes itself on every poll.
     pub runnable: bool,
 }
 
@@ -96,25 +97,40 @@ impl std::error::Error for SettleError {}
 
 /// The app context a window test pumps.
 pub trait Pump {
-    /// Run window tasks until none is runnable; false when one still is at
-    /// `until`.
-    fn run_until_parked(&self, until: Instant) -> bool;
+    /// The clock a settle's hang guard reads.
+    fn clock(&self) -> &dyn Clock;
+    /// Run window tasks until none is runnable (true), or until `go_on`, asked
+    /// after each task, says stop (false).
+    fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool;
     /// Every view of every window that a notify marked dirty and that no frame
     /// has drawn since.
     fn pending_views(&self) -> Vec<EntityId>;
     /// Draw every window once more, dirty or not, then pump like
     /// [`Pump::run_until_parked`].
-    fn force_frame(&self, until: Instant) -> bool;
+    fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool;
 }
 
-/// Tick `executor` until it parks or `until` passes, with tokio's task budget
-/// lifted. A harness step pumps the window inside one `Runtime::block_on`
-/// poll; once that poll spends its budget, every tokio channel a window task
-/// awaits answers Pending and wakes the task at once.
-fn tick_until_parked(executor: &BackgroundExecutor, until: Instant) -> bool {
+/// The most tasks one pump runs before it stops. Counted in ticks, not wall
+/// time: a pump the settle itself woke runs to its park however late it starts.
+pub const PUMP_TICKS: usize = 100_000;
+
+/// Run `run` with a budget of [`PUMP_TICKS`] tasks; true when it parked.
+pub fn pump_parks(run: impl FnOnce(&mut dyn FnMut() -> bool) -> bool) -> bool {
+    let mut left = PUMP_TICKS;
+    run(&mut || {
+        left -= 1;
+        left > 0
+    })
+}
+
+/// Tick `executor` until it parks or `go_on` says stop, with tokio's task
+/// budget lifted. A harness step pumps the window inside one
+/// `Runtime::block_on` poll; once that poll spends its budget, every tokio
+/// channel a window task awaits answers Pending and wakes the task at once.
+fn tick_until_parked(executor: &BackgroundExecutor, go_on: &mut dyn FnMut() -> bool) -> bool {
     let mut run = std::pin::pin!(tokio::task::unconstrained(async move {
         while executor.tick() {
-            if Instant::now() >= until {
+            if !go_on() {
                 return false;
             }
         }
@@ -130,32 +146,40 @@ fn tick_until_parked(executor: &BackgroundExecutor, until: Instant) -> bool {
 }
 
 impl Pump for HeadlessAppContext {
-    fn run_until_parked(&self, until: Instant) -> bool {
-        tick_until_parked(self.background_executor(), until)
+    fn clock(&self) -> &dyn Clock {
+        &SystemClock
+    }
+
+    fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+        tick_until_parked(self.background_executor(), go_on)
     }
 
     fn pending_views(&self) -> Vec<EntityId> {
         pending_views_of(&mut self.app.borrow_mut())
     }
 
-    fn force_frame(&self, until: Instant) -> bool {
+    fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
         refresh_windows(&mut self.app.borrow_mut());
-        Pump::run_until_parked(self, until)
+        Pump::run_until_parked(self, go_on)
     }
 }
 
 impl Pump for TestAppContext {
-    fn run_until_parked(&self, until: Instant) -> bool {
-        tick_until_parked(&self.executor(), until)
+    fn clock(&self) -> &dyn Clock {
+        &SystemClock
+    }
+
+    fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+        tick_until_parked(&self.executor(), go_on)
     }
 
     fn pending_views(&self) -> Vec<EntityId> {
         self.update(pending_views_of)
     }
 
-    fn force_frame(&self, until: Instant) -> bool {
+    fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
         self.update(refresh_windows);
-        Pump::run_until_parked(self, until)
+        Pump::run_until_parked(self, go_on)
     }
 }
 
@@ -210,8 +234,8 @@ pub fn settle_window(
         deadline <= HANG_DEADLINE,
         "a settle deadline of {deadline:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
     );
-    let start = Instant::now();
-    let until = start + deadline;
+    let clock = app.clock();
+    let until = clock.now() + deadline;
     let timeout = |before: RenderEpoch, forced_frame_changed_screen: bool, runnable: bool| {
         let epoch = bounds.epoch();
         Err(SettleError::Timeout(SettleTimeout {
@@ -231,7 +255,7 @@ pub fn settle_window(
         settle_engine();
         watermark.poke();
         let before = bounds.epoch();
-        let parked = app.run_until_parked(until);
+        let parked = pump_parks(|go_on| app.run_until_parked(go_on));
         bounds.flush();
         if !parked {
             return timeout(before, false, true);
@@ -242,7 +266,7 @@ pub fn settle_window(
             && watermark.owed().is_empty()
             && watermark.operations_in_flight() == 0
         {
-            let parked = app.run_until_parked(until);
+            let parked = pump_parks(|go_on| app.run_until_parked(go_on));
             bounds.flush();
             if !parked {
                 return timeout(before, false, true);
@@ -253,10 +277,10 @@ pub fn settle_window(
                 if !app.pending_views().is_empty() {
                     // The first forced frame may itself change what the next
                     // one shows.
-                    let parked = app.force_frame(until);
+                    let parked = pump_parks(|go_on| app.force_frame(go_on));
                     bounds.flush();
                     let shown = screen(bounds);
-                    let parked = parked && app.force_frame(until);
+                    let parked = parked && pump_parks(|go_on| app.force_frame(go_on));
                     bounds.flush();
                     if !parked {
                         return timeout(before, false, true);
@@ -276,7 +300,7 @@ pub fn settle_window(
                 }
             }
         }
-        if start.elapsed() >= deadline {
+        if clock.now() >= until {
             return timeout(before, forced_frame_changed_screen, false);
         }
     }
@@ -293,17 +317,18 @@ pub fn settle_window_until(
     delivered: &dyn Fn(&BoundsRegistry) -> bool,
     deadline: Duration,
 ) -> Result<RenderEpoch, SettleError> {
-    let start = Instant::now();
+    let clock = app.clock();
+    let start = clock.now();
     loop {
-        let left = deadline.saturating_sub(start.elapsed());
+        let left = deadline.saturating_sub(clock.now() - start);
         let epoch = settle_window(app, bounds, watermark, &mut || {}, left)?;
         if delivered(bounds) {
             return Ok(epoch);
         }
-        if start.elapsed() >= deadline {
+        if clock.now() - start >= deadline {
             return Err(SettleError::Undelivered(epoch));
         }
-        std::thread::sleep(Duration::from_millis(5));
+        clock.sleep_blocking(Duration::from_millis(5));
     }
 }
 

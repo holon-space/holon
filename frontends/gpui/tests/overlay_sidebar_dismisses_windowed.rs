@@ -38,7 +38,9 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
 use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::PUMP_TICKS;
 use crate::pbt_harness::settle::Pump;
+use crate::pbt_harness::settle::pump_parks;
 use crate::pbt_harness::settle::settle_window;
 
 const LEFT_SIDEBAR: &str = "block:default-left-sidebar";
@@ -348,8 +350,8 @@ impl Harness {
             self.app.run_until_parked();
         }
         assert!(
-            self.app.force_frame(Instant::now() + HANG_DEADLINE),
-            "the forced frame did not park within {HANG_DEADLINE:?}"
+            pump_parks(|go_on| self.app.force_frame(go_on)),
+            "the forced frame did not park within {PUMP_TICKS} tasks"
         );
     }
 
@@ -1259,8 +1261,8 @@ impl Harness {
             self.app.run_until_parked();
         }
         assert!(
-            self.app.force_frame(Instant::now() + HANG_DEADLINE),
-            "the forced frame did not park within {HANG_DEADLINE:?}"
+            pump_parks(|go_on| self.app.force_frame(go_on)),
+            "the forced frame did not park within {PUMP_TICKS} tasks"
         );
         let gap =
             (watermark.owed().is_empty() && watermark.operations_in_flight() == 0).then(|| {

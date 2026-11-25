@@ -14,15 +14,22 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Context as TaskContext;
+use std::task::Poll;
+use std::task::Waker;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Result;
+use futures::future::BoxFuture;
 use gpui::EntityId;
+use holon_api::Clock;
+use holon_api::Mono;
 use holon_api::live_data::reporting_cursor;
 use holon_api::live_data::reporting_to;
 use holon_frontend::geometry::Clip;
@@ -42,6 +49,43 @@ use crate::pbt_harness::settle::settle_window;
 /// A settle the reference predicts to time out fails as fast as this; a wrong
 /// prediction still fails, since a deadline cannot turn a timeout into `Ok`.
 const PREDICTED_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// The scripted window's clock steps 1 ms per reading, so its deadlines count
+/// readings: every arrival of a schedule happens well before this one, and a
+/// predicted timeout runs to it in no wall time.
+const SCRIPTED_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Clock readings past the scripted timeout: the drawn offsets end the
+/// deadline in different iterations of the settle loop.
+const DEADLINE_OFFSETS: u64 = 16;
+
+/// Steps one millisecond on every reading.
+#[derive(Debug, Default)]
+struct SteppingClock(AtomicU64);
+
+impl Clock for SteppingClock {
+    fn now_millis(&self) -> i64 {
+        unreachable!("a settle reads only the monotonic clock")
+    }
+
+    fn now(&self) -> Mono {
+        Mono::from_origin(Duration::from_millis(
+            self.0.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+
+    fn sleep_until(&self, _: Mono) -> BoxFuture<'static, ()> {
+        unreachable!("a settle never sleeps")
+    }
+
+    fn sleep_blocking(&self, _: Duration) {
+        unreachable!("a settle never sleeps")
+    }
+
+    fn utc_offset_seconds_at(&self, _: i64) -> i32 {
+        unreachable!("a settle reads only the monotonic clock")
+    }
+}
 
 /// An engine that routes every change it emits at once.
 #[derive(Default)]
@@ -154,8 +198,12 @@ impl RenderNotify {
 }
 
 struct ScriptedWindow {
+    clock: SteppingClock,
     engine: Arc<SeqEngine>,
     watermark: Arc<UiWatermark>,
+    /// The window's epoch relay: a task that a watermark poke or an applied
+    /// snapshot wakes.
+    relay: RefCell<Pin<Box<dyn Future<Output = ()> + Send>>>,
     bounds: BoundsRegistry,
     views: Vec<UiSubscription>,
     shown: Vec<Cell<bool>>,
@@ -181,7 +229,9 @@ impl ScriptedWindow {
             .expect("reporting_to hands its cursor to the subscriber");
         }
         let window = Self {
+            clock: SteppingClock::default(),
             engine,
+            relay: RefCell::new(Box::pin(watermark.changed())),
             watermark,
             bounds: BoundsRegistry::new(),
             views,
@@ -224,6 +274,21 @@ impl ScriptedWindow {
         }
     }
 
+    /// Run the epoch relay if a change woke it.
+    fn run_relay(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+        let mut relay = self.relay.borrow_mut();
+        match relay
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()))
+        {
+            Poll::Ready(()) => {
+                *relay = Box::pin(self.watermark.changed());
+                go_on()
+            }
+            Poll::Pending => true,
+        }
+    }
+
     fn emit(&self, k: usize) {
         let seq = self.engine.seq.load(Ordering::Acquire) + 1;
         for (j, view) in self.views.iter().enumerate() {
@@ -237,11 +302,16 @@ impl ScriptedWindow {
 }
 
 impl Pump for ScriptedWindow {
-    fn run_until_parked(&self, until: Instant) -> bool {
+    fn clock(&self) -> &dyn Clock {
+        &self.clock
+    }
+
+    fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+        if !self.run_relay(go_on) {
+            return false;
+        }
         if matches!(self.arrivals.borrow().front(), Some(Arrival::Spin)) {
-            while Instant::now() < until {
-                std::hint::spin_loop();
-            }
+            while go_on() {}
             return false;
         }
         let Some(arrival) = self.arrivals.borrow_mut().pop_front() else {
@@ -273,7 +343,7 @@ impl Pump for ScriptedWindow {
             }
         }
         self.draw();
-        true
+        go_on() && self.run_relay(go_on)
     }
 
     fn pending_views(&self) -> Vec<EntityId> {
@@ -284,9 +354,9 @@ impl Pump for ScriptedWindow {
             .collect()
     }
 
-    fn force_frame(&self, _: Instant) -> bool {
+    fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
         self.draw();
-        true
+        go_on()
     }
 }
 
@@ -403,11 +473,16 @@ fn views_that_never_settle(modes: &[RenderNotify]) -> Option<BTreeSet<usize>> {
     })
 }
 
-fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), TestCaseError> {
+fn settles_on_every_shown_view(
+    n: usize,
+    arrivals: Vec<Arrival>,
+    deadline_offset: u64,
+) -> Result<(), TestCaseError> {
+    let case = format!("{arrivals:?} at deadline offset {deadline_offset}");
     let spins = arrivals.contains(&Arrival::Spin);
     let deadline = match views_that_never_settle(&modes_after_every_arrival(n, &arrivals)) {
         None if !spins => Duration::from_secs(5),
-        _ => PREDICTED_TIMEOUT,
+        _ => SCRIPTED_TIMEOUT + Duration::from_millis(deadline_offset),
     };
     let window = ScriptedWindow::new(n, arrivals.clone());
     let settled = settle_window(
@@ -428,7 +503,7 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
             if matches!(window.arrivals.borrow().front(), Some(Arrival::Spin)) {
                 prop_assert!(
                     t.runnable,
-                    "{arrivals:?}: a task wakes itself on every poll, yet the timeout says the \
+                    "{case}: a task wakes itself on every poll, yet the timeout says the \
                      executor parked: {}",
                     SettleError::Timeout(t)
                 );
@@ -436,22 +511,22 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
             }
             prop_assert!(
                 !t.runnable,
-                "{arrivals:?}: the timeout says a task is runnable, yet none wakes itself"
+                "{case}: the timeout says a task is runnable, yet none wakes itself"
             );
             let Some(never_settle) = never_settle else {
                 return Err(TestCaseError::fail(format!(
-                    "{arrivals:?}: every view settles once no arrival is left, yet the settle \
+                    "{case}: every view settles once no arrival is left, yet the settle \
                      timed out: {}",
                     SettleError::Timeout(t)
                 )));
             };
             prop_assert!(
                 window.arrivals.borrow().is_empty(),
-                "{arrivals:?}: timed out before every arrival happened"
+                "{case}: timed out before every arrival happened"
             );
             prop_assert!(
                 t.dirty,
-                "{arrivals:?}: a view that changes the screen in every render leaves the window dirty"
+                "{case}: a view that changes the screen in every render leaves the window dirty"
             );
             prop_assert_eq!(
                 t.pending_views.iter().copied().collect::<BTreeSet<_>>(),
@@ -459,24 +534,24 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
                     .iter()
                     .map(|&k| EntityId::from(k as u64))
                     .collect::<BTreeSet<_>>(),
-                "{:?}: the timeout names the views that notify in every render",
-                arrivals
+                "{}: the timeout names the views that notify in every render",
+                case
             );
             return Ok(());
         }
-        Err(e) => return Err(TestCaseError::fail(format!("{arrivals:?}: {e}"))),
+        Err(e) => return Err(TestCaseError::fail(format!("{case}: {e}"))),
     };
     prop_assert!(
         never_settle.is_none(),
-        "{arrivals:?}: settled at {epoch:?} while views {never_settle:?} change the screen in \
+        "{case}: settled at {epoch:?} while views {never_settle:?} change the screen in \
          every render"
     );
     for k in 0..n {
         prop_assert_eq!(
             displayed(&window.bounds, &format!("view-{k}")),
             Some(window.label[k].get().to_string()),
-            "{:?}: view {} shows stale content after the settle",
-            arrivals,
+            "{}: view {} shows stale content after the settle",
+            case,
             k
         );
     }
@@ -487,12 +562,12 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
     prop_assert_eq!(
         window.engine.in_flight.load(Ordering::Acquire),
         0,
-        "{:?}: settled while an admitted operation is unfinished",
-        arrivals
+        "{}: settled while an admitted operation is unfinished",
+        case
     );
     prop_assert!(
         epoch.reflects >= emitted,
-        "{arrivals:?}: frame reflects {:?}, the engine emitted {emitted:?}",
+        "{case}: frame reflects {:?}, the engine emitted {emitted:?}",
         epoch.reflects
     );
     let loading: Vec<String> = window
@@ -502,24 +577,25 @@ fn settles_on_every_shown_view(n: usize, arrivals: Vec<Arrival>) -> Result<(), T
         .filter(|(_, info)| info.widget_type.as_ref() == "loading")
         .map(|(id, _)| id)
         .collect();
-    prop_assert!(
-        loading.is_empty(),
-        "{arrivals:?}: still loading {loading:?}"
-    );
+    prop_assert!(loading.is_empty(), "{case}: still loading {loading:?}");
     Ok(())
 }
 
 #[test]
 fn settle_times_out_on_a_task_that_wakes_itself() {
-    settles_on_every_shown_view(1, vec![Arrival::Apply(0), Arrival::Route(0), Arrival::Spin])
-        .expect("the property holds");
+    settles_on_every_shown_view(
+        1,
+        vec![Arrival::Apply(0), Arrival::Route(0), Arrival::Spin],
+        0,
+    )
+    .expect("the property holds");
 }
 
 /// A view's last render notifies with a change, and nothing else draws the
 /// window again.
 #[test]
 fn settle_shows_the_change_a_notify_in_the_last_render_made() {
-    settles_on_every_shown_view(1, vec![Arrival::Apply(0), Arrival::NotifyInRender(0)])
+    settles_on_every_shown_view(1, vec![Arrival::Apply(0), Arrival::NotifyInRender(0)], 0)
         .expect("the settled frame shows the change");
 }
 
@@ -533,6 +609,7 @@ fn settle_shows_a_view_that_a_later_draw_rendered_again() {
             Arrival::NotifyInRender(0),
             Arrival::Apply(0),
         ],
+        0,
     )
     .expect("the settle returns the redrawn frame");
 }
@@ -548,6 +625,7 @@ fn settle_accepts_a_view_that_notifies_in_every_render_without_a_change() {
             Arrival::Route(0),
             Arrival::Apply(0),
         ],
+        0,
     )
     .expect("a frame drawn again changes nothing");
 }
@@ -563,6 +641,7 @@ fn settle_times_out_on_a_view_that_changes_in_every_render() {
             Arrival::NotifyInEveryRender(1),
             Arrival::ChangeInEveryRender(0),
         ],
+        0,
     )
     .expect("the settle times out naming both notifying views");
 }
@@ -578,6 +657,7 @@ fn settle_returns_a_fixed_point_reached_before_a_later_change() {
             Arrival::Idle,
             Arrival::ChangeInEveryRender(0),
         ],
+        0,
     )
     .expect("an idle pump after the shown rows is a fixed point");
 }
@@ -585,7 +665,7 @@ fn settle_returns_a_fixed_point_reached_before_a_later_change() {
 /// The first snapshot arrives after the window parked twice at the emitted seq.
 #[test]
 fn settle_waits_for_a_first_snapshot_after_idle_pumps() {
-    settles_on_every_shown_view(1, vec![Arrival::Idle, Arrival::Idle, Arrival::Apply(0)])
+    settles_on_every_shown_view(1, vec![Arrival::Idle, Arrival::Idle, Arrival::Apply(0)], 0)
         .expect("the static example settles on the shown view");
 }
 
@@ -603,14 +683,37 @@ fn settle_waits_for_an_admitted_operation_to_finish() {
             Arrival::Finish(0),
             Arrival::Apply(0),
         ],
+        0,
     )
     .expect("the static example settles after the operation's write");
 }
 
+/// A view keeps the window dirty: the deadline lands on each clock reading of
+/// the settle loop.
+#[test]
+fn settle_timeout_names_no_runnable_task_wherever_the_deadline_lands() {
+    for offset in 0..DEADLINE_OFFSETS {
+        settles_on_every_shown_view(
+            2,
+            vec![
+                Arrival::Apply(0),
+                Arrival::Apply(1),
+                Arrival::NotifyInEveryRender(1),
+                Arrival::ChangeInEveryRender(0),
+            ],
+            offset,
+        )
+        .expect("the settle times out with no runnable task");
+    }
+}
+
 proptest! {
     #[test]
-    fn settle_returns_only_once_every_view_shows_its_rows((n, arrivals) in schedule()) {
-        settles_on_every_shown_view(n, arrivals)?;
+    fn settle_returns_only_once_every_view_shows_its_rows(
+        (n, arrivals) in schedule(),
+        deadline_offset in 0..DEADLINE_OFFSETS,
+    ) {
+        settles_on_every_shown_view(n, arrivals, deadline_offset)?;
     }
 }
 
@@ -798,6 +901,10 @@ mod real_window {
                 )));
             }
             (Err(SettleError::Timeout(t)), Some(never_settle)) => {
+                prop_assert!(
+                    !t.runnable,
+                    "{case}: the timeout says a task is runnable, yet none wakes itself"
+                );
                 prop_assert!(
                     t.dirty,
                     "{case}: a view that changes in every render leaves the window dirty"
