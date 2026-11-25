@@ -78,6 +78,19 @@ state its write must reach instead:
 - Any other condition polls with `polling::wait_until` and a `Probe`. On its
   deadline it fails with `WaitHung`, which names the target, the stage and the
   last value it read.
+- A windowed test settles with `settle_window`
+  (`frontends/gpui/tests/pbt_harness/settle.rs`): it pumps the window until a
+  committed frame's `RenderEpoch` reflects the seq the engine emitted and the
+  `UiWatermark` owes nothing (docs/Architecture/Reactivity.md, "Convergence,
+  not instantaneous equality"). A change that reaches the window over a hop
+  the watermark does not count waits with `settle_window_until` and its
+  delivered predicate. A gesture takes its point from
+  `click_point_when_painted`, which pumps until a frame paints the target.
+- A deadline only detects a hang, and it fails loud with the last value it
+  observed (`WaitHung`). A raised cap, more headroom or a longer sleep does not
+  fix a red deadline: cut the work per case, or wait on the event that names
+  the target. A cap follows only from a measured `p95_low` (see "Caps of the
+  load-tolerant tests").
 - A remaining `sleep` in a test names its reason: a poll interval inside a
   target loop, or a product timer that the test drives on purpose.
 

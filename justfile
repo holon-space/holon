@@ -1143,13 +1143,14 @@ fmt-check:
 # Audit dependencies for vulnerabilities, license issues, and bans. The frontends
 # and wasm guests with their own lockfile get the same license check (the
 # cooklang guest's `.wasm` ships inside holon-plugin-host). `--locked` fails on
-# a stale lockfile instead of rewriting it unseen.
+# a stale lockfile instead of rewriting it unseen. `checks` narrows the root
+# check to the named cargo-deny checks; empty runs them all.
 DENY_OWN_LOCKS := "frontends/holon-worker frontends/dioxus-web frontends/waterui guests/cooklang guests/testkit"
-deny:
+deny *checks:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo deny --locked check 2>&1 | tee target/gate-logs/holon-deny.log
+    cargo deny --locked check {{checks}} 2>&1 | tee target/gate-logs/holon-deny.log
     for manifest in {{DENY_OWN_LOCKS}}; do
         cargo deny --locked --manifest-path $manifest/Cargo.toml --config deny.toml check licenses 2>&1 | tee target/gate-logs/holon-deny-${manifest##*/}.log
     done
@@ -1575,6 +1576,45 @@ cargo-free-checks:
     check fmt-check target/gate-logs/gate-fmt-check.log cargo fmt --all -- --check
     if [ -n "$failed" ]; then
         echo "cargo-free-checks: red scripts:$failed"
+        exit 1
+    fi
+
+# The fast checks a lane runs before verify: the cargo-free checks, machete and
+# deny always; archlint and deny's advisories only when the diff from `base`
+# reaches them (scripts/lane-check-map.py), so a new advisory on an unchanged
+# lock file stays the gate's. Each mapped check it skips prints why.
+lane-checks base:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(jj diff --from {{base}} --to @ --name-only)
+    failed=""
+    run() {
+        local name=$1
+        shift
+        if "$@"; then
+            echo "PASS $name"
+        else
+            echo "FAIL $name (exit $?)"
+            failed+=" $name"
+        fi
+    }
+    run cargo-free-checks just cargo-free-checks
+    run machete just machete
+    advisories=$(./scripts/lane-check-map.py deny-advisories <<<"$changed")
+    if [ "$advisories" = run ]; then
+        run deny just deny
+    else
+        echo "$advisories"
+        run deny just deny bans licenses sources
+    fi
+    archlint=$(./scripts/lane-check-map.py archlint <<<"$changed")
+    if [ "$archlint" = run ]; then
+        run archlint just analyze-arch
+    else
+        echo "$archlint"
+    fi
+    if [ -n "$failed" ]; then
+        echo "lane-checks: red checks:$failed"
         exit 1
     fi
 
