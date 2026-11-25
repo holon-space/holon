@@ -242,6 +242,17 @@ fn static_examples() -> Vec<Case> {
                 Op::Edit { peer: 0 },
             ],
         ),
+        // Peer 0's save spends its session's compaction below the later
+        // head, so only the next session's first save trims at that head.
+        Case::adopted(
+            Topology::Pair,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Save { peer: 0 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Edit { peer: 1 },
+            ],
+        ),
         // Peer 2 joins after peer 0 trimmed, without adopting its history.
         Case {
             topology: Topology::Star3,
