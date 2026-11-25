@@ -1096,11 +1096,11 @@ deleted_payload() {
 novel_only='^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red'
 hand_authored_log deleted-observed "$deleted_site:6067:9" "$(deleted_payload gamma.org)"
 expect_outcome deleted-file/observed 0 '^PRIMARY: \[known-red:deleted-file-recreated-by-stale-page-mirror\]' "$work/deleted-observed.log"
-hand_authored_log deleted-current-site "$deleted_site:6077:9" "$(deleted_payload gamma.org)"
+hand_authored_log deleted-current-site "$deleted_site:6466:9" "$(deleted_payload gamma.org)"
 expect_outcome deleted-file/current-site 0 '^PRIMARY: \[known-red:deleted-file-recreated-by-stale-page-mirror\]' "$work/deleted-current-site.log"
 hand_authored_log deleted-other-file-other-line "$deleted_site:1234:5" "$(deleted_payload journal.org)"
 expect_outcome deleted-file/other-file-other-line 1 "$novel_only" "$work/deleted-other-file-other-line.log"
-hand_authored_log deleted-other-file "$deleted_site:6077:9" "$(deleted_payload journal.org)"
+hand_authored_log deleted-other-file "$deleted_site:6466:9" "$(deleted_payload journal.org)"
 expect_outcome deleted-file/other-file 1 "$novel_only" "$work/deleted-other-file.log"
 hand_authored_log deleted-other-line "$deleted_site:1234:5" "$(deleted_payload gamma.org)"
 expect_outcome deleted-file/other-line 1 '^\[known-reds\] FAIL: cross-family match: deleted-file-recreated-by-stale-page-mirror' \
