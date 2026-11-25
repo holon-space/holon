@@ -437,6 +437,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `span-probe-budget-count-off-by-one-load`
 - `span-trace-block-mirror-apply-unparented-under-load`
 - `split-doc-root-setup-org-sync-under-load`
+- `split-overtakes-held-set-field`
 - `splitblock-caret-past-dense-projection-content`
 - `structural-fileless-page-writeback-not-materialized-load`
 - `task-state-clear-lost-across-cut-paste`
