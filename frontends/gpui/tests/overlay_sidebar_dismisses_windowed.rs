@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_signals::signal::SignalExt;
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
@@ -275,25 +274,7 @@ impl Harness {
         let hold = self.env.engine().dispatch_hold().clone();
         hold.hold_next("navigation", op);
         self.dispatch_nav_unsettled(op, params);
-        let watermark = self
-            .env
-            .reactive_engine
-            .get()
-            .expect("reactive engine after start_app")
-            .ui_watermark()
-            .clone();
-        let start = Instant::now();
-        while !watermark.owed().is_empty() {
-            assert!(
-                start.elapsed() < HANG_DEADLINE,
-                "with navigation.{op} parked the window still owes {:?}",
-                watermark.owed(),
-            );
-            self.app.run_until_parked();
-        }
-        // The breadcrumb and the tab strip read on render: draw a frame while
-        // the op is parked, as a live window would.
-        self.app.force_frame();
+        self.draw_while_dispatch_waits(op);
         self.runtime
             .block_on(hold.release(1, HANG_DEADLINE))
             .unwrap_or_else(|e| panic!("release the parked navigation.{op}: {e:#}"));
@@ -301,10 +282,10 @@ impl Harness {
         self.settle();
     }
 
-    /// [`Self::dispatch_nav`], with the op held after its commit until the
-    /// window is at rest on the committed rows, then released with no frame
-    /// forced: the op's Main view bump is the last change, and only it can
-    /// redraw the readers that poll the generation on render.
+    /// [`Self::dispatch_nav`], with the op held after its commit while the
+    /// window draws on the committed rows, then released and settled by the
+    /// plain settle alone: the op's Main view bump is its last change, so the
+    /// settle must owe it from the commit until it lands.
     fn dispatch_nav_held_after_commit(&mut self, op: NavigationOp, params: Vec<(&str, Value)>) {
         let op = op.as_str();
         let hold = self.env.engine().dispatch_hold().clone();
@@ -320,27 +301,51 @@ impl Harness {
             );
             self.app.run_until_parked();
         }
-        self.runtime.block_on(self.env.settle());
-        self.settle();
+        self.draw_while_dispatch_waits(op);
         assert_eq!(
             self.engine.ui_state().main_view_generation(),
             view_before,
             "navigation.{op} bumped the Main view before its caller saw the commit, so the \
              release below does not leave the bump as the last change",
         );
+        let watermark = self.engine.ui_watermark();
+        if watermark.owed().is_empty() && watermark.operations_in_flight() == 0 {
+            let rebind = &self.rebind;
+            let (bar, highlighted) = self
+                .app
+                .update(|cx| (rebind.breadcrumb_block(cx), rebind.drawn_active_tab(cx)));
+            panic!(
+                "navigation.{op} committed and its Main view bump past generation {view_before} \
+                 is pending, but the window settle would report rest with the breadcrumb on \
+                 {bar:?} and the tab strip on tab {highlighted:?}",
+            );
+        }
         self.runtime
             .block_on(hold.release(1, HANG_DEADLINE))
             .unwrap_or_else(|e| panic!("release the committed navigation.{op}: {e:#}"));
-        let view = self.engine.ui_state().main_view_signal();
-        let bumped = self.runtime.block_on(async {
-            tokio::time::timeout(HANG_DEADLINE, view.wait_for(view_before + 1)).await
-        });
-        assert!(
-            bumped.is_ok(),
-            "navigation.{op} committed, but the Main view generation stayed at {}",
-            self.engine.ui_state().main_view_generation(),
-        );
+        self.runtime.block_on(self.env.settle());
         self.settle();
+    }
+
+    /// Pump until the window owes nothing but the waiting `navigation.{op}`,
+    /// then draw a frame: the breadcrumb and the tab strip read on render.
+    fn draw_while_dispatch_waits(&self, op: &str) {
+        let dispatch = format!("dispatch navigation.{op}:");
+        let watermark = self.engine.ui_watermark();
+        let start = Instant::now();
+        while watermark
+            .owed()
+            .iter()
+            .any(|owed| !owed.starts_with(&dispatch))
+        {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "with navigation.{op} waiting the window still owes {:?}",
+                watermark.owed(),
+            );
+            self.app.run_until_parked();
+        }
+        self.app.force_frame();
     }
 
     fn dispatch_nav_unsettled(&self, op: &str, params: Vec<(&str, Value)>) {

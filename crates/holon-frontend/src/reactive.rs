@@ -3273,8 +3273,10 @@ impl ReactiveEngine {
         let origin = holon_api::OpOrigin::Rule {
             transition_id: transition_id.to_string(),
         };
+        let owed = self.owe_settle(format!("dispatch {}.{op_name}", entity.as_str()));
         let run = session.execute_operation_with_origin(&entity, op_name, params, origin);
         self.runtime_handle.spawn(async move {
+            let _owed = owed;
             match run.await {
                 Ok(_) => journal.settle(journal_seq, Ok(())),
                 Err(e) => {
@@ -3289,6 +3291,12 @@ impl ReactiveEngine {
                 }
             }
         });
+    }
+
+    /// A window settle owes `task` until the returned check drops: a spawned
+    /// task changes UI state after its op left the engine's in-flight count.
+    fn owe_settle(&self, task: String) -> crate::render_epoch::UiCheck {
+        self.ui_watermark.register_check(task, || true)
     }
 
     /// Seat the caret in `destination`'s first editable row.
@@ -3312,7 +3320,9 @@ impl ReactiveEngine {
         let user_caret_at_dispatch = self.ui_state.user_caret_generation();
         let user_caret = self.ui_state.user_caret_generation_handle();
         let write_tier = self.write_tier.clone();
+        let owed = self.owe_settle(format!("caret seat in {destination}"));
         self.runtime_handle.spawn(async move {
+            let _owed = owed;
             let Some(qe) = session.query_engine() else {
                 tracing::debug!("no query backend in this session; navigation seats no caret");
                 return;
@@ -4300,6 +4310,11 @@ impl BuilderServices for ReactiveEngine {
         // the destination's first editable row (D97.a). The root itself
         // renders through the editor-less `page_title` variant.
         let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
+        let owed = self.owe_settle(format!(
+            "dispatch {}.{}",
+            intent.entity_name.as_str(),
+            intent.op_name
+        ));
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4358,6 +4373,7 @@ impl BuilderServices for ReactiveEngine {
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         self.runtime_handle.spawn(
             async move {
+                let _owed = owed;
                 match run.await {
                     Ok(response) => {
                         tracing::info!(
@@ -4472,6 +4488,11 @@ impl BuilderServices for ReactiveEngine {
         }
 
         let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
+        let owed = self.owe_settle(format!(
+            "dispatch {}.{}",
+            intent.entity_name.as_str(),
+            intent.op_name
+        ));
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4526,6 +4547,7 @@ impl BuilderServices for ReactiveEngine {
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
+                let _owed = owed;
                 let outcome = run.await;
                 match &outcome {
                     Ok(_) => entry.settle(Ok(())),
@@ -4578,6 +4600,11 @@ impl BuilderServices for ReactiveEngine {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
         let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
+        let owed = self.owe_settle(format!(
+            "dispatch {}.{}",
+            intent.entity_name.as_str(),
+            intent.op_name
+        ));
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4611,6 +4638,7 @@ impl BuilderServices for ReactiveEngine {
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
+                let _owed = owed;
                 match run.await {
                     Ok(response) => {
                         apply_structural_focus(
@@ -4665,6 +4693,11 @@ impl BuilderServices for ReactiveEngine {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
         let main_view_bump = self.ui_state.main_view_bump_on_commit(&intent);
+        let owed = self.owe_settle(format!(
+            "dispatch {}.{}",
+            intent.entity_name.as_str(),
+            intent.op_name
+        ));
         if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
             self.spawn_caret_seat(destination);
         }
@@ -4695,6 +4728,7 @@ impl BuilderServices for ReactiveEngine {
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
+                let _owed = owed;
                 match run.await {
                     Ok(outcome) => {
                         apply_structural_focus(
@@ -4758,7 +4792,9 @@ impl BuilderServices for ReactiveEngine {
             .collect(),
         ));
         let create = create_page_from_link(&session, &target);
+        let owed = self.owe_settle("dispatch block.create_page_from_link".to_string());
         self.runtime_handle.spawn(async move {
+            let _owed = owed;
             // ALLOW(admit-in-spawn): the navigation follows the create it
             // awaits.
             let followed = navigate_to_created_page(
@@ -5822,9 +5858,13 @@ pub fn dispatch_intent_chain(
             (entity_name, op_name, services.dispatch_intent_sync(intent))
         })
         .collect();
+    let owed = services
+        .ui_watermark()
+        .map(|w| w.register_check("dispatch chain".to_string(), || true));
     let services = services.clone();
     services.clone().runtime_handle().spawn(async move {
         let _open = open;
+        let _owed = owed;
         for (entity_name, op_name, run) in runs {
             if let Err(e) = run.await {
                 services.surface_op_failure(entity_name.as_str(), &op_name, &e);
