@@ -1219,6 +1219,7 @@ mod handover {
         let mut watcher = Watcher::new();
         for op in ops {
             watcher.apply(op);
+            owes_what_the_current_generation_still_sends(&watcher)?;
         }
         watcher.drain();
         let data = &watcher.delivery.data;
@@ -1227,6 +1228,36 @@ mod handover {
                 "data owed: applied {} sent {}",
                 data.applied(),
                 data.sent_with_children()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Every seq the current generation still sends keeps `data` owed, so a
+    /// settle cannot accept a frame before it. A begun render that has not
+    /// handed over sends at least `begun`.
+    fn owes_what_the_current_generation_still_sends(watcher: &Watcher) -> Result<(), String> {
+        let Some(current) = watcher.generations.last() else {
+            return Ok(());
+        };
+        let begun = current
+            .begun
+            .filter(|_| !current.handed_over && current.render.is_some());
+        let Some(pending) = current
+            .events
+            .iter()
+            .chain(&current.backlog)
+            .copied()
+            .chain(begun)
+            .max()
+        else {
+            return Ok(());
+        };
+        let data = &watcher.delivery.data;
+        if pending > data.applied() && !data.is_lagging() {
+            return Err(format!(
+                "data settled early: applied {} while the current generation still sends {pending}",
+                data.applied()
             ));
         }
         Ok(())
@@ -1299,6 +1330,21 @@ mod handover {
                 ]
                 .concat(),
             ),
+            (
+                "superseded generation fails while its successor still owes its begin seq",
+                vec![
+                    Trigger { structural: false },
+                    Begin(0),
+                    Route {
+                        to: vec![0],
+                        gap: 0,
+                    },
+                    Trigger { structural: false },
+                    Begin(1),
+                    Fail(0),
+                    Fail(1),
+                ],
+            ),
         ]
     }
 
@@ -1310,7 +1356,9 @@ mod handover {
                 failures.push(format!("{name}: {e}"));
             }
         }
+        // An under-claim shows only in a few schedules: 256 cases missed it.
         let mut runner = TestRunner::new(Config {
+            cases: 2048,
             failure_persistence: None,
             ..Config::default()
         });
