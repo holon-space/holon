@@ -26,6 +26,8 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::geometry::drawer_toggle_id_for;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::dispatch_intent_chain;
+use holon_frontend::row_origin::RowOrigin;
 use holon_frontend::view_model::DrawerMode;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
@@ -1038,5 +1040,295 @@ fn a_desktop_sidebar_survives_the_same_two_gestures() {
         "with no scrim in the way the click must reach the row and focus it",
     );
 
+    h.teardown(driver);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DispatchPath {
+    FireAndForget,
+    Sync,
+    Awaitable,
+    AwaitingResult,
+}
+
+impl Harness {
+    /// `navigation.focus` through `path`, held after its commit while the
+    /// window draws; the gap message when the settle would report rest then.
+    fn focus_held_after_commit_through(
+        &mut self,
+        path: DispatchPath,
+        target: &EntityUri,
+    ) -> Option<String> {
+        let hold = self.env.engine().dispatch_hold().clone();
+        let view_before = self.engine.ui_state().main_view_generation();
+        hold.hold_next_committed("navigation", "focus");
+        let services: Arc<dyn BuilderServices> = self.engine.clone();
+        let intent = OperationIntent::new(
+            "navigation".into(),
+            "focus".to_string(),
+            [
+                ("region", Value::String("main".into())),
+                ("block_id", Value::String(target.to_string())),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        );
+        match path {
+            DispatchPath::FireAndForget => services.dispatch_intent(intent),
+            DispatchPath::Sync => {
+                let f = services.dispatch_intent_sync(intent);
+                self.runtime
+                    .spawn(async move { f.await.expect("sync focus") });
+            }
+            DispatchPath::Awaitable => {
+                let f = services.dispatch_intent_awaitable(intent);
+                self.runtime.spawn(async move {
+                    f.await.expect("awaitable focus");
+                });
+            }
+            DispatchPath::AwaitingResult => {
+                let f = services.dispatch_intent_awaiting_result(intent);
+                self.runtime.spawn(async move {
+                    f.await.expect("awaiting-result focus");
+                });
+            }
+        }
+        let start = Instant::now();
+        while hold.parked_runs("navigation", "focus") == 0 {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "{path:?} focus never reached its commit; parked runs: {:?}",
+                hold.parked_names(),
+            );
+            self.app.run_until_parked();
+        }
+        self.draw_while_dispatch_waits("focus");
+        assert_eq!(self.engine.ui_state().main_view_generation(), view_before);
+        let watermark = self.engine.ui_watermark();
+        let gap =
+            (watermark.owed().is_empty() && watermark.operations_in_flight() == 0).then(|| {
+                format!(
+                    "{path:?}: navigation.focus committed with its Main view bump past generation \
+                 {view_before} pending, but the window settle would report rest"
+                )
+            });
+        self.runtime
+            .block_on(hold.release(1, HANG_DEADLINE))
+            .unwrap_or_else(|e| panic!("release the committed {path:?} focus: {e:#}"));
+        self.runtime.block_on(self.env.settle());
+        self.settle();
+        assert!(
+            self.engine.ui_state().main_view_generation() > view_before,
+            "{path:?} focus never bumped the Main view",
+        );
+        gap
+    }
+}
+
+#[test]
+fn every_dispatch_path_owes_the_settle_until_its_navigation_bump() {
+    let mut h = boot("Holon-Dispatch-Paths-Owe", DESKTOP_WINDOW);
+    let driver = h.driver();
+    let pages = [
+        EntityUri::block(NAV_TARGET),
+        row_uri(ROW_CONTROL),
+        row_uri(ROW_UNDER_SCRIM),
+    ];
+    let mut gaps = Vec::new();
+    for path in [
+        DispatchPath::FireAndForget,
+        DispatchPath::Sync,
+        DispatchPath::Awaitable,
+        DispatchPath::AwaitingResult,
+    ] {
+        let root = h.main_root();
+        let target = pages
+            .iter()
+            .find(|p| root.as_ref() != Some(*p))
+            .expect("three pages, one root")
+            .clone();
+        gaps.extend(h.focus_held_after_commit_through(path, &target));
+    }
+    assert!(gaps.is_empty(), "{gaps:#?}");
+    h.teardown(driver);
+}
+
+/// A spawned dispatch task that outlives its op's in-flight count. Each case
+/// holds the task's op after its commit, where only the task's own settle
+/// entry is left to keep the window settle from reporting rest.
+#[derive(Clone, Copy, Debug)]
+enum SpawnedTask {
+    /// Focus on a creation affordance births the block through a rule op.
+    RuleOp,
+    /// The create, then the `navigation.focus` held here, run in one task.
+    DanglingFollow,
+    /// Every intent of a chain also owes its own `dispatch_intent_sync` entry
+    /// while it runs, so this case pins the chain's navigation, not its entry.
+    Chain,
+}
+
+impl SpawnedTask {
+    /// The op held after its commit and the settle entries the case may owe
+    /// while it is held.
+    fn held(self) -> ((&'static str, &'static str), &'static [&'static str]) {
+        match self {
+            SpawnedTask::RuleOp => (("block", "create"), &["dispatch block.create:"]),
+            SpawnedTask::DanglingFollow => (
+                ("navigation", "focus"),
+                &["dispatch block.create_page_from_link:"],
+            ),
+            SpawnedTask::Chain => (
+                ("navigation", "focus"),
+                &["dispatch chain:", "dispatch navigation.focus:"],
+            ),
+        }
+    }
+}
+
+impl Harness {
+    fn count_children(&self, parent: &EntityUri) -> i64 {
+        let rows = self
+            .runtime
+            .block_on(self.env.query_sql(&format!(
+                "SELECT count(*) AS n FROM block WHERE parent_id = '{parent}'"
+            )))
+            .expect("count the children");
+        rows[0]
+            .get("n")
+            .and_then(|v| v.as_i64())
+            .expect("count(*) is an integer")
+    }
+
+    /// Start `task`, hold its op after the commit while the window draws, and
+    /// return the gap message when the settle would report rest then. After
+    /// the release the plain settle must leave the task's effect visible.
+    fn task_held_after_commit(&mut self, task: SpawnedTask, target: &EntityUri) -> Option<String> {
+        let ((entity, op), owes) = task.held();
+        let hold = self.env.engine().dispatch_hold().clone();
+        let view_before = self.engine.ui_state().main_view_generation();
+        let root_before = self.main_root();
+        let parent = EntityUri::block(NAV_TARGET);
+        let children_before = self.count_children(&parent);
+        hold.hold_next_committed(entity, op);
+        let services: Arc<dyn BuilderServices> = self.engine.clone();
+        let focus = |block_id: String| {
+            OperationIntent::new(
+                "navigation".into(),
+                "focus".to_string(),
+                [
+                    ("region".to_string(), Value::String("main".into())),
+                    ("block_id".to_string(), Value::String(block_id)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+        match task {
+            SpawnedTask::RuleOp => {
+                services.dispatch_intent(focus(RowOrigin::creation_placeholder_id(&parent)))
+            }
+            SpawnedTask::DanglingFollow => {
+                services.follow_dangling_link("Held Follow Page".to_string(), "main".to_string())
+            }
+            SpawnedTask::Chain => dispatch_intent_chain(&services, vec![focus(target.to_string())]),
+        }
+        let start = Instant::now();
+        while hold.parked_runs(entity, op) == 0 {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "{task:?}: {entity}.{op} never reached its commit; parked runs: {:?}",
+                hold.parked_names(),
+            );
+            self.app.run_until_parked();
+        }
+        let watermark = self.engine.ui_watermark();
+        while watermark
+            .owed()
+            .iter()
+            .any(|owed| !owes.iter().any(|label| owed.starts_with(label)))
+        {
+            assert!(
+                start.elapsed() < HANG_DEADLINE,
+                "{task:?}: with {entity}.{op} held the window still owes {:?}",
+                watermark.owed(),
+            );
+            self.app.run_until_parked();
+        }
+        self.app.force_frame();
+        let gap =
+            (watermark.owed().is_empty() && watermark.operations_in_flight() == 0).then(|| {
+                format!(
+                    "{task:?}: {entity}.{op} committed and its task is still running, but the \
+                 window settle would report rest"
+                )
+            });
+        self.runtime
+            .block_on(hold.release(1, HANG_DEADLINE))
+            .unwrap_or_else(|e| panic!("release the committed {task:?} {entity}.{op}: {e:#}"));
+        self.runtime.block_on(self.env.settle());
+        self.settle();
+        if let SpawnedTask::RuleOp = task {
+            assert_eq!(
+                self.count_children(&parent),
+                children_before + 1,
+                "{task:?}: the affordance focus never birthed a block under {parent}",
+            );
+            return gap;
+        }
+        let (root, cursor, tabs) = (
+            self.main_root(),
+            self.main_cursor(),
+            self.open_main_tab_count(),
+        );
+        assert!(
+            self.engine.ui_state().main_view_generation() > view_before && root != root_before,
+            "{task:?}: Main stayed on {root_before:?} at view generation {view_before}",
+        );
+        let rebind = &self.rebind;
+        let (bar_root, highlighted, drawn_tabs) = self.app.update(|cx| {
+            (
+                rebind.breadcrumb_view_root(cx),
+                rebind.drawn_active_tab(cx),
+                rebind.drawn_tab_count(cx),
+            )
+        });
+        assert_eq!(
+            (bar_root, highlighted, drawn_tabs),
+            (root, cursor, Some(tabs)),
+            "{task:?}: the breadcrumb root, the highlighted tab and the drawn tab count lag the \
+             new Main view",
+        );
+        gap
+    }
+}
+
+/// Restriction: `spawn_caret_seat` has no held case. Its task awaits only the
+/// `first_caret_target` read, and the dispatch hold parks operation runs, not
+/// reads.
+#[test]
+fn every_spawned_dispatch_task_owes_the_settle_until_it_ends() {
+    let mut h = boot("Holon-Spawned-Tasks-Owe", DESKTOP_WINDOW);
+    let driver = h.driver();
+    let pages = [
+        EntityUri::block(NAV_TARGET),
+        row_uri(ROW_CONTROL),
+        row_uri(ROW_UNDER_SCRIM),
+    ];
+    let mut gaps = Vec::new();
+    for task in [
+        SpawnedTask::RuleOp,
+        SpawnedTask::DanglingFollow,
+        SpawnedTask::Chain,
+    ] {
+        let root = h.main_root();
+        let target = pages
+            .iter()
+            .find(|p| root.as_ref() != Some(*p))
+            .expect("three pages, one root")
+            .clone();
+        gaps.extend(h.task_held_after_commit(task, &target));
+    }
+    assert!(gaps.is_empty(), "{gaps:#?}");
     h.teardown(driver);
 }
