@@ -1236,7 +1236,7 @@ mod tests {
                             ref_a.corrupt_pending = false;
                             expected_load_failures_on_a += 1;
                         } else if ref_a.share_usable {
-                            // B2: rehydrate re-mints the peer_id so
+                            // Rehydrate re-mints the peer_id so
                             // a stale snapshot can never reuse a
                             // CRDT counter. Assert it changed, then
                             // re-baseline.
@@ -1247,7 +1247,7 @@ mod tests {
                                 .peer_id();
                             assert_ne!(
                                 new_pid, expected_peer_id_a,
-                                "B2: A's shared-doc peer_id must change across restart"
+                                "A's shared-doc peer_id must change across restart"
                             );
                             expected_peer_id_a = new_pid;
                         }
@@ -1259,7 +1259,7 @@ mod tests {
                         drop(b);
                         b = backend_at(dir_b.path(), old_bus).await;
                         if ref_b.share_usable {
-                            // B2: peer_id re-minted on restart
+                            // The peer_id is re-minted on restart
                             // (see RestartA).
                             let new_pid = b
                                 .manager_for_test()
@@ -1268,7 +1268,7 @@ mod tests {
                                 .peer_id();
                             assert_ne!(
                                 new_pid, expected_peer_id_b,
-                                "B2: B's shared-doc peer_id must change across restart"
+                                "B's shared-doc peer_id must change across restart"
                             );
                             expected_peer_id_b = new_pid;
                         }
@@ -1328,7 +1328,7 @@ mod tests {
                         drop(a);
                         a = backend_at(dir_a.path(), old_bus).await;
 
-                        // B2: this restart also re-mints A's peer_id —
+                        // This restart also re-mints A's peer_id —
                         // re-baseline P-KEY (share_usable is
                         // guaranteed by the guard above).
                         {
@@ -1339,7 +1339,7 @@ mod tests {
                                 .peer_id();
                             assert_ne!(
                                 new_pid, expected_peer_id_a,
-                                "B2: A's shared-doc peer_id must change across restart"
+                                "A's shared-doc peer_id must change across restart"
                             );
                             expected_peer_id_a = new_pid;
                         }

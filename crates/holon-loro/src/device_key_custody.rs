@@ -487,9 +487,9 @@ mod tests {
         hex::encode(bytes)
     }
 
-    /// K1-K6 over one entry state and a boot count. The first boot meets the
-    /// scripted fault; later boots meet the keychain with the fault cleared,
-    /// as after a fixed keychain.
+    /// Custody over one entry state and a boot count. The first boot meets
+    /// the scripted fault; later boots meet the keychain with the fault
+    /// cleared, as after a fixed keychain.
     fn check(state: KeyEntryState, boots: usize) -> Result<(), TestCaseError> {
         let store = Arc::new(FaultKeychainStore::default());
         store.set_entry(ACCOUNT, &state);
@@ -503,23 +503,23 @@ mod tests {
                 KeyEntryState::Valid { .. } | KeyEntryState::Blocking { .. },
                 DeviceKeyLoad::Loaded(key),
             ) => {
-                // K1
+                // A stored key loads unchanged and nothing is stored.
                 prop_assert_eq!(key.to_bytes(), state.key_bytes().unwrap());
                 prop_assert_eq!(store.store_calls(), 0);
             }
             (KeyEntryState::Absent, DeviceKeyLoad::Created(key)) => {
-                // K2
+                // An absent entry gets a new key, stored in the entry.
                 prop_assert_eq!(store.entry(ACCOUNT), Some(key.to_bytes().to_vec()));
                 secrets_in_play.push(key.to_bytes().to_vec());
             }
             (KeyEntryState::WrongLength(n), DeviceKeyLoad::Corrupt { len }) => {
-                // K3
+                // A wrong-length entry stays as it is and nothing is stored.
                 prop_assert_eq!(n, len);
                 prop_assert_eq!(store.store_calls(), 0);
                 prop_assert_eq!(store.entry(ACCOUNT).map(|b| b.len()), Some(*n));
             }
             (KeyEntryState::LoadErr { .. }, DeviceKeyLoad::Unavailable { cause }) => {
-                // K3
+                // A load fault stores nothing and its cause names the entry.
                 prop_assert_eq!(store.store_calls(), 0);
                 prop_assert!(cause.contains(ACCOUNT), "{}", cause);
                 prop_assert!(cause.contains(DEVICE_KEY_SERVICE), "{}", cause);
@@ -528,7 +528,7 @@ mod tests {
                 KeyEntryState::StoreErr | KeyEntryState::StoreLost,
                 DeviceKeyLoad::Unavailable { .. },
             ) => {
-                // K4
+                // A failed store leaves no entry.
                 prop_assert_eq!(store.entry(ACCOUNT), None);
             }
             (state, outcome) => {
@@ -536,7 +536,7 @@ mod tests {
             }
         }
 
-        // K5: once a key is in the entry, every later boot reads the same key.
+        // Once a key is in the entry, every later boot reads the same key.
         store.clear_faults();
         let mut stable: Option<[u8; 32]> = match &first {
             DeviceKeyLoad::Loaded(k) | DeviceKeyLoad::Created(k) => Some(k.to_bytes()),
@@ -565,7 +565,7 @@ mod tests {
             }
         }
 
-        // K6: no message and no Debug output carries a key byte string.
+        // No message and no Debug output carries a key byte string.
         if let KeyEntryState::WrongLength(_) = state {
             let e = custody(&store).load().unwrap_err();
             texts.push(e.to_string());
