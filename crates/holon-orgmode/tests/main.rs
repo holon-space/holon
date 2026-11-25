@@ -1,6 +1,7 @@
 mod a_deleted_page_leaves_no_file;
 mod a_lagging_page_registry_keeps_the_page_header;
 mod a_retracted_page_root_keeps_the_page_header;
+mod a_vanished_file_asks_no_bulk_pass;
 mod asset_seed_header_pass_cost;
 mod delete_during_first_ingest;
 mod deleted_page_is_not_rewritten_from_a_stale_page_mirror;

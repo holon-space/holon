@@ -1114,6 +1114,9 @@ pub struct FileSyncController {
     ingest_results: HashMap<EntityUri, Result<IngestOutcome>>,
     /// The write-back stall shown for each document: its path and cause.
     stall_disclosed: HashMap<EntityUri, (PathBuf, String)>,
+    /// Documents cascade-deleted because their file vanished, until they gain
+    /// a home or a block again. Their departures have no file left to reach.
+    vanished: HashSet<EntityUri>,
     /// The `vault-file-emptied` condition shown for each document: its path
     /// and the hash of the empty text.
     refused_disclosed: HashMap<EntityUri, (PathBuf, String)>,
@@ -1307,6 +1310,7 @@ impl FileSyncController {
             mount_skipped: HashMap::new(),
             ingest_results: HashMap::new(),
             stall_disclosed: HashMap::new(),
+            vanished: HashSet::new(),
             refused_disclosed: HashMap::new(),
             accepting_removal: None,
             ingest_quarantine: HashMap::new(),
@@ -2558,6 +2562,7 @@ impl FileSyncController {
             disclosure.writeback_resumed(path);
         }
         self.forget_file_state(canonical).await;
+        self.vanished.insert(document_uri.clone());
         // Also clear the diff base so a later re-create of the same document
         // id starts from an empty base (all blocks are creates), not from the
         // deleted snapshot.
@@ -3059,6 +3064,7 @@ impl FileSyncController {
         // already makes the skip reachable for it.
         self.last_projection_doc
             .insert(canonical.clone(), doc_id.clone());
+        self.vanished.remove(doc_id);
         self.doc_home.insert(doc_id.clone(), canonical);
         self.publish_write_tier(doc_id, path, members)
     }
@@ -8687,6 +8693,16 @@ impl FileSyncController {
         // Derived state first: the holder is what everything below renders
         // from, so it must reflect this delta before any path can read it.
         self.apply_block_delta(doc_id, delta);
+
+        match delta {
+            BlockDelta::Remove(_) if self.vanished.contains(doc_id) => {
+                return Ok(BlockChangeVerdict::Handled);
+            }
+            BlockDelta::Remove(_) => {}
+            BlockDelta::Upsert { .. } => {
+                self.vanished.remove(doc_id);
+            }
+        }
 
         self.page_identity_preflight(doc_id, delta, rows).await;
 

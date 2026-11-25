@@ -33,6 +33,10 @@ pub fn keystone_static_examples() -> Vec<StaticExample> {
         r#"{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}"#,
     )
     .expect("a valid wiring manifest");
+    let every_write_leg: Wiring = serde_json::from_str(
+        r#"{"storage_adapters": ["Loro", "Org", "Markdown", "Turso"], "sync_adapters": ["Todoist"], "actors": ["MCPServer", "ActionEngine"]}"#,
+    )
+    .expect("a valid wiring manifest");
     let mut examples = vec![
         // The write tier refuses a split of a read-only recipe step, so the
         // deleted file's document must hold only what the file declared.
@@ -55,6 +59,23 @@ pub fn keystone_static_examples() -> Vec<StaticExample> {
                 r#"{"CreateBlockUnderFocus": {"content": "probe", "id": "block:gen-under-recipe"}}"#,
                 BREAK_RECIPE,
                 DELETE_RECIPE,
+            ],
+        ),
+        // The deleted recipe page is focused while every write leg runs, so its
+        // block departures reach the file controller in several feed batches.
+        example(
+            "deleting-the-focused-recipe-page-stays-within-its-read-budget",
+            &every_write_leg,
+            &[RECIPE_PAGE, BREAK_RECIPE, DELETE_RECIPE],
+        ),
+        example(
+            "a-restart-after-deleting-the-recipe-stays-within-its-read-budget",
+            &every_write_leg,
+            &[
+                RECIPE_PAGE,
+                BREAK_RECIPE,
+                DELETE_RECIPE,
+                r#"{"SimulateRestart": null}"#,
             ],
         ),
     ];
