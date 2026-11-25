@@ -5,12 +5,14 @@ the run: the floor check refuses a generator that lost a draw kind.
 Run: `python3 scripts/test-known-reds-unreached-kind.py` (SEED=<s>, CASES=<n> random cases, default 20).
 The fixed kind name runs first, through every check of the classifier driver. Then CASES random kind names, each
 with its own draw seed, run only the floor check: the driver's other checks do not read the kind.
+A case passes only when every failure the driver counts is a floor line.
 """
 import contextlib
 import importlib.util
 import io
 import os
 import random
+import re
 import string
 import sys
 from pathlib import Path
@@ -54,9 +56,11 @@ def main():
     failed = 0
     for kind, draw_seed, floor_only in [("a kind no draw reaches", seed, False)] + [(k, s, True) for k, s in drawn]:
         code, out = run_without(kind, draw_seed, floor_only)
-        if code != 1 or f"no draw of 40 reaches {kind}\n" not in out:
+        # The driver's closing line counts every failure it printed; at 40 attempts a real kind can miss the floor too.
+        floor_lines = len(re.findall(r"^no draw of 40 reaches ", out, re.M))
+        if code != 1 or f"no draw of 40 reaches {kind}\n" not in out or f"[known-reds-classifier] FAIL: {floor_lines} failing case(s), seed {draw_seed}\n" not in out:
             failed += 1
-            print(f"kind {kind!r}: want exit 1 and `no draw of 40 reaches {kind}`, got exit {code}")
+            print(f"kind {kind!r}: want exit 1, `no draw of 40 reaches {kind}` and no other failure, got exit {code}:\n{out}")
     print(f"[unreached-kind] {'FAIL' if failed else 'PASS'}: {failed} of {1 + cases} kind(s), seed {seed}")
     sys.exit(1 if failed else 0)
 
