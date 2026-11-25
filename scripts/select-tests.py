@@ -763,9 +763,13 @@ def assert_workspace_root(meta, cwd):
 
 
 def jj_changed(base):
-    out = subprocess.run(["jj", "diff", "--name-only", "--from", base, "--to", "@"],
-                         stdout=subprocess.PIPE, text=True, check=True)
-    return out.stdout.splitlines()
+    # --name-only prints a rename's destination only; the reverse diff prints its source.
+    paths = set()
+    for a, b in ((base, "@"), ("@", base)):
+        out = subprocess.run(["jj", "diff", "--name-only", "--from", a, "--to", b],
+                             stdout=subprocess.PIPE, text=True, check=True)
+        paths.update(out.stdout.splitlines())
+    return sorted(paths)
 
 
 def jj_header(base):

@@ -1586,7 +1586,8 @@ cargo-free-checks:
 lane-checks base:
     #!/usr/bin/env bash
     set -euo pipefail
-    changed=$(jj diff --from {{base}} --to @ --name-only)
+    # --name-only prints a rename's destination only; the reverse diff prints its source.
+    changed=$({ jj diff --from {{base}} --to @ --name-only; jj diff --from @ --to {{base}} --name-only; } | sort -u)
     failed=""
     run() {
         local name=$1

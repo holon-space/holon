@@ -8,14 +8,18 @@ Run: `scripts/python311 scripts/test-lane-check-map.py` (SEED=<n>, CASES=<n>, de
 - P2 a path drawn inside a check's scope selects the check, and a path drawn outside it does not;
 - P3 a drawn diff (a list of inside and outside paths) gets `run` iff one of its paths is inside, and the CLI prints
   `<check> skipped: diff touches none of <globs>` with every glob of the scope otherwise;
-- P4 the CLI refuses an unknown check with a non-zero exit.
+- P4 the CLI refuses an unknown check with a non-zero exit;
+- P5 a diff that renames a path out of a check's scope runs the check: the path list that `just lane-checks`
+  computes from a jj repo still reaches the rename's source.
 PBT fit (property-based-testing/reference/when-to-use-pbt.md): the input is a set of paths with a crisp oracle (the
 scope's membership, and archlint's own file list for P1), so it fits. Fixed near misses run first through P2.
 """
 import importlib.util
 import os
 import random
+import re
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -34,6 +38,9 @@ def load(name, path):
 
 lcm = load("lane_check_map", SCRIPT)
 archlint = load("archlint", REPO / "archlint/archlint.py")
+select_tests = load("select_tests", REPO / "scripts/select-tests.py")
+cover_diff = load("tests_cover_diff", REPO / "scripts/flow-checks/tests-cover-diff.py")
+STATIC_RENAMES = [("crates/a b/src/l\u00fcge.rs", "docs/z \u00fc/l\u00fcge.rs"), ("deny.toml", "notes/deny.toml")]
 
 # (check, path, selected)
 STATIC = [
@@ -92,8 +99,55 @@ def draw_any(rng):
     return "/".join(dirs + [name])
 
 
+def draw_rename(rng, check):
+    """A rename from inside the scope to a path outside it."""
+    dst = draw_any(rng)
+    while in_scope(check, dst):
+        dst = draw_any(rng)
+    return draw_inside(rng, check), dst
+
+
+def recipe_paths(src, dst):
+    """The changed paths that the lane-checks recipe computes for a commit that renames src to dst."""
+    shown = subprocess.run(["just", "--justfile", str(REPO / "justfile"), "--show", "lane-checks"],
+                           capture_output=True, text=True, check=True).stdout
+    command = re.sub(r"\{\{ *base *\}\}", "@-", re.search(r"changed=\$\((.*)\)", shown).group(1))
+    with tempfile.TemporaryDirectory() as repo:
+        run = lambda *argv: subprocess.run(argv, cwd=repo, capture_output=True, text=True, check=True).stdout
+        run("jj", "git", "init", ".")
+        (Path(repo) / src).parent.mkdir(parents=True, exist_ok=True)
+        (Path(repo) / src).write_text("fn moved() {}\n" * 8)
+        run("jj", "commit", "-m", "base")
+        (Path(repo) / dst).parent.mkdir(parents=True, exist_ok=True)
+        (Path(repo) / src).rename(Path(repo) / dst)
+        return run("bash", "-c", command).split()
+
+
 def cli(check, paths):
     return subprocess.run([sys.executable, str(SCRIPT), check], input="\n".join(paths), capture_output=True, text=True)
+
+
+def selector_paths(src, dst):
+    """(jj_changed, chain_paths) of a scratch jj repo whose one change renames src to dst.
+
+    P6: the two Python path selectors list both the source and the destination of a rename."""
+    with tempfile.TemporaryDirectory() as repo:
+        run = lambda *argv: subprocess.run(argv, cwd=repo, capture_output=True, text=True, check=True).stdout
+        run("jj", "git", "init", ".")
+        root = Path(repo)
+        (root / src).parent.mkdir(parents=True, exist_ok=True)
+        (root / src).write_text("fn moved() {}\n" * 8)
+        run("jj", "commit", "-m", "base")
+        (root / dst).parent.mkdir(parents=True, exist_ok=True)
+        (root / src).rename(root / dst)
+        run("jj", "commit", "-m", "rename")
+        cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            [(_, chain)] = cover_diff.chain_paths("@--", "@-")
+            return select_tests.jj_changed("@--"), chain
+        finally:
+            os.chdir(cwd)
 
 
 def main():
@@ -128,9 +182,22 @@ def main():
         if r.returncode != 0 or r.stdout.strip() != want:
             failures.append(f"P3 {check} {diff}: got rc={r.returncode} {r.stdout.strip()!r}, want {want!r}")
 
+    for _ in range(max(1, cases // 40)):
+        check = rng.choice(sorted(lcm.SCOPES))
+        src, dst = draw_rename(rng, check)
+        got = lcm.verdict(check, recipe_paths(src, dst))
+        if got != "run":
+            failures.append(f"P5 {check} rename {src} -> {dst}: got {got!r}, want 'run'")
+
     r = cli("no-such-check", ["Cargo.lock"])
     if r.returncode == 0:
         failures.append("P4 an unknown check exits 0")
+
+    drawn = [draw_rename(rng, rng.choice(sorted(lcm.SCOPES))) for _ in range(max(1, cases // 40))]
+    for src, dst in STATIC_RENAMES + drawn:
+        for name, got in zip(("jj_changed", "chain_paths"), selector_paths(src, dst)):
+            if src not in got or dst not in got:
+                failures.append(f"P6 {name} rename {src} -> {dst}: got {got}, want both paths")
 
     for f in failures[:20]:
         print(f)

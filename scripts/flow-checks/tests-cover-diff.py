@@ -651,7 +651,9 @@ def chain_paths(base, commit):
             sys.exit(f"tests-cover-diff: change {change} of {base}..{commit} has {parents} parents; merges are not "
                      f"supported")
         if empty == "false":
-            chain.append((change, jj("diff", "--name-only", "-r", change).splitlines()))
+            # --name-only prints a rename's destination only; the reverse diff prints its source.
+            paths = jj("diff", "--name-only", "-r", change) + jj("diff", "--name-only", "--from", change, "--to", f"{change}-")
+            chain.append((change, sorted(set(paths.splitlines()))))
     return chain
 
 

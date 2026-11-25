@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Whether a lane diff reaches a path-scoped lane check.
 
-    jj diff --from <base> --to @ --name-only | scripts/lane-check-map.py <check>
+    { jj diff --from <base> --to @ --name-only; jj diff --from @ --to <base> --name-only; } | scripts/lane-check-map.py <check>
+
+The reverse diff adds the sources of renames, which `--name-only` omits.
 
 Prints `run` when a changed path is in the check's scope, else
 `<check> skipped: diff touches none of <globs>`. A scope holds every path whose
