@@ -430,7 +430,7 @@ impl Device {
             .tokens()
             .token(PLACE_SLOT, key)
             .expect("Resolve wrote the slot")
-            .content
+            .record()
             .clone();
         let winner_stamp = string_of(&token, "winner");
         let merge = token.get("merge") == Some(&Value::Boolean(true));

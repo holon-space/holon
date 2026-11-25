@@ -27,6 +27,7 @@ use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::POOL_SUBJECT;
+use holon_net::exec::Payload;
 use holon_net::exec::Place;
 use holon_net::exec::Reader;
 use holon_net::exec::Resolution;
@@ -211,6 +212,15 @@ enum ReadOp {
 }
 
 impl ReadOp {
+    /// A read of a token's fields, which an executor place refuses.
+    fn reads_fields(&self) -> bool {
+        match self {
+            ReadOp::Field(..) | ReadOp::Text(..) => true,
+            ReadOp::Traced(r) => r.reads_fields(),
+            _ => false,
+        }
+    }
+
     fn is_free(&self) -> bool {
         match self {
             ReadOp::Free(_) => true,
@@ -918,11 +928,27 @@ impl NetGen {
     fn read_is_ghost(&self, r: &ReadOp, readable: &[String]) -> bool {
         let p = r.place().of(readable);
         // `free` counts tokens and never runs a derived place.
-        if r.is_free() {
+        if r.reads_fields() && self.is_executor_place(&p) {
+            true
+        } else if r.is_free() {
             !self.declares(&p)
         } else {
             self.ghost(&p)
         }
+    }
+
+    fn is_executor_place(&self, place: &str) -> bool {
+        place == OUTCOME_UNKNOWN
+            || self.transition_names().iter().any(|t| {
+                [
+                    Place::running(t),
+                    Place::retry_pending(t),
+                    Place::outcome_unknown(t),
+                    Place::undo_pending(t),
+                ]
+                .iter()
+                .any(|p| p.as_str() == place)
+            })
     }
 
     /// Every place the net holds: the file's, the lowering's and the
@@ -1020,7 +1046,13 @@ fn snapshot(exec: &Executor, net: &NetGen) -> String {
     let mut out = String::new();
     for p in all_places(net) {
         for s in exec.tokens().subjects(&p) {
-            out += &format!("{p}/{s}: {:?}\n", exec.tokens().contents(&p, &s));
+            out += &format!(
+                "{p}/{s}: {:?}\n",
+                exec.tokens()
+                    .row(&p, &s)
+                    .map(|t| &t.payload)
+                    .collect::<Vec<_>>()
+            );
         }
     }
     out += &format!("marks {:?}\n", exec.marks().collect::<Vec<_>>());
@@ -1036,8 +1068,10 @@ fn producers(exec: &Executor, net: &NetGen) -> BTreeSet<String> {
     let mut by = BTreeSet::new();
     for p in all_places(net) {
         for s in exec.tokens().subjects(&p) {
-            for c in exec.tokens().contents(&p, &s) {
-                if let Some(Value::String(t)) = c.get(BY) {
+            for t in exec.tokens().row(&p, &s) {
+                if let Payload::Record(c) = &t.payload
+                    && let Some(Value::String(t)) = c.get(BY)
+                {
                     by.insert(t.clone());
                 }
             }

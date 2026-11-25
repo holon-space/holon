@@ -570,7 +570,7 @@ fn marking(exec: &Executor, place: &str) -> BTreeMap<String, Content> {
                 .tokens()
                 .token(place, &s)
                 .expect("subject holds a token");
-            (s.as_str().to_string(), c.content.clone())
+            (s.as_str().to_string(), c.record().clone())
         })
         .collect()
 }

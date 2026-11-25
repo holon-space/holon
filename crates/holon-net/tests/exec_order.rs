@@ -296,9 +296,9 @@ impl StateMachineTest for StorageTest {
         }
         let tokens = sut.d.exec().tokens();
         if let Some(stored) = tokens.token("Storage", APP)
-            && stored.content["backend"] == Value::String("loro".to_string())
+            && stored.record()["backend"] == Value::String("loro".to_string())
         {
-            let generation = int(&stored.content, "gen");
+            let generation = int(&stored.record(), "gen");
             assert!(
                 sut.turso_failed.contains(&generation),
                 "loro_only_after_turso_failed: Loro produced generation {generation} \

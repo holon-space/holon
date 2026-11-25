@@ -629,8 +629,8 @@ fn compare(sut: &mut Sut, m: &Model) {
         let answered = sut.exec.tokens().token(&answered_place(T), s);
         row("Answered", answered.is_some(), sj.answered.is_some());
         if let (Some(t), Some(ans)) = (answered, &sj.answered) {
-            assert_eq!(get(&t.content, ANSWER_ID_KEY), ans.id.to_string());
-            assert_eq!(t.content[ANSWER_INPUT_KEY], value_of(ans.value));
+            assert_eq!(get(t.record(), ANSWER_ID_KEY), ans.id.to_string());
+            assert_eq!(t.record()[ANSWER_INPUT_KEY], value_of(ans.value));
         }
         row(
             "work running",
@@ -695,7 +695,7 @@ fn compare(sut: &mut Sut, m: &Model) {
                 .expect("listed");
             (
                 id.parse().expect("an answer id"),
-                (get(&t.content, "why"), get(&t.content, REASON_FIELD)),
+                (get(t.record(), "why"), get(t.record(), REASON_FIELD)),
             )
         })
         .collect();
@@ -938,7 +938,7 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
         .tokens()
         .token("Removed", "a")
         .expect("the work ran")
-        .content;
+        .record();
     assert_eq!(removed[ANSWER_INPUT_KEY], text("Remove"));
     assert_eq!(removed[ANSWER_ID_KEY], text("1"));
 }

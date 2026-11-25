@@ -11,12 +11,12 @@ use exec_support::Transition;
 use exec_support::bind;
 use exec_support::content;
 use exec_support::text;
-use holon_api::Value;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Output;
+use holon_net::exec::Payload;
 use holon_net::exec::Place;
 use holon_net::exec::Receiver;
 use holon_net::exec::Subject;
@@ -253,8 +253,10 @@ fn a_backoff_holds_one_retry_pending_token() {
         "one RetryPending token during the backoff"
     );
     assert_eq!(
-        tokens.token(&place, APP).expect("listed").content["due"],
-        Value::Integer(2_000_000_000),
+        tokens.token(&place, APP).expect("listed").payload,
+        Payload::RetryPending {
+            due: Duration::from_secs(2)
+        },
         "due when the backoff ends"
     );
     d.tick(2).expect("the net quiesces");

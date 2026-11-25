@@ -29,11 +29,13 @@ use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
 use holon_net::exec::Executor;
 use holon_net::exec::FireError;
+use holon_net::exec::Holder;
 use holon_net::exec::LoadError;
 use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
+use holon_net::exec::Payload;
 use holon_net::exec::Place;
 use holon_net::exec::Quiesced;
 use holon_net::exec::Reader;
@@ -776,10 +778,9 @@ impl Driver {
         for t in &self.spec.transitions {
             let place = Place::running(&t.name);
             for s in tokens.subjects(&place) {
-                let content = &tokens.token(&place, &s).expect("listed").content;
-                let occ = match content.get("occurrence") {
-                    Some(Value::String(o)) => o.clone(),
-                    other => panic!("{place} of {s} names occurrence {other:?}"),
+                let occ = match &tokens.token(&place, &s).expect("listed").payload {
+                    Payload::Running { occurrence } => occurrence.to_string(),
+                    other => panic!("{place} of {s} holds {other:?}"),
                 };
                 sut_running.insert((t.name.clone(), s.to_string()), occ);
             }
@@ -805,11 +806,10 @@ impl Driver {
         for t in &self.spec.transitions {
             let place = Place::retry_pending(&t.name);
             for s in tokens.subjects(&place) {
-                let content = &tokens.token(&place, &s).expect("listed").content;
-                let Some(Value::Integer(nanos)) = content.get("due") else {
-                    panic!("{place} of {s} has no integer due: {content:?}");
+                let due = match &tokens.token(&place, &s).expect("listed").payload {
+                    Payload::RetryPending { due } => *due,
+                    other => panic!("{place} of {s} holds {other:?}"),
                 };
-                let due = Duration::from_nanos(u64::try_from(*nanos).expect("not negative"));
                 sut_retry.insert((t.name.clone(), s.to_string()), due);
             }
         }
@@ -824,26 +824,19 @@ impl Driver {
         for t in &self.spec.transitions {
             let place = Place::undo_pending(&t.name);
             for s in tokens.subjects(&place) {
-                let content = &tokens.token(&place, &s).expect("listed").content;
-                let Some(Value::Array(rows)) = content.get("held") else {
-                    panic!("{place} of {s} has no held rows: {content:?}");
+                let Payload::UndoPending { held, .. } =
+                    &tokens.token(&place, &s).expect("listed").payload
+                else {
+                    panic!("{place} of {s} holds no UndoPending token");
                 };
-                let held: BTreeSet<String> = rows
+                let held: BTreeSet<String> = held
                     .iter()
-                    .map(|row| {
-                        let Value::Object(row) = row else {
-                            panic!("a held row of {place} of {s} is no object: {row:?}")
+                    .map(|(p, subject, holder)| {
+                        let holder = match holder {
+                            Holder::Running(t) => t.to_string(),
+                            Holder::OutcomeUnknown(o) => o.to_string(),
                         };
-                        let text = |f: &str| match row.get(f) {
-                            Some(Value::String(v)) => v.clone(),
-                            other => panic!("the {f} of a held row is {other:?}"),
-                        };
-                        format!(
-                            "{}/{} held by {}",
-                            text("place"),
-                            text("subject"),
-                            text("holder")
-                        )
+                        format!("{p}/{subject} held by {holder}")
                     })
                     .collect();
                 sut_pending.insert((t.name.clone(), s.to_string()), held);
@@ -861,10 +854,9 @@ impl Driver {
         for t in &self.spec.transitions {
             let place = Place::outcome_unknown(&t.name);
             for s in tokens.subjects(&place) {
-                let content = &tokens.token(&place, &s).expect("listed").content;
-                let occ = match content.get("occurrence") {
-                    Some(Value::String(o)) => o.clone(),
-                    other => panic!("{place} of {s} names occurrence {other:?}"),
+                let occ = match &tokens.token(&place, &s).expect("listed").payload {
+                    Payload::OutcomeUnknown { occurrence } => occurrence.to_string(),
+                    other => panic!("{place} of {s} holds {other:?}"),
                 };
                 sut_unknown_places.insert((t.name.clone(), s.to_string()), occ);
             }
@@ -886,12 +878,23 @@ impl Driver {
             }
         }
 
-        let sut_unknown: BTreeMap<String, Content> = tokens
+        let sut_unknown: BTreeMap<String, (String, String, String)> = tokens
             .subjects(OUTCOME_UNKNOWN)
             .into_iter()
             .map(|s| {
-                let c = tokens.token(OUTCOME_UNKNOWN, &s).expect("listed");
-                (s.to_string(), c.content.clone())
+                let parked = match &tokens.token(OUTCOME_UNKNOWN, &s).expect("listed").payload {
+                    Payload::Parked {
+                        transition,
+                        subject,
+                        cause,
+                    } => (
+                        transition.to_string(),
+                        subject.to_string(),
+                        cause.text.clone(),
+                    ),
+                    other => panic!("{OUTCOME_UNKNOWN} of {s} holds {other:?}"),
+                };
+                (s.to_string(), parked)
             })
             .collect();
         agree(op, "OutcomeUnknown", sut_unknown, self.model.unknown());

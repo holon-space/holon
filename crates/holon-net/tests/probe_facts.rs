@@ -103,7 +103,7 @@ fn each_stdout_line_becomes_a_fact_token_keyed_by_its_subject_field() {
     );
     assert_eq!(subjects(&exec), ["41", "42"]);
     assert_eq!(
-        exec.tokens().token("Process", "41").map(|t| &t.content),
+        exec.tokens().token("Process", "41").map(|t| t.record()),
         Some(&content(&[
             ("pid", Value::Integer(41)),
             ("command", Value::String("cargo".to_owned())),

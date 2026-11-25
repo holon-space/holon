@@ -182,7 +182,7 @@ impl Sut {
             .exec()
             .tokens()
             .token("Storage", APP)
-            .map(|t| string(&t.content, "backend"))
+            .map(|t| string(t.record(), "backend"))
     }
 
     fn resolve(&mut self, resolution: Resolution) {
@@ -383,7 +383,7 @@ fn a_late_done_resolves_the_parked_occurrence() {
         .exec()
         .tokens()
         .token("Storage", APP)
-        .map(|t| string(&t.content, "backend"))
+        .map(|t| string(t.record(), "backend"))
         .into_iter()
         .collect();
     assert_eq!(backends, vec!["turso".to_string()], "late_done_one_product");

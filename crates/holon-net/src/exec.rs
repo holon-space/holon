@@ -126,7 +126,9 @@ impl Place {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttemptId(pub u64);
 
-pub type Content = BTreeMap<String, Value>;
+pub type Record<V> = BTreeMap<String, V>;
+
+pub type Content = Record<Value>;
 
 /// The token classes of NET-class.a. This executor holds process class and
 /// an in-memory stand-in for data class: whole-content slots, no claims.
@@ -923,9 +925,50 @@ const MAX_DERIVED_DEPTH: usize = 128;
 const MAX_NOW: Duration = Duration::from_nanos(i64::MAX as u64);
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Token {
+pub struct Token<V = Value> {
     pub id: u64,
-    pub content: Content,
+    pub payload: Payload<V>,
+}
+
+/// What a token holds. Only `Record` is net data; the other variants are the
+/// executor's own tokens in the places [`NetDef::check`] declares for it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Payload<V = Value> {
+    Record(Record<V>),
+    /// `<T>.Running`: names one occurrence with an attempt running.
+    Running {
+        occurrence: OccurrenceId,
+    },
+    /// `<T>.RetryPending`: when the pending retry fires.
+    RetryPending {
+        due: Duration,
+    },
+    /// `<T>.OutcomeUnknown`: names one occurrence parked for the subject.
+    OutcomeUnknown {
+        occurrence: OccurrenceId,
+    },
+    /// [`OUTCOME_UNKNOWN`], keyed by the parked occurrence.
+    Parked {
+        transition: Arc<str>,
+        subject: Subject,
+        cause: Cause,
+    },
+    /// `<T>.UndoPending`, keyed by the answer: the rows its undo still owes,
+    /// each with the holder that kept it.
+    UndoPending {
+        answer: Arc<str>,
+        held: Vec<(Place, Subject, Holder)>,
+    },
+}
+
+impl<V: fmt::Debug> Token<V> {
+    /// The net data of a token in a net place.
+    pub fn record(&self) -> &Record<V> {
+        match &self.payload {
+            Payload::Record(r) => r,
+            other => panic!("token {} holds no record: {other:?}", self.id),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -975,9 +1018,16 @@ impl Tokens {
     }
 
     /// Every token the row holds, oldest first.
+    pub fn row(&self, place: &str, subject: &str) -> impl Iterator<Item = &Token> {
+        self.slot(place, subject)
+            .into_iter()
+            .flat_map(|s| &s.tokens)
+    }
+
+    /// The records of a net place's row, oldest first.
     pub fn contents(&self, place: &str, subject: &str) -> Vec<Content> {
         self.slot(place, subject).map_or_else(Vec::new, |s| {
-            s.tokens.iter().map(|t| t.content.clone()).collect()
+            s.tokens.iter().map(|t| t.record().clone()).collect()
         })
     }
 
@@ -1058,11 +1108,21 @@ impl Tokens {
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
         if fifo {
-            slot.tokens.push_back(Token { id, content });
-        } else if slot.tokens.front().is_some_and(|t| t.content == content) {
+            slot.tokens.push_back(Token {
+                id,
+                payload: Payload::Record(content),
+            });
+        } else if slot
+            .tokens
+            .front()
+            .is_some_and(|t| t.payload == Payload::Record(content.clone()))
+        {
             return Ok(());
         } else {
-            slot.tokens = VecDeque::from([Token { id, content }]);
+            slot.tokens = VecDeque::from([Token {
+                id,
+                payload: Payload::Record(content),
+            }]);
         }
         slot.version += 1;
         slot.writer = by.cloned();
@@ -1113,13 +1173,17 @@ impl Tokens {
         slot.writer = by.cloned();
     }
 
-    /// Places an executor-owned marker (Running, OutcomeUnknown): a move, not
+    /// Places an executor-owned token (Running, OutcomeUnknown): a move, not
     /// a commit, so no version changes.
-    fn mark_slot(&mut self, place: &Place, subject: &Subject, content: Option<Content>) {
+    fn mark_slot(&mut self, place: &Place, subject: &Subject, payload: Option<Payload>) {
+        assert!(
+            !matches!(payload, Some(Payload::Record(_))),
+            "{place} of {subject} is an executor place and holds no record"
+        );
         let id = self.next_id;
         self.next_id += 1;
-        self.slot_mut(place, subject).tokens = content
-            .map(|content| Token { id, content })
+        self.slot_mut(place, subject).tokens = payload
+            .map(|payload| Token { id, payload })
             .into_iter()
             .collect();
     }
@@ -1203,11 +1267,19 @@ impl Reader<'_> {
             {
                 None
             }
+            // An executor place holds no fields: a read of one refuses the
+            // firing like a read of an undeclared place.
+            PlaceKind::Stored { .. } if net.owned.contains(place) => {
+                self.trace
+                    .undeclared
+                    .get_or_insert_with(|| Place::new(place));
+                None
+            }
             PlaceKind::Stored { .. } => {
                 let value = self
                     .tokens
                     .token(place, subject)
-                    .and_then(|t| t.content.get(field).cloned());
+                    .and_then(|t| t.record().get(field).cloned());
                 self.trace
                     .row(self.tokens, place, subject)
                     .fields
@@ -1776,46 +1848,6 @@ fn holder_name(holder: &Holder) -> Arc<str> {
     }
 }
 
-/// The `<T>.UndoPending` token of an answer: every row its undo still owes.
-fn pending_content(answer: &str, held: &[(Place, Subject, Arc<str>)]) -> Content {
-    let row = |(place, subject, holder): &(Place, Subject, Arc<str>)| {
-        Value::Object(HashMap::from([
-            ("place".to_owned(), Value::String(place.to_string())),
-            ("subject".to_owned(), Value::String(subject.to_string())),
-            ("holder".to_owned(), Value::String(holder.to_string())),
-        ]))
-    };
-    Content::from([
-        (ANSWER_ID_KEY.to_owned(), Value::String(answer.to_owned())),
-        (
-            "held".to_owned(),
-            Value::Array(held.iter().map(row).collect()),
-        ),
-    ])
-}
-
-fn pending_held(content: &Content) -> Vec<(Place, Subject, Arc<str>)> {
-    let Some(Value::Array(rows)) = content.get("held") else {
-        panic!("an UndoPending token without held rows: {content:?}");
-    };
-    rows.iter()
-        .map(|row| {
-            let Value::Object(row) = row else {
-                panic!("a held row of an UndoPending token is no object: {row:?}")
-            };
-            let text = |field: &str| match row.get(field) {
-                Some(Value::String(s)) => s.clone(),
-                other => panic!("the {field} of a held row is {other:?}"),
-            };
-            (
-                Place::new(&text("place")),
-                Subject::new(&text("subject")),
-                Arc::from(text("holder").as_str()),
-            )
-        })
-        .collect()
-}
-
 impl fmt::Display for Condition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2120,7 +2152,10 @@ impl Executor {
                 }
                 let rows = |ps: &[Place]| {
                     ps.iter()
-                        .map(|p| format!("{p}={:?}", self.tokens.contents(p, &s)))
+                        .map(|p| {
+                            let row: Vec<_> = self.tokens.row(p, &s).map(|t| &t.payload).collect();
+                            format!("{p}={row:?}")
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
@@ -2343,7 +2378,7 @@ impl Executor {
             }
             None => match self.tokens.token(&expired_place(work), id) {
                 Some(t) => {
-                    let Some(Value::String(reason)) = t.content.get(REASON_FIELD) else {
+                    let Some(Value::String(reason)) = t.record().get(REASON_FIELD) else {
                         panic!("the {} token of '{id}' has no reason", expired_place(work));
                     };
                     AnswerSettlement::Expired {
@@ -2460,7 +2495,7 @@ impl Executor {
         let withdrawn = self
             .tokens
             .token(&answered, &subject)
-            .is_some_and(|t| t.content.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
+            .is_some_and(|t| t.record().get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
         if withdrawn {
             self.tokens.remove(&answered, &subject, None);
         }
@@ -2492,9 +2527,7 @@ impl Executor {
         let held: Vec<_> = reversed
             .iter()
             .filter_map(|r| match &r.outcome {
-                ReversalOutcome::Held(h) => {
-                    Some((r.place.clone(), r.subject.clone(), holder_name(h)))
-                }
+                ReversalOutcome::Held(h) => Some((r.place.clone(), r.subject.clone(), h.clone())),
                 _ => None,
             })
             .collect();
@@ -2502,7 +2535,10 @@ impl Executor {
             self.tokens.mark_slot(
                 &Place::undo_pending(&work),
                 &Subject::new(id),
-                Some(pending_content(id, &held)),
+                Some(Payload::UndoPending {
+                    answer: id.clone(),
+                    held,
+                }),
             );
         }
         self.undone.insert(id.clone());
@@ -2703,15 +2739,18 @@ impl Executor {
             let work = self.net.transitions[i].name.clone();
             let pending = Place::undo_pending(&work);
             for answer in self.tokens.subjects(&pending) {
-                let content = self
+                let Payload::UndoPending { held, .. } = &self
                     .tokens
                     .token(&pending, &answer)
                     .expect("a listed subject holds a token")
-                    .content
-                    .clone();
+                    .payload
+                else {
+                    panic!("{pending} of {answer} holds no UndoPending token");
+                };
+                let held = held.clone();
                 let occurrence = work_occurrence(&work, &answer.to_string());
                 let mut keep = Vec::new();
-                for (place, subject, holder) in pending_held(&content) {
+                for (place, subject, holder) in held {
                     if self.holder(&place, &subject).is_some() {
                         keep.push((place, subject, holder));
                         continue;
@@ -2721,6 +2760,7 @@ impl Executor {
                     if self.tokens.version(&place, &subject) != version {
                         let writer = self.tokens.writer(&place, &subject);
                         let answer = AnswerId(answer.to_string());
+                        let holder = holder_name(&holder);
                         self.conditions
                             .push(if writer.as_deref() == Some(&*holder) {
                                 Condition::UndoHeld {
@@ -2752,7 +2792,10 @@ impl Executor {
                         None => self.tokens.remove(&place, &subject, None),
                     }
                 }
-                let next = (!keep.is_empty()).then(|| pending_content(&answer.to_string(), &keep));
+                let next = (!keep.is_empty()).then(|| Payload::UndoPending {
+                    answer: Arc::from(answer.as_str()),
+                    held: keep,
+                });
                 self.tokens.mark_slot(&pending, &answer, next);
             }
         }
@@ -3277,7 +3320,7 @@ impl Executor {
         self.tokens
             .token(place, subject)
             .expect("decide checked every consumed token")
-            .content
+            .record()
             .get(field)
             .cloned()
             .unwrap_or_else(|| panic!("the {place} token of {subject} has no '{field}'"))
@@ -3357,21 +3400,16 @@ impl Executor {
         let token = self
             .tokens
             .token(&Place::retry_pending(transition), subject)?;
-        let Some(Value::Integer(nanos)) = token.content.get("due") else {
-            panic!("'{transition}.RetryPending' of {subject} has no integer due");
+        let Payload::RetryPending { due } = token.payload else {
+            panic!("'{transition}.RetryPending' of {subject} holds {token:?}");
         };
-        Some(Duration::from_nanos(
-            u64::try_from(*nanos).expect("a due time is not negative"),
-        ))
+        Some(due)
     }
 
     fn set_retry_due(&mut self, key: &(Arc<str>, Subject), due: Option<Duration>) {
-        let content = due.map(|due| {
-            let nanos = i64::try_from(due.as_nanos()).expect("a due time fits i64 nanoseconds");
-            Content::from([("due".to_string(), Value::Integer(nanos))])
-        });
+        let payload = due.map(|due| Payload::RetryPending { due });
         self.tokens
-            .mark_slot(&Place::retry_pending(&key.0), &key.1, content);
+            .mark_slot(&Place::retry_pending(&key.0), &key.1, payload);
     }
 
     fn end_run(&mut self, key: &(Arc<str>, Subject)) {
@@ -3383,10 +3421,9 @@ impl Executor {
         self.tokens.mark_slot(
             &Place::running(&a.transition),
             &a.subject,
-            Some(Content::from([(
-                "occurrence".to_string(),
-                Value::String(a.occurrence.to_string()),
-            )])),
+            Some(Payload::Running {
+                occurrence: a.occurrence.clone(),
+            }),
         );
     }
 
@@ -3658,11 +3695,11 @@ impl Executor {
         }
         if let Some(held) = self.tokens.token(&o.place, &o.subject) {
             assert!(
-                held.content == o.content,
+                *held.record() == o.content,
                 "a put with no compare-and-set into the single-token place {} of {} would drop the held token {:?} for {:?}",
                 o.place,
                 o.subject,
-                held.content,
+                held.record(),
                 o.content
             );
         }
@@ -3679,7 +3716,7 @@ impl Executor {
                     .slot(p, &a.subject)
                     .is_some_and(|s| !s.tokens.is_empty() && !s.reserved);
                 if !rewritten && (keep_answered || Some(p) != answered.as_ref()) {
-                    before.insert((p.clone(), a.subject.clone()), Some(token.content.clone()));
+                    before.insert((p.clone(), a.subject.clone()), Some(token.record().clone()));
                 }
             }
             for o in &rows {
@@ -3688,7 +3725,7 @@ impl Executor {
                     .or_insert_with(|| {
                         self.tokens
                             .token(&o.place, &o.subject)
-                            .map(|t| t.content.clone())
+                            .map(|t| t.record().clone())
                     });
             }
         }
@@ -3799,14 +3836,11 @@ impl Executor {
         self.tokens.mark_slot(
             &Place::new(OUTCOME_UNKNOWN),
             &Subject::new(&a.occurrence.to_string()),
-            Some(Content::from([
-                (
-                    "transition".to_string(),
-                    Value::String(a.transition.to_string()),
-                ),
-                ("subject".to_string(), Value::String(a.subject.to_string())),
-                ("cause".to_string(), Value::String(cause.text.clone())),
-            ])),
+            Some(Payload::Parked {
+                transition: a.transition.clone(),
+                subject: a.subject.clone(),
+                cause: cause.clone(),
+            }),
         );
         self.set_mark(&a, &cause);
         self.occurrences.insert(
@@ -3831,11 +3865,11 @@ impl Executor {
             .parked
             .values()
             .find(|a| &a.transition == transition && &a.subject == subject)
-            .map(|a| a.occurrence.to_string());
+            .map(|a| a.occurrence.clone());
         self.tokens.mark_slot(
             &Place::outcome_unknown(transition),
             subject,
-            occurrence.map(|o| Content::from([("occurrence".to_string(), Value::String(o))])),
+            occurrence.map(|occurrence| Payload::OutcomeUnknown { occurrence }),
         );
     }
 

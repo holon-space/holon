@@ -118,7 +118,7 @@ fn undo_reverses_the_work_and_discloses_each_row() {
         d.exec()
             .tokens()
             .token("Item", "x")
-            .map(|t| t.content.clone()),
+            .map(|t| t.record().clone()),
         Some(n(1))
     );
     assert!(
@@ -151,7 +151,7 @@ fn undo_leaves_a_row_changed_since_the_work() {
         d.exec()
             .tokens()
             .token("Accepted", "x")
-            .map(|t| t.content.clone()),
+            .map(|t| t.record().clone()),
         Some(n(9))
     );
 }
@@ -446,7 +446,7 @@ fn a_holder_that_updates_the_held_row_is_disclosed() {
         d.exec()
             .tokens()
             .token("Accepted", "x")
-            .map(|t| t.content.clone()),
+            .map(|t| t.record().clone()),
         Some(n(9)),
         "the undo changed a row its holder had rewritten"
     );
@@ -463,7 +463,7 @@ fn an_outside_write_during_the_hold_survives_the_pending_undo() {
         d.exec()
             .tokens()
             .token("Accepted", "x")
-            .map(|t| t.content.clone()),
+            .map(|t| t.record().clone()),
         Some(n(7)),
         "the undo overwrote a row written while its holder held it"
     );
@@ -501,7 +501,7 @@ fn an_outside_write_that_restores_the_content_blocks_the_pending_undo() {
         d.exec()
             .tokens()
             .token("Accepted", "x")
-            .map(|t| t.content.clone()),
+            .map(|t| t.record().clone()),
         Some(n(1)),
         "the undo removed a row a later write had put back"
     );

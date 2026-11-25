@@ -222,7 +222,7 @@ fn manual(name: &str) -> TransitionDef {
 }
 
 fn token_field(exec: &Executor, place: &str, doc: &str, field: &str) -> Option<String> {
-    match exec.tokens().token(place, doc)?.content.get(field)? {
+    match exec.tokens().token(place, doc)?.record().get(field)? {
         Value::String(s) => Some(s.clone()),
         other => panic!("write-back net {place} of {doc}: field '{field}' is {other:?}"),
     }

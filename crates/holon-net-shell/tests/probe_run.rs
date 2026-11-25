@@ -231,7 +231,7 @@ async fn the_orchestration_probes_report_this_machine() {
         .tokens()
         .token("Disk", &disks[0])
         .expect("a fact")
-        .content;
+        .record();
     assert!(
         matches!(disk.get("free_kb"), Some(holon_pattern::Value::Integer(kb)) if *kb > 0),
         "the disk fact names its free space: {disk:?}"

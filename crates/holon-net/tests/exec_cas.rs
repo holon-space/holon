@@ -156,7 +156,7 @@ fn a_stale_effect_on_a_data_place_applies_and_discloses() {
             .tokens()
             .token("DocC", DOC)
             .expect("edited")
-            .content,
+            .record(),
         "title",
     );
     assert_eq!(stored, "foo", "the effect happened, so its output applies");
@@ -273,7 +273,7 @@ fn a_stale_pure_firing_rolls_back_and_refires() {
             .tokens()
             .token("Out", "x")
             .expect("doubled")
-            .content,
+            .record(),
         "n",
     );
     assert_eq!(out, 4, "Out follows the final Mid");
@@ -364,7 +364,7 @@ fn a_consumed_input_is_never_stale() {
                 .tokens()
                 .token("Store", DOC)
                 .expect("a store")
-                .content,
+                .record(),
             "n"
         ),
         2,
@@ -549,7 +549,7 @@ fn base_n(d: &Driver) -> i64 {
             .tokens()
             .token("Base", DOC)
             .expect("a base")
-            .content,
+            .record(),
         "n",
     )
 }

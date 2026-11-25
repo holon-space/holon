@@ -904,7 +904,7 @@ fn booted(turso: Faults, loro: Faults) -> (Driver, Pair) {
 }
 
 fn token_content<'a>(d: &'a Driver, place: &str) -> Option<&'a Content> {
-    d.exec().tokens().token(place, VAULT).map(|t| &t.content)
+    d.exec().tokens().token(place, VAULT).map(|t| t.record())
 }
 
 /// Settles the oldest pending request of ONE transition. The order of the

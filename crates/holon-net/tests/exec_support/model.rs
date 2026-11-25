@@ -478,21 +478,15 @@ impl Model {
         unknown
     }
 
-    pub fn unknown(&self) -> BTreeMap<String, Content> {
+    /// `OutcomeUnknown` per parked occurrence: (transition, subject, cause).
+    pub fn unknown(&self) -> BTreeMap<String, (String, String, String)> {
         self.occs
             .iter()
             .filter_map(|(id, o)| {
                 let cause = o.parked.as_ref()?;
                 Some((
                     id.to_string(),
-                    Content::from([
-                        (
-                            "transition".to_string(),
-                            Value::String(o.transition.clone()),
-                        ),
-                        ("subject".to_string(), Value::String(o.subject.clone())),
-                        ("cause".to_string(), Value::String(cause.clone())),
-                    ]),
+                    (o.transition.clone(), o.subject.clone(), cause.clone()),
                 ))
             })
             .collect()

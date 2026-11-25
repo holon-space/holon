@@ -116,7 +116,13 @@ fn snapshot(exec: &Executor, places: &[String]) -> String {
     let mut out = String::new();
     for p in places {
         for s in exec.tokens().subjects(p) {
-            out += &format!("{p}/{s}: {:?}\n", exec.tokens().contents(p, &s));
+            out += &format!(
+                "{p}/{s}: {:?}\n",
+                exec.tokens()
+                    .row(p, &s)
+                    .map(|t| &t.payload)
+                    .collect::<Vec<_>>()
+            );
         }
     }
     out += &format!("marks {:?}\n", exec.marks().collect::<Vec<_>>());

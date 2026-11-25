@@ -663,7 +663,7 @@ impl FileSyncController {
                             .tokens()
                             .token(wn::REFUSED, &doc)
                             .expect("listed by refused_docs")
-                            .content,
+                            .record(),
                         "seen",
                     )
                     .to_string();
