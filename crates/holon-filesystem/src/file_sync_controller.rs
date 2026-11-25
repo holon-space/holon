@@ -3294,7 +3294,7 @@ impl FileSyncController {
                 .read(|exec| {
                     exec.tokens()
                         .token(crate::writeback_net::AUTHORITY, doc.as_str())
-                        .map(|t| crate::writeback_net::field(&t.content, "hash").to_string())
+                        .map(|t| crate::writeback_net::field(t.record(), "hash").to_string())
                 })
                 .unwrap_or_else(|| crate::writeback_net::SEED.to_string());
             self.net.write(

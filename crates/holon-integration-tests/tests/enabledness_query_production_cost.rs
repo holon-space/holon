@@ -340,7 +340,7 @@ fn one_data_firing_with_the_holder_take_stays_under_a_millisecond() {
         .token("WriteDone", HOLDER_SUBJECT)
         .expect("every write lands in the data place");
     assert_eq!(
-        done.content.get("seq"),
+        done.record().get("seq"),
         Some(&holon_api::Value::Integer(n as i64)),
         "the last write did not fire, so the figures below are not firings"
     );

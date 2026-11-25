@@ -86,11 +86,19 @@ fn key(a: &str, s: &str) -> Key {
     (a.to_string(), s.to_string())
 }
 
+/// A token's header as the differential check compares it: takes per
+/// consuming transition, and a port token's cause.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Head {
+    pub tries: BTreeMap<String, u32>,
+    pub cause: Option<String>,
+}
+
 #[derive(Clone, Default)]
 struct Slot {
     version: u64,
     /// Oldest first; a [`Capacity::Single`] place holds at most one.
-    content: VecDeque<Content>,
+    content: VecDeque<(Head, Content)>,
     /// The transition whose commit set the current version, `None` for a
     /// write from outside the net (D191-rewritten.a).
     writer: Option<Arc<str>>,
@@ -101,6 +109,7 @@ struct Row {
     version: u64,
     present: bool,
     fields: BTreeMap<String, Option<Value>>,
+    cause: Option<Option<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -109,13 +118,20 @@ struct Trace {
 }
 
 /// What a read trace saw, without its versions: the key of a failure mark.
-type Seen = BTreeMap<Key, (bool, BTreeMap<String, Option<Value>>)>;
+type Seen = BTreeMap<
+    Key,
+    (
+        bool,
+        BTreeMap<String, Option<Value>>,
+        Option<Option<String>>,
+    ),
+>;
 
 impl Trace {
     fn seen(&self) -> Seen {
         self.rows
             .iter()
-            .map(|(k, r)| (k.clone(), (r.present, r.fields.clone())))
+            .map(|(k, r)| (k.clone(), (r.present, r.fields.clone(), r.cause.clone())))
             .collect()
     }
 
@@ -160,7 +176,7 @@ enum Answer {
 struct Occ {
     transition: String,
     subject: String,
-    taken: Vec<(String, Content)>,
+    taken: Vec<(String, (Head, Content))>,
     trace: Trace,
     input: Content,
     settled: Option<Settled>,
@@ -234,6 +250,17 @@ impl Reads for Reader<'_> {
         }
     }
 
+    fn cause(&mut self, place: &str, subject: &str) -> Option<String> {
+        let model = self.model;
+        let cause = model
+            .slots
+            .get(&key(place, subject))
+            .and_then(|s| s.content.front())
+            .and_then(|(head, _)| head.cause.clone());
+        model.row(self.trace, place, subject).cause = Some(cause.clone());
+        cause
+    }
+
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
         if let Some(held) = model.executor_place_held(place, subject) {
@@ -264,10 +291,6 @@ fn executor_place<'p>(spec: &Spec, place: &'p str) -> Option<(&'p str, ExecutorP
         .iter()
         .any(|d| d.name == t)
         .then_some((t, kind))
-}
-
-fn cause_content(cause: &Cause) -> Content {
-    Content::from([("cause".to_string(), Value::String(cause.text.clone()))])
 }
 
 impl Model {
@@ -355,6 +378,7 @@ impl Model {
         self.slots
             .get(&key(place, subject))
             .and_then(|s| s.content.front())
+            .map(|(_, c)| c)
     }
 
     fn is_fifo(&self, place: &str) -> bool {
@@ -381,6 +405,7 @@ impl Model {
                 version: self.version(place, subject),
                 present: self.content(place, subject).is_some(),
                 fields: BTreeMap::new(),
+                cause: None,
             })
     }
 
@@ -391,6 +416,19 @@ impl Model {
     /// A commit: a new version exactly when the content changes. A FIFO place
     /// appends, so a put never drops a waiting token (REV2-cand.c).
     fn put(&mut self, place: &str, subject: &str, content: Content, by: Option<&str>) {
+        self.put_with(place, subject, Head::default(), content, by);
+    }
+
+    /// Equal content with another header replaces the header and keeps the
+    /// version: the stamp covers the content only.
+    fn put_with(
+        &mut self,
+        place: &str,
+        subject: &str,
+        head: Head,
+        content: Content,
+        by: Option<&str>,
+    ) {
         assert!(
             matches!(self.place(place), PlaceSpec::Stored { .. }),
             "a commit to the derived place '{place}'"
@@ -398,11 +436,12 @@ impl Model {
         let fifo = self.is_fifo(place);
         let slot = self.slot_mut(place, subject);
         if fifo {
-            slot.content.push_back(content);
-        } else if slot.content.front() != Some(&content) {
-            slot.content = VecDeque::from([content]);
-        } else {
+            slot.content.push_back((head, content));
+        } else if let Some(held) = slot.content.front_mut().filter(|(_, c)| *c == content) {
+            held.0 = head;
             return;
+        } else {
+            slot.content = VecDeque::from([(head, content)]);
         }
         slot.version += 1;
         slot.writer = by.map(Arc::from);
@@ -435,7 +474,7 @@ impl Model {
 
     /// The row as the differential check compares it: its version and every
     /// token it holds, oldest first.
-    pub fn slot(&self, place: &str, subject: &str) -> (u64, Vec<Content>) {
+    pub fn slot(&self, place: &str, subject: &str) -> (u64, Vec<(Head, Content)>) {
         let tokens = self
             .slots
             .get(&key(place, subject))
@@ -1174,8 +1213,13 @@ impl Model {
             .consumes
             .iter()
             .map(|p| {
-                let c = self.slot_mut(p, s).content.pop_front();
-                (p.clone(), c.expect("decide checked every consumed token"))
+                let mut c = self
+                    .slot_mut(p, s)
+                    .content
+                    .pop_front()
+                    .expect("decide checked every consumed token");
+                *c.0.tries.entry(t.name.clone()).or_default() += 1;
+                (p.clone(), c)
             })
             .collect();
         if self
@@ -1434,6 +1478,15 @@ impl Model {
             t.name
         ));
         if matches!(t.body, Body::Pure(_)) {
+            // A pure firing that never committed is no try.
+            let name = t.name.clone();
+            for (_, (head, _)) in &mut self.occ_mut(occ).taken {
+                let tries = head.tries.get_mut(&name).expect("the take counted it");
+                *tries -= 1;
+                if *tries == 0 {
+                    head.tries.remove(&name);
+                }
+            }
             self.rollback(occ);
             let run_key = self.run_key(occ);
             if let Some(run) = self.runs.get_mut(&run_key) {
@@ -1508,7 +1561,7 @@ impl Model {
             let answered = self.answered_of(&o.transition);
             for (p, c) in &o.taken {
                 if self.content(p, &o.subject).is_none() && Some(p) != answered.as_ref() {
-                    before.insert(key(p, &o.subject), Some(c.clone()));
+                    before.insert(key(p, &o.subject), Some(c.1.clone()));
                 }
             }
             for out in &rows {
@@ -1573,6 +1626,15 @@ impl Model {
         }
     }
 
+    /// A failure or timeout port token: no content, the cause in its header.
+    fn put_port(&mut self, port: &str, subject: &str, cause: &Cause, by: &str) {
+        let head = Head {
+            cause: Some(cause.text.clone()),
+            ..Head::default()
+        };
+        self.put_with(port, subject, head, Content::new(), Some(by));
+    }
+
     fn set_mark(&mut self, occ: &OccurrenceId, cause: &Cause) {
         let seen = self.occs[occ].trace.seen();
         self.marks.insert(self.run_key(occ), (seen, cause.clone()));
@@ -1602,7 +1664,7 @@ impl Model {
         }
         self.runs.remove(&run_key);
         if let Some(port) = &t.on_failure {
-            self.put(port, &run_key.1, cause_content(cause), Some(&run_key.0));
+            self.put_port(port, &run_key.1, cause, &run_key.0);
         }
     }
 
@@ -1646,7 +1708,7 @@ impl Model {
                 self.runs.remove(&k);
                 if let Some(port) = &t.on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", k.0));
-                    self.put(port, &k.1, cause_content(&cause), Some(&k.0));
+                    self.put_port(port, &k.1, &cause, &k.0);
                 }
             } else if run.retry_due.is_some_and(|due| due <= now) {
                 self.runs.get_mut(&k).expect("listed above").retry_due = None;

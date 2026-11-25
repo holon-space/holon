@@ -52,6 +52,7 @@ use holon_net::exec::WhyNot;
 use holon_transition_contract::AnswerCall;
 use holon_transition_contract::AnswerId;
 use holon_transition_contract::UftError;
+use model::Head;
 use model::Model;
 
 /// The marking as a guard, a binding or a derived place reads it: the
@@ -59,6 +60,8 @@ use model::Model;
 pub trait Reads {
     fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value>;
     fn present(&mut self, place: &str, subject: &str) -> bool;
+    /// The cause in the header of a port token.
+    fn cause(&mut self, place: &str, subject: &str) -> Option<String>;
 
     /// A field as a string; `None` when absent or not a string.
     fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
@@ -76,6 +79,10 @@ impl Reads for Reader<'_> {
 
     fn present(&mut self, place: &str, subject: &str) -> bool {
         Reader::present(self, place, subject)
+    }
+
+    fn cause(&mut self, place: &str, subject: &str) -> Option<String> {
+        Reader::cause(self, place, subject).map(|c| c.text)
     }
 }
 
@@ -764,7 +771,22 @@ impl Driver {
             );
         }
         for (p, s) in &keys {
-            let sut = (tokens.version(p, s), tokens.contents(p, s));
+            let row = tokens
+                .row(p, s)
+                .map(|t| {
+                    let head = Head {
+                        tries: t
+                            .envelope
+                            .tries
+                            .iter()
+                            .map(|(c, n)| (c.0.to_string(), *n))
+                            .collect(),
+                        cause: t.envelope.cause.as_ref().map(|c| c.text.clone()),
+                    };
+                    (head, t.record().clone())
+                })
+                .collect::<Vec<_>>();
+            let sut = (tokens.version(p, s), row);
             agree(
                 op,
                 &format!("{p} of {s} (version, tokens oldest first)"),

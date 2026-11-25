@@ -69,7 +69,7 @@ impl FileSyncController {
         self.net.read(|exec| {
             exec.tokens()
                 .token(place, doc.as_str())
-                .map(|t| field(&t.content, name).to_string())
+                .map(|t| field(t.record(), name).to_string())
         })
     }
 

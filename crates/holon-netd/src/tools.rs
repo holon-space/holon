@@ -189,7 +189,22 @@ impl Tools {
                         .subjects(place)
                         .into_iter()
                         .map(|s| {
-                            let contents = exec.tokens().contents(place, &s);
+                            // A port token's cause sits in its header; the
+                            // marking shows it beside the record's fields.
+                            let contents: Vec<_> = exec
+                                .tokens()
+                                .row(place, &s)
+                                .map(|t| {
+                                    let mut c = t.record().clone();
+                                    if let Some(cause) = &t.envelope.cause {
+                                        c.insert(
+                                            "cause".to_owned(),
+                                            PValue::String(cause.text.clone()),
+                                        );
+                                    }
+                                    c
+                                })
+                                .collect();
                             for c in &contents {
                                 let c = serde_json::to_string(c).expect("contents are JSON");
                                 lines.push(format!("{place} {s} {c}"));

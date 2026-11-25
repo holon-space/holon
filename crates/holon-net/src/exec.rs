@@ -750,12 +750,11 @@ impl NetDef {
                     place: p.clone(),
                 });
             }
-            let cause = cause_content(&Cause::definite(String::new()));
             if let Some((p, field)) = t
                 .on_failure
                 .iter()
                 .chain(&t.on_timeout)
-                .find_map(|p| Some((p, self.missing_answer_field(p, &cause)?)))
+                .find_map(|p| Some((p, self.missing_answer_field(p, &Content::new())?)))
             {
                 return Err(LoadError::PortLacksAnswerField {
                     transition: t.name.to_string(),
@@ -927,7 +926,23 @@ const MAX_NOW: Duration = Duration::from_nanos(i64::MAX as u64);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token<V = Value> {
     pub id: u64,
+    pub envelope: Envelope,
     pub payload: Payload<V>,
+}
+
+/// Who counts a try on a token: the consuming transition.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContributionId(pub Arc<str>);
+
+/// The header of a token, outside its stamp: a change here moves no version
+/// (ADR 0032 §9.1, REV11-running.a).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Envelope {
+    /// Takes per consumer, a crashed or failed attempt included.
+    pub tries: BTreeMap<ContributionId, u32>,
+    /// Why the run that put this token failed, on a failure or timeout port.
+    pub cause: Option<Cause>,
+    pub next_try: Option<Duration>,
 }
 
 /// What a token holds. Only `Record` is net data; the other variants are the
@@ -1097,6 +1112,20 @@ impl Tokens {
         content: Content,
         by: Writer,
     ) -> Result<(), PoolFull> {
+        self.put_with(place, subject, Envelope::default(), content, by)
+    }
+
+    /// [`put`](Self::put) with a header. Equal content with another header
+    /// replaces the header and keeps the version: the stamp covers the
+    /// payload only.
+    fn put_with(
+        &mut self,
+        place: &Place,
+        subject: &Subject,
+        envelope: Envelope,
+        content: Content,
+        by: Writer,
+    ) -> Result<(), PoolFull> {
         if let Some(&size) = self.pools.get(place) {
             let held = self.slot(place, subject).map_or(0, |s| s.tokens.len());
             let lent = self.lent.get(place).copied().unwrap_or(0);
@@ -1107,21 +1136,21 @@ impl Tokens {
         let id = self.next_id;
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
+        let payload = Payload::Record(content);
         if fifo {
             slot.tokens.push_back(Token {
                 id,
-                payload: Payload::Record(content),
+                envelope,
+                payload,
             });
-        } else if slot
-            .tokens
-            .front()
-            .is_some_and(|t| t.payload == Payload::Record(content.clone()))
-        {
+        } else if let Some(held) = slot.tokens.front_mut().filter(|t| t.payload == payload) {
+            held.envelope = envelope;
             return Ok(());
         } else {
             slot.tokens = VecDeque::from([Token {
                 id,
-                payload: Payload::Record(content),
+                envelope,
+                payload,
             }]);
         }
         slot.version += 1;
@@ -1183,7 +1212,11 @@ impl Tokens {
         let id = self.next_id;
         self.next_id += 1;
         self.slot_mut(place, subject).tokens = payload
-            .map(|payload| Token { id, payload })
+            .map(|payload| Token {
+                id,
+                envelope: Envelope::default(),
+                payload,
+            })
             .into_iter()
             .collect();
     }
@@ -1206,6 +1239,8 @@ struct RowRead {
     version: u64,
     present: bool,
     fields: BTreeMap<String, Option<Value>>,
+    /// The header cause, when a reader asked for it.
+    cause: Option<Option<Cause>>,
 }
 
 impl Trace {
@@ -1216,6 +1251,7 @@ impl Trace {
                 version: tokens.version(place, subject),
                 present: tokens.token(place, subject).is_some(),
                 fields: BTreeMap::new(),
+                cause: None,
             })
     }
 
@@ -1300,6 +1336,19 @@ impl Reader<'_> {
         self.tokens.free(place)
     }
 
+    /// The cause in the header of a failure or timeout port token.
+    pub fn cause(&mut self, place: &str, subject: &str) -> Option<Cause> {
+        if !self.declared(place) {
+            return None;
+        }
+        let cause = self
+            .tokens
+            .token(place, subject)
+            .and_then(|t| t.envelope.cause.clone());
+        self.trace.row(self.tokens, place, subject).cause = Some(cause.clone());
+        cause
+    }
+
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
         let net = self.net;
         if !self.declared(place) {
@@ -1370,15 +1419,15 @@ impl Reader<'_> {
             hide_value: self.hide_value,
         });
         for (k, row) in &sub.rows {
-            self.trace
-                .rows
-                .entry(k.clone())
-                .or_insert_with(|| RowRead {
-                    fields: BTreeMap::new(),
-                    ..row.clone()
-                })
-                .fields
-                .extend(row.fields.clone());
+            let into = self.trace.rows.entry(k.clone()).or_insert_with(|| RowRead {
+                fields: BTreeMap::new(),
+                cause: None,
+                ..row.clone()
+            });
+            into.fields.extend(row.fields.clone());
+            if row.cause.is_some() {
+                into.cause = row.cause.clone();
+            }
         }
         if self.trace.undeclared.is_none() {
             self.trace.undeclared = sub.undeclared.clone();
@@ -3359,13 +3408,18 @@ impl Executor {
         for p in consumes {
             let hidden = self.twin(Twin::HiddenReservation);
             let slot = self.tokens.slot_mut(&p, &subject);
-            let token = if hidden {
+            let mut token = if hidden {
                 slot.reserved = true;
                 slot.tokens.front().cloned()
             } else {
                 slot.tokens.pop_front()
             }
             .expect("decide checked every consumed token");
+            *token
+                .envelope
+                .tries
+                .entry(ContributionId(transition.clone()))
+                .or_default() += 1;
             self.tokens.lend(&p);
             taken.push((p, token));
         }
@@ -3542,6 +3596,20 @@ impl Executor {
             a.transition
         ));
         if pure {
+            // A pure firing that never committed is no try.
+            let mut a = a;
+            let by = ContributionId(a.transition.clone());
+            for (_, token) in &mut a.taken {
+                let tries = token
+                    .envelope
+                    .tries
+                    .get_mut(&by)
+                    .expect("the take counted it");
+                *tries -= 1;
+                if *tries == 0 {
+                    token.envelope.tries.remove(&by);
+                }
+            }
             self.rollback(&a);
             if let Some(run) = self
                 .runs
@@ -3635,12 +3703,35 @@ impl Executor {
     /// A firing's put; a token into a full pool is not put, and the net
     /// discloses it once per place and transition.
     fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
-        if let Err(PoolFull) = self.tokens.put(place, subject, content, Some(by)) {
+        self.put_by_with(place, subject, Envelope::default(), content, by);
+    }
+
+    fn put_by_with(
+        &mut self,
+        place: &Place,
+        subject: &Subject,
+        envelope: Envelope,
+        content: Content,
+        by: &Arc<str>,
+    ) {
+        if let Err(PoolFull) = self
+            .tokens
+            .put_with(place, subject, envelope, content, Some(by))
+        {
             self.disclose(Condition::PoolFull {
                 place: place.clone(),
                 transition: by.clone(),
             });
         }
+    }
+
+    /// A failure or timeout port token: no data, the cause in its header.
+    fn put_port(&mut self, port: &Place, subject: &Subject, cause: Cause, by: &Arc<str>) {
+        let envelope = Envelope {
+            cause: Some(cause),
+            ..Envelope::default()
+        };
+        self.put_by_with(port, subject, envelope, Content::new(), by);
     }
 
     fn disclose(&mut self, c: Condition) {
@@ -3827,7 +3918,7 @@ impl Executor {
         }
         self.end_run(&key);
         if let Some(port) = on_failure {
-            self.put_by(&port, subject, cause_content(cause), transition);
+            self.put_port(&port, subject, cause.clone(), transition);
         }
     }
 
@@ -3907,7 +3998,7 @@ impl Executor {
                 self.end_run(&key);
                 if let Some(port) = on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", key.0));
-                    self.put_by(&port, &key.1, cause_content(&cause), &key.0);
+                    self.put_port(&port, &key.1, cause, &key.0);
                 }
             } else if self.retry_due(&key.0, &key.1).is_some_and(|due| due <= now) {
                 self.set_retry_due(&key, None);
@@ -3916,10 +4007,6 @@ impl Executor {
             }
         }
     }
-}
-
-fn cause_content(cause: &Cause) -> Content {
-    Content::from([("cause".to_string(), Value::String(cause.text.clone()))])
 }
 
 fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
@@ -3939,6 +4026,18 @@ fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
                 Some(v) => {
                     h.update(&[1]);
                     encode_value(h, v);
+                }
+            }
+        }
+        if let Some(cause) = &row.cause {
+            h.update(&[2]);
+            match cause {
+                None => {
+                    h.update(&[0]);
+                }
+                Some(c) => {
+                    h.update(&[1, u8::from(c.retryable)]);
+                    encode_str(h, &c.text);
                 }
             }
         }

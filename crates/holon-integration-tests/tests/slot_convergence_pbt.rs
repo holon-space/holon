@@ -549,7 +549,7 @@ impl Device {
         self.exec
             .tokens()
             .token(place, key)
-            .map(|t| t.content.clone())
+            .map(|t| t.record().clone())
     }
 }
 

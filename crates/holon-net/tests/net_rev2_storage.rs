@@ -637,7 +637,7 @@ fn net() -> Spec {
                 bind!(|r, s| {
                     let turso = int_at(r, "ProviderTries", s, "turso")?;
                     let loro = int_at(r, "ProviderTries", s, "loro")?;
-                    let cause = r.text("LoroFailed", s, "cause")?;
+                    let cause = r.cause("LoroFailed", s)?;
                     let mut input = tries_token(turso, loro + 1);
                     input.insert("cause".to_string(), text(&cause));
                     Some(input)

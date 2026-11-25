@@ -479,7 +479,7 @@ fn marking_of(exec: &Executor) -> Marking {
     for p in PLACES {
         for s in SUBJECTS {
             if let Some(t) = exec.tokens().token(p, s) {
-                m.insert((p.to_string(), s.to_string()), t.content.clone());
+                m.insert((p.to_string(), s.to_string()), t.record().clone());
             }
         }
     }
