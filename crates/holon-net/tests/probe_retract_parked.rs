@@ -66,15 +66,21 @@ fn a_subject_dropped_while_a_parked_firing_holds_it_is_retracted_by_a_later_good
             .consumes("Process")
             .abandon(Duration::from_secs(3)),
         );
-    let mut exec = Executor::new(net).unwrap();
+    let mut exec = crate::exec_support::executor(net);
     let file = NetFile::parse(FILE).unwrap();
     let mut probes = Probes::new(&file.probes, Duration::ZERO);
     let at = Duration::from_secs;
-    let mut tick = |exec: &mut Executor, out: &str, now: Duration| {
+    let mut tick = |exec: &mut crate::exec_support::Checked, out: &str, now: Duration| {
         assert_eq!(probes.due(now).len(), 1);
         probes
-            .settle(exec, "live_pids", ProbeOutcome::Output(out.to_owned()), now)
+            .settle(
+                exec.unchecked(),
+                "live_pids",
+                ProbeOutcome::Output(out.to_owned()),
+                now,
+            )
             .unwrap();
+        exec.assert_level_dead("probe settle");
     };
 
     tick(&mut exec, "{\"pid\": 41}\n{\"pid\": 42}\n", at(0));

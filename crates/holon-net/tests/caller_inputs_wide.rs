@@ -91,6 +91,8 @@ mod forms;
 
 use forms::Answer;
 
+use crate::exec_support::Checked;
+
 const PLACES: [&str; 4] = ["P0", "P1", "P2", "P3"];
 const DERIVED: [&str; 2] = ["D0", "D1"];
 const TRANSITIONS: [&str; 4] = ["T0", "T1", "T2", "T3"];
@@ -1298,8 +1300,10 @@ impl NetGen {
         Ok(net)
     }
 
-    fn executor(&self) -> Result<Executor, String> {
-        Executor::new(self.net()?).map_err(|e| format!("Executor::new: {e}"))
+    fn executor(&self) -> Result<Checked, String> {
+        Executor::new(self.net()?)
+            .map(Checked::from)
+            .map_err(|e| format!("Executor::new: {e}"))
     }
 
     /// Whether a read of `place` reaches a place the net does not declare.
@@ -1737,7 +1741,7 @@ fn op() -> impl Strategy<Value = Op> {
 /// handed out, and the occurrences it saw.
 struct Machine {
     net: NetGen,
-    exec: Executor,
+    exec: Checked,
     /// The largest `now` of every call not refused for the clock.
     clock: Duration,
     requests: Vec<EffectRequest>,
@@ -1748,7 +1752,7 @@ struct Machine {
 }
 
 impl Machine {
-    fn new(net: NetGen, exec: Executor) -> Self {
+    fn new(net: NetGen, exec: Checked) -> Self {
         Machine {
             net,
             exec,
@@ -2447,7 +2451,7 @@ fn check_why_not(
 
 /// The executor of `net`, or `None` when the loader or the lowering refused
 /// it. A refusal is an error a caller sees; it must not be a panic.
-fn load(net: &NetGen) -> Result<Option<Executor>, TestCaseError> {
+fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
     Ok(no_panic("load", || net.executor())?.ok())
 }
 

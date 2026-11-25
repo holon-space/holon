@@ -359,17 +359,138 @@ pub fn twin_name() -> Option<String> {
     std::env::var("HOLON_NET_TWIN").ok()
 }
 
-pub fn executor(net: NetDef) -> Executor {
+pub fn executor(net: NetDef) -> Checked {
     load(net).expect("the test net loads")
 }
 
 /// `net` loaded on the twin under test; `Err` is the load's refusal.
-pub fn load(net: NetDef) -> Result<Executor, LoadError> {
+pub fn load(net: NetDef) -> Result<Checked, LoadError> {
     let exec = Executor::new(net)?;
-    Ok(match twin_name().as_deref() {
+    Ok(Checked::from(match twin_name().as_deref() {
         None | Some("inhibitor-net") => exec,
         Some(name) => with_twin(exec, name),
-    })
+    }))
+}
+
+/// An executor that panics on a break of the Level-dead law after every call
+/// that quiesces, so a PBT shrinks to a minimal net. Reads go through
+/// `Deref`; there is no `DerefMut`, so no change skips the check.
+pub struct Checked(Executor);
+
+impl From<Executor> for Checked {
+    fn from(exec: Executor) -> Self {
+        Self(exec)
+    }
+}
+
+impl std::ops::Deref for Checked {
+    type Target = Executor;
+
+    fn deref(&self) -> &Executor {
+        &self.0
+    }
+}
+
+impl Checked {
+    /// Panics with the first auto pair still enabled at quiescence.
+    pub fn assert_level_dead(&self, op: &str) {
+        if let Some(v) = self.0.level_violations().first() {
+            panic!("level-dead law broken after {op}: {v}");
+        }
+    }
+
+    /// The executor with no check, for a test that counts the bind calls of
+    /// one operation: the check runs every bind again.
+    pub fn unchecked(&mut self) -> &mut Executor {
+        &mut self.0
+    }
+
+    fn checked<T, E>(&self, op: &str, r: Result<T, E>) -> Result<T, E> {
+        if r.is_ok() {
+            self.assert_level_dead(op);
+        }
+        r
+    }
+
+    pub fn write(
+        &mut self,
+        place: &str,
+        subject: &str,
+        content: Content,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
+        let r = self.0.write(place, subject, content, now);
+        self.checked(&format!("write {place}/{subject} at {now:?}"), r)
+    }
+
+    pub fn retract(
+        &mut self,
+        place: &str,
+        subject: &str,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
+        let r = self.0.retract(place, subject, now);
+        self.checked(&format!("retract {place}/{subject} at {now:?}"), r)
+    }
+
+    pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
+        let r = self.0.step(now);
+        self.checked(&format!("step at {now:?}"), r)
+    }
+
+    pub fn fire(
+        &mut self,
+        transition: &str,
+        subject: &str,
+        occurrence: OccurrenceId,
+        value: Content,
+        now: Duration,
+    ) -> Result<Quiesced<Accepted>, FireError> {
+        let op = format!("fire {transition}/{subject} as {occurrence} at {now:?}");
+        let r = self.0.fire(transition, subject, occurrence, value, now);
+        self.checked(&op, r)
+    }
+
+    pub fn complete(
+        &mut self,
+        attempt: AttemptId,
+        result: EffectResult,
+        now: Duration,
+    ) -> Result<Quiesced<Completion>, ExecError> {
+        let op = format!("complete {attempt:?} with {result:?} at {now:?}");
+        let r = self.0.complete(attempt, result, now);
+        self.checked(&op, r)
+    }
+
+    pub fn resolve(
+        &mut self,
+        occurrence: &OccurrenceId,
+        resolution: Resolution,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
+        let op = format!("resolve {occurrence} at {now:?}");
+        let r = self.0.resolve(occurrence, resolution, now);
+        self.checked(&op, r)
+    }
+
+    pub fn answer(
+        &mut self,
+        call: AnswerCall,
+        now: Duration,
+    ) -> Result<Quiesced<AnswerId>, UftError> {
+        let op = format!("answer {call:?} at {now:?}");
+        let r = self.0.answer(call, now);
+        self.checked(&op, r)
+    }
+
+    pub fn undo(
+        &mut self,
+        answer: &OccurrenceId,
+        now: Duration,
+    ) -> Result<Quiesced<Undone>, UndoError> {
+        let r = self.0.undo(answer, now);
+        self.checked(&format!("undo {answer} at {now:?}"), r)
+    }
 }
 
 #[cfg(feature = "naive-twins")]
@@ -387,7 +508,7 @@ fn with_twin(_: Executor, name: &str) -> Executor {
 /// Runs every operation on the executor and on the reference model, and
 /// compares their answers and their full observable state after each one.
 pub struct Driver {
-    exec: Executor,
+    exec: Checked,
     model: Model,
     spec: Spec,
     /// False for [`Driver::unchecked`]: no comparison with the model.

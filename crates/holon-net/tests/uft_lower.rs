@@ -74,6 +74,7 @@ use uft_lower_support::Refusal;
 use uft_lower_support::SUBJECTS;
 use uft_lower_support::Sit;
 
+use crate::exec_support::Checked;
 #[cfg(feature = "naive-twins")]
 use crate::exec_support::twin_names;
 use crate::uft_lower_support;
@@ -219,31 +220,31 @@ fn lowered(base: NetDef, d: &TransitionDescriptor, p: NativeParts) -> NetDef {
 
 /// `net` loaded on the executor twin `UFT_LOWER_TWIN` names, if any; `Err`
 /// is the load's refusal.
-fn load(net: NetDef) -> Result<Executor, LoadError> {
+fn load(net: NetDef) -> Result<Checked, LoadError> {
     let exec = Executor::new(net)?;
     #[cfg(feature = "naive-twins")]
     if let Ok(name) = std::env::var("UFT_LOWER_TWIN")
         && let Some(twin) = twin_names::executor_twin(&name)
     {
-        return Ok(exec.with_twin(twin));
+        return Ok(Checked::from(exec.with_twin(twin)));
     }
-    Ok(exec)
+    Ok(Checked::from(exec))
 }
 
 /// The executor of the net lowered from `d` with native parts `p`;
 /// `UFT_LOWER_TWIN` selects a lowering or an executor twin.
-fn executor_with(d: &TransitionDescriptor, p: NativeParts) -> Executor {
+fn executor_with(d: &TransitionDescriptor, p: NativeParts) -> Checked {
     load(lowered(base_net(), d, p)).expect("the lowered net loads")
 }
 
-fn executor(d: &TransitionDescriptor) -> Executor {
+fn executor(d: &TransitionDescriptor) -> Checked {
     executor_with(d, parts())
 }
 
 // --------------------------------------------------------------- the SUT
 
 struct Sut {
-    exec: Executor,
+    exec: Checked,
     /// The model before the op: `apply` receives the model after it.
     model: Model,
     now: Duration,
@@ -952,7 +953,7 @@ fn asked(exec: &Executor) -> String {
     )
 }
 
-fn answer_as(exec: &mut Executor, id: &str, seen: &str) -> Vec<EffectRequest> {
+fn answer_as(exec: &mut Checked, id: &str, seen: &str) -> Vec<EffectRequest> {
     exec.fire(
         &answer_transition(T),
         "a",
@@ -969,7 +970,7 @@ fn answer_as(exec: &mut Executor, id: &str, seen: &str) -> Vec<EffectRequest> {
 }
 
 /// Subject `a` asked for `AcceptRemoval` lowered from `d`.
-fn asking(d: &TransitionDescriptor) -> Executor {
+fn asking(d: &TransitionDescriptor) -> Checked {
     let mut exec = executor(d);
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     exec
@@ -977,7 +978,7 @@ fn asking(d: &TransitionDescriptor) -> Executor {
 
 /// Writes the situation of subject `a`; returns the work requests of the
 /// last write.
-fn situation(exec: &mut Executor) -> Vec<EffectRequest> {
+fn situation(exec: &mut Checked) -> Vec<EffectRequest> {
     let mut requests = Vec::new();
     for (place, content) in [
         ("Refused", Content::from([("why".to_owned(), text("0"))])),
@@ -993,7 +994,7 @@ fn situation(exec: &mut Executor) -> Vec<EffectRequest> {
 }
 
 /// Answers `id` on the current ask and returns the one work request.
-fn answer_and_start(exec: &mut Executor, id: &str) -> EffectRequest {
+fn answer_and_start(exec: &mut Checked, id: &str) -> EffectRequest {
     let seen = asked(exec);
     let [req] = <[_; 1]>::try_from(answer_as(exec, id, &seen))
         .unwrap_or_else(|reqs| panic!("the work fires once on answer {id}: {reqs:?}"));
@@ -1001,7 +1002,7 @@ fn answer_and_start(exec: &mut Executor, id: &str) -> EffectRequest {
 }
 
 /// `OnDisk` of `a` changes; no work starts.
-fn on_disk_changes(exec: &mut Executor) {
+fn on_disk_changes(exec: &mut Checked) {
     let q = exec
         .write("OnDisk", "a", counter(1), Duration::ZERO)
         .expect("quiesces");

@@ -67,6 +67,8 @@ use indexmap::IndexMap;
 use proptest::prelude::*;
 use proptest::sample::select;
 
+use crate::exec_support::Checked;
+
 const I64_NS: u64 = i64::MAX as u64;
 const W: &str = "W";
 const BY: &str = "by";
@@ -129,8 +131,11 @@ fn premise<T, E: Debug>(what: &str, r: Result<T, E>) -> Result<T, TestCaseError>
     r.map_err(|e| TestCaseError::fail(format!("premise: {what}: {e:?}")))
 }
 
-fn load(net: NetDef) -> Result<Executor, TestCaseError> {
-    premise("the net loads", no_panic("load", || Executor::new(net))?)
+fn load(net: NetDef) -> Result<Checked, TestCaseError> {
+    premise(
+        "the net loads",
+        no_panic("load", || Executor::new(net).map(Checked::from))?,
+    )
 }
 
 // ------------------------------------------------------------ generators
@@ -778,11 +783,7 @@ fn pool_outputs(k: usize, other: bool, s: &Subject) -> Vec<Output> {
 
 /// Starts the effectful `T` for `s` (an auto write, or a manual fire) and
 /// returns its request.
-fn start_effect(
-    exec: &mut Executor,
-    manual: bool,
-    s: &str,
-) -> Result<EffectRequest, TestCaseError> {
+fn start_effect(exec: &mut Checked, manual: bool, s: &str) -> Result<EffectRequest, TestCaseError> {
     let w = premise(
         "the write into In",
         no_panic("write", || {
@@ -1207,7 +1208,7 @@ proptest! {
         read_by_t in any::<bool>(),
         s in subject(),
     ) {
-        let Ok(mut exec) = no_panic("load", || Executor::new(cycle_net(two, kind, read_by_t)))? else {
+        let Ok(mut exec) = no_panic("load", || Executor::new(cycle_net(two, kind, read_by_t)).map(Checked::from))? else {
             return Ok(());
         };
         let _ = no_panic("write", || format!("{:?}", exec.write("In", &s, Content::new(), Duration::ZERO)))?;
@@ -1851,7 +1852,7 @@ proptest! {
         kind in 0usize..3,
         bound in prop_oneof![1usize..64, select(vec![126usize, 127, 128, 129, 200])],
     ) {
-        let r = no_panic("load", || Executor::new(recursion_net(kind, Some(bound))))?;
+        let r = no_panic("load", || Executor::new(recursion_net(kind, Some(bound))).map(Checked::from))?;
         if bound < MAX_NESTED_DERIVED_ROWS {
             let exec = premise("the bounded recursion loads", r)?;
             let d = no_panic("derive", || exec.derive("D", &Subject::new("")))?;

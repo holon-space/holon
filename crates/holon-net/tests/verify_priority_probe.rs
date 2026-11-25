@@ -17,6 +17,8 @@ use holon_net::load::Logic;
 use holon_net::load::net_def;
 use proptest::prelude::*;
 
+use crate::exec_support::Checked;
+
 const SHARED: usize = 3;
 
 #[derive(Debug, Clone)]
@@ -131,7 +133,7 @@ fn fired(ts: &[T], subjects: usize) -> BTreeMap<String, Vec<String>> {
         )
     };
     let net = net_def("nets/priority.yaml", &yaml(ts), logic).expect("loads");
-    let mut exec = Executor::new(net).expect("accepted");
+    let mut exec = Checked::from(Executor::new(net).expect("accepted"));
     for (i, t) in ts.iter().enumerate() {
         for (s, &enabled) in t.enabled.iter().enumerate().take(subjects) {
             if enabled {

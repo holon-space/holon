@@ -1656,6 +1656,26 @@ pub enum Twin {
     KeepWorkFailed,
 }
 
+/// An auto pair that a check from scratch finds enabled at quiescence: a
+/// break of the Level-dead law (ADR 0032 NET-level.a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LevelViolation {
+    pub transition: Arc<str>,
+    pub subject: Subject,
+    /// The bound input and the rows of its arcs, for a failure message.
+    pub marking: String,
+}
+
+impl fmt::Display for LevelViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} for {} is enabled at quiescence: {}",
+            self.transition, self.subject, self.marking
+        )
+    }
+}
+
 /// What is known about one effect attempt of an occurrence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Seen {
@@ -2076,6 +2096,47 @@ impl Executor {
 
     pub fn tokens(&self) -> &Tokens {
         &self.tokens
+    }
+
+    /// The auto pairs enabled when every subject of their consumed and read
+    /// places is decided again, with the exclusions of the quiesce loop.
+    /// Empty after every successful quiescence (Level-dead law). It runs the
+    /// bind of every such pair.
+    pub fn level_violations(&self) -> Vec<LevelViolation> {
+        let none = BTreeSet::new();
+        let mut found = Vec::new();
+        for (i, t) in self.net.transitions.iter().enumerate() {
+            if t.trigger != Trigger::Auto
+                || self.twin(Twin::KeepWorkFailed) && self.takes_failure_port(t)
+            {
+                continue;
+            }
+            for s in self.subjects(t) {
+                let Ok((_, input)) = self.decide(t, &s) else {
+                    continue;
+                };
+                if self.preferred_enabled(i, &s, &none).is_some() {
+                    continue;
+                }
+                let rows = |ps: &[Place]| {
+                    ps.iter()
+                        .map(|p| format!("{p}={:?}", self.tokens.contents(p, &s)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                found.push(LevelViolation {
+                    transition: t.name.clone(),
+                    subject: s.clone(),
+                    marking: format!(
+                        "input {input:?}; consumes [{}] reads [{}] inhibits [{}]",
+                        rows(&t.consumes),
+                        rows(&t.reads),
+                        rows(&t.inhibits),
+                    ),
+                });
+            }
+        }
+        found
     }
 
     pub fn mark(&self, transition: &str, subject: &str) -> Option<&Mark> {

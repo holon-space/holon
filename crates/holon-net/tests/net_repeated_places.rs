@@ -24,6 +24,8 @@ use proptest::prelude::*;
 use proptest::sample::select;
 use proptest::strategy::ValueTree;
 
+use crate::exec_support::Checked;
+
 const PLACES: [&str; 4] = ["A", "B", "C", "D"];
 const FIELDS: [&str; 3] = ["consumes", "reads", "inhibits"];
 const PATH: &str = "nets/gen.yaml";
@@ -211,7 +213,9 @@ fn built(net: &[Spec]) -> NetDef {
 
 /// Puts a token into every place, which fires whatever it enables.
 fn run(def: NetDef) -> Result<(), String> {
-    let mut exec = Executor::new(def).map_err(|e| format!("Executor::new refused: {e}"))?;
+    let mut exec = Executor::new(def)
+        .map(Checked::from)
+        .map_err(|e| format!("Executor::new refused: {e}"))?;
     for p in PLACES {
         let quiesced = exec
             .write(p, "s", Content::new(), Duration::ZERO)

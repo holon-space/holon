@@ -248,7 +248,7 @@ fn a_second_answer_while_one_waits_is_refused() {
 
 /// A derived place that hashes what its read of `Item.n` traced, for the
 /// transitions `Accept` and `Other`.
-fn hashing_executor() -> Executor {
+fn hashing_executor() -> exec_support::Checked {
     let net = NetDef::default().place("Item", Class::Process).derived(
         "H",
         Arc::new(|r, s| {

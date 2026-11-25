@@ -17,6 +17,8 @@ use holon_net::exec::Read;
 use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 
+use crate::exec_support::Checked;
+
 const NOW: Duration = Duration::ZERO;
 
 /// `Follow` fires for a waiting subject once its bind sees what it needs;
@@ -42,7 +44,7 @@ fn on() -> Content {
     Content::from([("on".to_string(), Value::Boolean(true))])
 }
 
-fn write(ex: &mut Executor, place: &str, subject: &str, content: Content) {
+fn write(ex: &mut Checked, place: &str, subject: &str, content: Content) {
     drop(ex.write(place, subject, content, NOW).unwrap());
 }
 
@@ -57,7 +59,7 @@ fn done(ex: &Executor) -> Vec<String> {
 #[test]
 fn a_write_to_a_row_another_subject_read_decides_that_subject_again() {
     let flag_of_a: Read = Arc::new(|r, _| r.field("Flag", "a", "on").map(|_| Content::new()));
-    let mut ex = Executor::new(follow_net(flag_of_a)).unwrap();
+    let mut ex = Checked::from(Executor::new(follow_net(flag_of_a)).unwrap());
     write(&mut ex, "Waiting", "b", Content::new());
     assert_eq!(done(&ex), Vec::<String>::new());
     write(&mut ex, "Flag", "a", on());
@@ -69,7 +71,7 @@ fn a_write_to_its_own_read_row_decides_the_subject_again() {
     let own_flag: Read = Arc::new(|r, s| {
         (r.field("Waiting", s, "on") == Some(Value::Boolean(true))).then(Content::new)
     });
-    let mut ex = Executor::new(follow_net(own_flag)).unwrap();
+    let mut ex = Checked::from(Executor::new(follow_net(own_flag)).unwrap());
     write(&mut ex, "Waiting", "b", Content::new());
     assert_eq!(done(&ex), Vec::<String>::new());
     write(&mut ex, "Waiting", "b", on());
@@ -84,16 +86,14 @@ fn a_write_decides_only_the_subjects_that_read_the_written_row() {
         counted.fetch_add(1, Ordering::Relaxed);
         r.field("Flag", s, "on").map(|_| Content::new())
     });
-    let mut ex = Executor::new(follow_net(own_flag)).unwrap();
+    let mut ex = Checked::from(Executor::new(follow_net(own_flag)).unwrap());
     for n in 0..100 {
         write(&mut ex, "Waiting", &format!("s{n}"), Content::new());
     }
     let before = binds.load(Ordering::Relaxed);
-    write(&mut ex, "Flag", "s7", on());
+    drop(ex.unchecked().write("Flag", "s7", on(), NOW).unwrap());
+    let after = binds.load(Ordering::Relaxed);
+    ex.assert_level_dead("write Flag/s7");
     assert_eq!(done(&ex), ["s7"]);
-    assert_eq!(
-        binds.load(Ordering::Relaxed) - before,
-        1,
-        "only s7 read the written row"
-    );
+    assert_eq!(after - before, 1, "only s7 read the written row");
 }

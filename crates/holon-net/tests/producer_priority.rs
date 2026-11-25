@@ -22,6 +22,8 @@ use holon_net::load::Logic;
 use holon_net::load::net_def;
 use proptest::prelude::*;
 
+use crate::exec_support::Checked;
+
 const SHARED: usize = 3;
 
 #[derive(Debug, Clone)]
@@ -94,7 +96,7 @@ fn fired(ts: &[Drawn]) -> Vec<String> {
         )
     };
     let net = net_def("nets/priority.yaml", &yaml(ts), logic).expect("the drawn net loads");
-    let mut exec = Executor::new(net).expect("the executor accepts the drawn net");
+    let mut exec = Checked::from(Executor::new(net).expect("the executor accepts the drawn net"));
     for (i, t) in ts.iter().enumerate() {
         if t.enabled {
             let _q = exec

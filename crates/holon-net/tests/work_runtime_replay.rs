@@ -59,6 +59,8 @@ use holon_net::load::Logic;
 use holon_net::load::net_def;
 use holon_pattern::Value;
 
+use crate::exec_support::Checked;
+
 const NET_PATH: &str = "nets/work-runtime-replay.yaml";
 const NET: &str = include_str!("../nets/work-runtime-replay.yaml");
 
@@ -392,8 +394,8 @@ fn events() -> Vec<serde_json::Map<String, serde_json::Value>> {
 
 /// Drive every fixture event into the executor and step to quiescence after
 /// each, so no evidence token can be overwritten before it is consumed.
-fn replay() -> Executor {
-    let mut exec = Executor::new(net()).expect("the net loads");
+fn replay() -> Checked {
+    let mut exec = Checked::from(Executor::new(net()).expect("the net loads"));
     let mut last = 0;
     for ev in events() {
         let at_s = ev["at_s"].as_i64().expect("at_s");
@@ -421,7 +423,7 @@ fn replay() -> Executor {
 /// An outside commit at the fixture clock. `Executor::write` advances the
 /// executor to `at_s` and quiesces on the spot, so the replay also asserts
 /// here that the pure net asks for no effect.
-fn write(exec: &mut Executor, place: &str, subject: &str, content: Content, at_s: i64) {
+fn write(exec: &mut Checked, place: &str, subject: &str, content: Content, at_s: i64) {
     let reqs = exec
         .write(place, subject, content, Duration::from_secs(at_s as u64))
         .unwrap_or_else(|e| panic!("write {place}/{subject} at {at_s}: {e:?}"))
@@ -432,7 +434,7 @@ fn write(exec: &mut Executor, place: &str, subject: &str, content: Content, at_s
     );
 }
 
-fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
+fn apply(exec: &mut Checked, ev: &serde_json::Map<String, serde_json::Value>) {
     let s = |k: &str| ev[k].as_str().expect(k).to_string();
     let i = |k: &str| ev[k].as_i64().expect(k);
     let at = i("at_s");
@@ -863,7 +865,7 @@ fn the_resume_ceiling_holds_at_its_boundary() {
 
 /// An agent of `card` whose last turn ended `idle_s` before the snapshot with
 /// `ctx_tokens` of context, stepped to quiescence at the snapshot.
-fn inject_agent(exec: &mut Executor, agent: &str, card: &str, idle_s: i64, ctx_tokens: i64) {
+fn inject_agent(exec: &mut Checked, agent: &str, card: &str, idle_s: i64, ctx_tokens: i64) {
     write(
         exec,
         P_AGENT,

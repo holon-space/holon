@@ -22,6 +22,7 @@ use holon_transition_contract::SubjectName;
 use holon_transition_contract::TransitionName;
 
 use crate::exec_support;
+use crate::exec_support::Checked;
 
 const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -92,7 +93,7 @@ fn an_answer_that_is_the_work_of_another_ask_does_not_panic() {
             )
             .consumes("Answered.W"),
         );
-    let mut exec = match Executor::new(spec.netdef()) {
+    let mut exec = match Executor::new(spec.netdef()).map(Checked::from) {
         Ok(exec) => exec,
         Err(e) => {
             eprintln!("the load refuses: {e}");

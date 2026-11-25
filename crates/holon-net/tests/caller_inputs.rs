@@ -74,6 +74,8 @@ mod forms;
 
 use forms::Answer;
 
+use crate::exec_support::Checked;
+
 const PLACES: [&str; 4] = ["P0", "P1", "P2", "P3"];
 const DERIVED: [&str; 2] = ["D0", "D1"];
 const TRANSITIONS: [&str; 4] = ["T0", "T1", "T2", "T3"];
@@ -890,8 +892,10 @@ impl NetGen {
         Ok(net)
     }
 
-    fn executor(&self) -> Result<Executor, String> {
-        Executor::new(self.net()?).map_err(|e| format!("Executor::new: {e}"))
+    fn executor(&self) -> Result<Checked, String> {
+        Executor::new(self.net()?)
+            .map(Checked::from)
+            .map_err(|e| format!("Executor::new: {e}"))
     }
 
     /// Whether a read of `place` reaches a place the net does not declare.
@@ -1253,7 +1257,7 @@ fn op() -> impl Strategy<Value = Op> {
 /// handed out, and the occurrences it saw.
 struct Machine {
     net: NetGen,
-    exec: Executor,
+    exec: Checked,
     /// The largest `now` of every call not refused for the clock.
     clock: Duration,
     requests: Vec<EffectRequest>,
@@ -1262,7 +1266,7 @@ struct Machine {
 }
 
 impl Machine {
-    fn new(net: NetGen, exec: Executor) -> Self {
+    fn new(net: NetGen, exec: Checked) -> Self {
         Machine {
             net,
             exec,
@@ -1864,7 +1868,7 @@ fn check_why_not(
 
 /// The executor of `net`, or `None` when the loader or the lowering refused
 /// it. A refusal is an error a caller sees; it must not be a panic.
-fn load(net: &NetGen) -> Result<Option<Executor>, TestCaseError> {
+fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
     Ok(no_panic("load", || net.executor())?.ok())
 }
 
@@ -1907,7 +1911,7 @@ fn manual_net() -> impl Strategy<Value = NetGen> {
 
 /// Writes one token into every non-pool place transition `i` consumes or
 /// reads, for subject `s`; a pool holds its tokens from the start.
-fn enable(exec: &mut Executor, net: &NetGen, i: usize, s: &str) -> Result<(), TestCaseError> {
+fn enable(exec: &mut Checked, net: &NetGen, i: usize, s: &str) -> Result<(), TestCaseError> {
     let [consumes, reads, _] = net.arcs(i);
     for p in consumes.iter().chain(&reads) {
         let k = PLACES.iter().position(|q| q == p).expect("a file place");
@@ -2038,7 +2042,7 @@ proptest! {
         );
         let back = clock - Duration::from_nanos(back_ns.min(clock_ns));
         let place = net.stored()[0].clone();
-        let call = |exec: &mut Executor, now: Duration| -> String {
+        let call = |exec: &mut Checked, now: Duration| -> String {
             match which {
                 0 => format!("{:?}", exec.fire("T0", &s, OccurrenceId::caller("o1"), Content::new(), now)),
                 1 => format!("{:?}", exec.step(now)),
@@ -2201,7 +2205,7 @@ proptest! {
 
 /// A manual `T` that takes `In` and puts one token into `into`, beside a
 /// derived place `D`.
-fn output_net(into: &str) -> Result<Executor, TestCaseError> {
+fn output_net(into: &str) -> Result<Checked, TestCaseError> {
     use holon_net::exec::Body;
     use holon_net::exec::Class;
     use holon_net::exec::TransitionDef;
@@ -2217,7 +2221,7 @@ fn output_net(into: &str) -> Result<Executor, TestCaseError> {
         .place("In", Class::Process)
         .derived("D", Arc::new(|_: &mut Reader<'_>, _: &Subject| None))
         .transition(t);
-    let exec = no_panic("load", || Executor::new(net))?;
+    let exec = no_panic("load", || Executor::new(net).map(Checked::from))?;
     exec.map_err(|e| TestCaseError::fail(format!("premise: the net loads: {e}")))
 }
 
@@ -2299,7 +2303,7 @@ fn a_derived_place_that_reads_itself_does_not_overflow() {
             Arc::new(|r: &mut Reader<'_>, s: &Subject| r.present("D", s).then(Content::new)),
         )
         .transition(t);
-    if let Ok(mut exec) = Executor::new(net) {
+    if let Ok(mut exec) = Executor::new(net).map(Checked::from) {
         let _ = exec.write("In", "s", Content::new(), Duration::ZERO);
     }
 }

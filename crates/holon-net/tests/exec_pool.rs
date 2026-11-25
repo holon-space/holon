@@ -25,6 +25,8 @@ use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 
+use crate::exec_support::Checked;
+
 const NOW: Duration = Duration::ZERO;
 
 fn always() -> Read {
@@ -61,11 +63,11 @@ fn pool_net(size: u32) -> NetDef {
     slot_net(|n| n.pool("Slots", Class::Process, size), always())
 }
 
-fn arrive(ex: &mut Executor, subject: &str) {
+fn arrive(ex: &mut Checked, subject: &str) {
     drop(ex.write("Waiting", subject, Content::new(), NOW).unwrap());
 }
 
-fn release(ex: &mut Executor, subject: &str) {
+fn release(ex: &mut Checked, subject: &str) {
     drop(
         ex.fire(
             "Release",
@@ -91,7 +93,7 @@ fn held(ex: &Executor) -> Vec<String> {
 #[test]
 fn a_plain_fifo_place_is_a_queue_per_subject_not_a_pool() {
     let net = slot_net(|n| n.fifo("Slots", Class::Process), always());
-    let mut ex = Executor::new(net).unwrap();
+    let mut ex = Executor::new(net).map(Checked::from).unwrap();
     for _ in 0..2 {
         drop(ex.write("Slots", "pool", Content::new(), NOW).unwrap());
     }
@@ -101,13 +103,13 @@ fn a_plain_fifo_place_is_a_queue_per_subject_not_a_pool() {
 
 #[test]
 fn a_pool_starts_with_all_its_tokens_free() {
-    let ex = Executor::new(pool_net(3)).unwrap();
+    let ex = Executor::new(pool_net(3)).map(Checked::from).unwrap();
     assert_eq!(ex.tokens().free("Slots"), 3);
 }
 
 #[test]
 fn at_most_n_subjects_hold_a_token() {
-    let mut ex = Executor::new(pool_net(2)).unwrap();
+    let mut ex = Executor::new(pool_net(2)).map(Checked::from).unwrap();
     for s in ["a", "b", "c", "d"] {
         arrive(&mut ex, s);
     }
@@ -117,7 +119,7 @@ fn at_most_n_subjects_hold_a_token() {
 
 #[test]
 fn a_returned_token_goes_to_the_oldest_waiter() {
-    let mut ex = Executor::new(pool_net(1)).unwrap();
+    let mut ex = Executor::new(pool_net(1)).map(Checked::from).unwrap();
     for s in ["c", "b", "a"] {
         arrive(&mut ex, s);
     }
@@ -135,6 +137,7 @@ fn a_guard_reads_the_free_count() {
         |n| n.pool("Slots", Class::Process, 2),
         reserve_one,
     ))
+    .map(Checked::from)
     .unwrap();
     for s in ["a", "b"] {
         arrive(&mut ex, s);
@@ -145,7 +148,7 @@ fn a_guard_reads_the_free_count() {
 
 #[test]
 fn a_put_beyond_the_pool_size_is_refused() {
-    let mut ex = Executor::new(pool_net(1)).unwrap();
+    let mut ex = Executor::new(pool_net(1)).map(Checked::from).unwrap();
     assert!(matches!(
         ex.write("Slots", "x", Content::new(), NOW),
         Err(ExecError::PoolFull { place }) if place == "Slots"
@@ -172,7 +175,7 @@ proptest! {
     /// waiters take tokens in arrival order.
     #[test]
     fn a_pool_never_goes_below_zero_or_above_n(size in 1u32..5, ops in ops()) {
-        let mut ex = Executor::new(pool_net(size)).unwrap();
+        let mut ex = Executor::new(pool_net(size)).map(Checked::from).unwrap();
         let mut waiting: VecDeque<String> = VecDeque::new();
         let mut holding: BTreeSet<String> = BTreeSet::new();
         let mut next = 0;
@@ -225,7 +228,7 @@ fn effect_net() -> NetDef {
 
 #[test]
 fn a_put_while_a_firing_holds_a_token_is_refused() {
-    let mut ex = Executor::new(effect_net()).unwrap();
+    let mut ex = Executor::new(effect_net()).map(Checked::from).unwrap();
     arrive(&mut ex, "a");
     assert_eq!(ex.tokens().free("Slots"), 0);
     assert!(matches!(
@@ -237,7 +240,7 @@ fn a_put_while_a_firing_holds_a_token_is_refused() {
 
 #[test]
 fn a_failed_firing_gives_its_token_back_once() {
-    let mut ex = Executor::new(effect_net()).unwrap();
+    let mut ex = Executor::new(effect_net()).map(Checked::from).unwrap();
     let q = ex.write("Waiting", "a", Content::new(), NOW).unwrap();
     let attempt = q.requests[0].attempt;
     drop(
@@ -261,7 +264,7 @@ fn concurrent_effects_behind_a_free_guard_both_land() {
                 .consumes("Waiting")
                 .consumes("Slots"),
         );
-    let mut ex = Executor::new(net).unwrap();
+    let mut ex = Executor::new(net).map(Checked::from).unwrap();
     let mut attempts = Vec::new();
     for s in ["a", "b"] {
         let q = ex.write("Waiting", s, Content::new(), NOW).unwrap();
