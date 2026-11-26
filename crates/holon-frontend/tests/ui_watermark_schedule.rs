@@ -138,9 +138,21 @@ fn schedule() -> impl Strategy<Value = (usize, usize, Vec<Event>)> {
         (
             Just(n),
             0..=n.min(2),
+            any::<bool>(),
             proptest::collection::vec(event(n), 0..40),
         )
+            .prop_map(|(n, eager, primed, events)| {
+                (n, eager, primed_prefix(n, primed).chain(events).collect())
+            })
     })
+}
+
+/// When `primed`, every subscription first applies and shows what it has, so
+/// no unprimed view holds the watermark back.
+fn primed_prefix(n: usize, primed: bool) -> impl Iterator<Item = Event> {
+    (0..n)
+        .filter(move |_| primed)
+        .flat_map(|k| [Event::Apply(k), Event::Consume(k), Event::Consume(k)])
 }
 
 /// The consumer side of one subscription: a GPUI bridge, say.

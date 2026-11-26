@@ -26,7 +26,6 @@ use std::time::Duration;
 
 use holon::api::QueryEngine;
 use holon::api::backend_engine::BackendEngine;
-use holon_api::delivery_ledger::Owed;
 use holon::core::SqlOperationProvider;
 use holon::di::test_helpers::create_test_engine_with_path;
 use holon::storage::BLOCK_WRITE_TABLE;
@@ -40,6 +39,7 @@ use holon_api::EntityUri;
 use holon_api::SourceBlock;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_api::delivery_ledger::Owed;
 use holon_api::repository::Lifecycle;
 use holon_block_roundtrip_testing::HeadlineSpec;
 use holon_block_roundtrip_testing::NormalizedDocument;

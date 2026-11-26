@@ -28,9 +28,15 @@ pub struct ViewKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct View {
     sent: Seq,
+    /// The highest seq the view reported applied.
+    reported: Seq,
+    /// What the view's applies cover: never above what it was sent when it
+    /// applied.
     applied: Option<Seq>,
     /// The seq the view was sent when its re-query failed, and why.
     failure: Option<(Seq, String)>,
+    /// The seq the UI published while the view applied nothing yet.
+    published: Option<Seq>,
 }
 
 impl View {
@@ -74,8 +80,10 @@ impl DeliveryLedger {
     fn view(&mut self, key: ViewKey) -> &mut View {
         self.views.entry(key).or_insert(View {
             sent: Seq(0),
+            reported: Seq(0),
             applied: None,
             failure: None,
+            published: None,
         })
     }
 
@@ -84,12 +92,21 @@ impl DeliveryLedger {
         advance(&mut self.view(key).sent, seq, &what);
     }
 
+    /// An apply above what the view was sent covers only what it was sent: a
+    /// batch sent later stays owed until the view applies it.
     pub fn applied(&mut self, key: ViewKey, seq: Seq) {
         let what = format!("{key:?} applied");
         let view = self.view(key);
-        let mut applied = view.applied.unwrap_or_default();
-        advance(&mut applied, seq, &what);
-        view.applied = Some(applied);
+        advance(&mut view.reported, seq, &what);
+        view.applied = Some(view.applied.unwrap_or_default().max(seq.min(view.sent)));
+    }
+
+    /// The UI published `seq` while the view applied nothing yet: the view
+    /// holds [`Self::complete_through`] there.
+    pub fn published(&mut self, key: ViewKey, seq: Seq) {
+        let what = format!("{key:?} published");
+        let view = self.view(key);
+        advance(view.published.get_or_insert_default(), seq, &what);
     }
 
     /// The view's re-query failed after it was sent what it was sent so far.
@@ -178,13 +195,15 @@ impl DeliveryLedger {
     }
 
     /// The highest seq through which every view shows every routed batch. A
-    /// view that applied nothing yet holds it at `held_at`, the last seq the
-    /// caller already made visible.
-    pub fn complete_through(&self, held_at: Seq) -> Seq {
+    /// view that applied nothing yet holds it at the seq the UI published for
+    /// it.
+    pub fn complete_through(&self) -> Seq {
         self.views
-            .values()
-            .filter_map(|view| match view.applied {
-                None => Some(held_at),
+            .iter()
+            .filter_map(|(key, view)| match view.applied {
+                None => Some(view.published.unwrap_or_else(|| {
+                    panic!("{key:?} applied nothing and the UI published no seq for it")
+                })),
                 Some(applied) if applied < view.sent || view.unresolved_failure().is_some() => {
                     Some(applied)
                 }

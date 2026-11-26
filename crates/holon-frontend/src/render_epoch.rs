@@ -149,8 +149,9 @@ impl UiWatermark {
             .collect()
     }
 
-    /// The subscriptions' deliveries, with no demux fed.
-    fn ledger(&self) -> DeliveryLedger {
+    /// The subscriptions' deliveries, with no demux fed. A subscription that
+    /// applied nothing yet is held at `published`.
+    fn ledger(&self, published: Seq) -> DeliveryLedger {
         let mut ledger = DeliveryLedger::default();
         let (_, entries) = &*self.subscriptions.lock().unwrap();
         for (id, entry) in entries {
@@ -158,6 +159,9 @@ impl UiWatermark {
                 name: entry.key.clone(),
                 instance: *id,
             };
+            if !entry.primed {
+                ledger.published(key.clone(), published);
+            }
             entry.cursor.feed(&mut ledger, key, entry.primed);
         }
         ledger
@@ -168,28 +172,9 @@ impl UiWatermark {
     pub fn sample(&self) -> anyhow::Result<EngineSeq> {
         let EngineSeq(routed) = self.routed()?;
         let published = self.published.load(Ordering::Acquire);
-        let old_floor = || {
-            let (_, entries) = &*self.subscriptions.lock().unwrap();
-            entries
-                .values()
-                .map(|entry| match entry.primed {
-                    true => {
-                        let applied = entry.cursor.applied();
-                        if applied < entry.cursor.sent_with_children() { applied } else { u64::MAX }
-                    }
-                    false => published,
-                })
-                .fold(routed, u64::min)
-        };
-        let before = old_floor();
-        let mut ledger = self.ledger();
+        let mut ledger = self.ledger(Seq(published));
         ledger.routed(DemuxId(0), Seq(routed));
-        let Seq(floor) = ledger.complete_through(Seq(published));
-        let failing = ledger.owed().iter().any(|o| matches!(o, Owed::RequeryFailed { .. }));
-        if !failing && before == old_floor() {
-            assert_eq!(floor, before, "DIFFERENTIAL ui floor: ledger left, old right");
-            eprintln!("DIFFERENTIAL ui floor agrees");
-        }
+        let Seq(floor) = ledger.complete_through();
         // Read after the subscriptions: a subscription hands on before it
         // reports applied, so a hand-off for any seq counted above is seen.
         match self.pending_handoffs().is_empty() {
@@ -234,39 +219,8 @@ impl UiWatermark {
 
     /// Every delivery a subscription still owes.
     pub fn owed_deliveries(&self) -> Vec<Owed> {
-        let old_owed = || {
-            let (_, entries) = &*self.subscriptions.lock().unwrap();
-            let mut old: Vec<(String, Option<u64>)> = entries
-                .values()
-                .filter_map(|entry| {
-                    let applied = entry.cursor.applied();
-                    match (entry.primed, applied < entry.cursor.sent_with_children()) {
-                        (false, _) => Some((entry.key.clone(), None)),
-                        (true, true) => Some((entry.key.clone(), Some(applied))),
-                        (true, false) => None,
-                    }
-                })
-                .collect();
-            old.sort();
-            old
-        };
-        let before = old_owed();
-        let owed = self.ledger().owed();
-        let mut new: Vec<(String, Option<u64>)> = owed
-            .iter()
-            .filter_map(|o| match o {
-                Owed::NotPrimed { view } => Some((view.clone(), None)),
-                Owed::Applied { view, applied, .. } => Some((view.clone(), Some(applied.0))),
-                _ => None,
-            })
-            .collect();
-        new.sort();
-        let failing = owed.iter().any(|o| matches!(o, Owed::RequeryFailed { .. }));
-        if !failing && before == old_owed() {
-            assert_eq!(new, before, "DIFFERENTIAL ui owed: ledger left, old right");
-            eprintln!("DIFFERENTIAL ui owed agrees");
-        }
-        owed
+        self.ledger(Seq(self.published.load(Ordering::Acquire)))
+            .owed()
     }
 
     /// One line per delivery, check or hand-off that holds the watermark.

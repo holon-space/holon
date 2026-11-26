@@ -782,7 +782,12 @@ impl MatviewManager {
     /// managers can never serialise their DDL against different locks.
     pub fn new(db_handle: DbHandle, ddl_mutex: Arc<tokio::sync::Mutex<()>>) -> Self {
         let shared = shared_for_database(&db_handle, ddl_mutex);
-        let routed = shared.delivery.lock().expect("delivery mutex").routed.add(0);
+        let routed = shared
+            .delivery
+            .lock()
+            .expect("delivery mutex")
+            .routed
+            .add(0);
         let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone(), routed.clone());
         // The demux sees only batches broadcast after its subscription.
         routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
@@ -834,24 +839,6 @@ impl MatviewManager {
             cursor.feed(&mut ledger, key, true);
         }
         ledger
-    }
-
-    pub fn differential_old_owed(&self) -> (u64, Vec<(String, u64)>) {
-        let delivery = self.delivery.lock().expect("delivery mutex");
-        let mut probe = DeliveryLedger::default();
-        delivery.routed.feed(&mut probe);
-        let routed_through = probe.routed_through().0;
-        let mut lagging: Vec<(String, u64)> = delivery
-            .cursors
-            .iter()
-            .filter(|e| e.reports_applied && Subscriptions::listening(&e.stream))
-            .filter_map(|e| Some((e, e.cursor.upgrade()?)))
-            .filter(|(_, c)| c.is_lagging())
-            .map(|(e, c)| (e.view_name.clone(), c.applied()))
-            .collect();
-        lagging.sort();
-        lagging.dedup();
-        (routed_through, lagging)
     }
 
     /// A router that hands every batch emitted from now on to one consumer

@@ -153,7 +153,8 @@ async fn gestures_settle_on_delivery(rt: Arc<tokio::runtime::Runtime>, rows_per_
                 .await
                 .expect("the engine reports what it owes");
             assert!(
-                owed.iter().any(|o| matches!(o, Owed::Applied { .. } | Owed::Routed { .. })),
+                owed.iter()
+                    .any(|o| matches!(o, Owed::Applied { .. } | Owed::Routed { .. })),
                 "a lagging subscriber is owed a delivery, named by stage, target and value: \
                  {owed:?}"
             );

@@ -730,7 +730,10 @@ mod tests {
             sent: Seq(cursor.sent()),
             applied: Seq(applied_before),
         });
-        assert!(gave_up.owed.contains(&expected), "{gave_up}\nlacks: {expected}");
+        assert!(
+            gave_up.owed.contains(&expected),
+            "{gave_up}\nlacks: {expected}"
+        );
     }
 
     fn org_signals<'a>(

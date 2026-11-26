@@ -401,29 +401,7 @@ impl QueryEngine for BackendEngine {
     }
 
     async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
-        let before = self.matview_manager().differential_old_owed();
         let mut ledger = self.matview_manager().delivery_ledger();
-        let after = self.matview_manager().differential_old_owed();
-        if before == after {
-            let mut new_lagging: Vec<(String, u64)> = ledger
-                .owed()
-                .into_iter()
-                .filter_map(|o| match o {
-                    holon_api::delivery_ledger::Owed::Applied { view, applied, .. } => {
-                        Some((view, applied.0))
-                    }
-                    _ => None,
-                })
-                .collect();
-            new_lagging.sort();
-            new_lagging.dedup();
-            assert_eq!(
-                (ledger.routed_through().0, new_lagging),
-                before,
-                "DIFFERENTIAL engine owed: ledger left, old right"
-            );
-            eprintln!("DIFFERENTIAL engine owed agrees");
-        }
         ledger.watch_releases_began(self.watch_releases_in_flight());
         ledger.watch_registrations_began(self.watch_registrations_in_flight());
         Ok(ledger.owed())
