@@ -14,11 +14,17 @@
 
 use std::fmt::Debug;
 
+mod bound;
 mod mem;
+mod net;
 mod store;
+mod view;
 
+pub use bound::{Bound, Evaluation, Fired, Footprint, StoreMismatch, Unsettled, WhyNot};
 pub use mem::{MemRowStamp, MemStamp, MemStore};
+pub use net::{ArcSpec, Bind, BuildError, Fire, KeySel, Net, NetBuilder, Transition, TransitionId, Trigger};
 pub use store::{Applied, RowView, Store};
+pub use view::View;
 
 #[cfg(feature = "testkit")]
 pub mod testkit;
