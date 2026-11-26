@@ -21,6 +21,7 @@ use holon_net::exec::Content;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Output;
+use holon_net::exec::Payload;
 use holon_net::exec::Receiver;
 use holon_net::exec::Route;
 use holon_net::exec::Settled;
@@ -397,14 +398,13 @@ fn a_put_never_drops_a_waiting_candidate() {
     let kept: Vec<String> = d
         .exec()
         .tokens()
-        .contents("DocA.Candidate", DOC)
-        .iter()
-        .map(|c| match c.get("output") {
-            Some(Value::Object(o)) => match o.get("title") {
+        .row("DocA.Candidate", DOC)
+        .map(|t| match &t.payload {
+            Payload::Candidate(c) => match c.output.get("title") {
                 Some(Value::String(t)) => t.clone(),
                 other => panic!("a kept output has title {other:?}"),
             },
-            other => panic!("a candidate token has output {other:?}"),
+            other => panic!("a candidate place holds {other:?}"),
         })
         .collect();
     assert_eq!(

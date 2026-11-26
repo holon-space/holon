@@ -92,6 +92,8 @@ fn key(a: &str, s: &str) -> Key {
 pub struct Head {
     pub tries: BTreeMap<String, u32>,
     pub cause: Option<String>,
+    /// The executor made it from a stale effect's output (NET-cand.a).
+    pub candidate: bool,
 }
 
 #[derive(Clone, Default)]
@@ -110,6 +112,7 @@ struct Row {
     present: bool,
     fields: BTreeMap<String, Option<Value>>,
     cause: Option<Option<String>>,
+    candidate: Option<Option<Content>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,6 +127,7 @@ type Seen = BTreeMap<
         bool,
         BTreeMap<String, Option<Value>>,
         Option<Option<String>>,
+        Option<Option<Content>>,
     ),
 >;
 
@@ -131,7 +135,15 @@ impl Trace {
     fn seen(&self) -> Seen {
         self.rows
             .iter()
-            .map(|(k, r)| (k.clone(), (r.present, r.fields.clone(), r.cause.clone())))
+            .map(|(k, r)| {
+                let read = (
+                    r.present,
+                    r.fields.clone(),
+                    r.cause.clone(),
+                    r.candidate.clone(),
+                );
+                (k.clone(), read)
+            })
             .collect()
     }
 
@@ -259,6 +271,21 @@ impl Reads for Reader<'_> {
             .and_then(|(head, _)| head.cause.clone());
         model.row(self.trace, place, subject).cause = Some(cause.clone());
         cause
+    }
+
+    fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
+        let model = self.model;
+        let output = model
+            .slots
+            .get(&key(place, subject))
+            .and_then(|s| s.content.front())
+            .filter(|(head, _)| head.candidate)
+            .map(|(_, c)| match &c["output"] {
+                Value::Object(o) => o.clone().into_iter().collect(),
+                other => panic!("a candidate's output is {other:?}"),
+            });
+        model.row(self.trace, place, subject).candidate = Some(output.clone());
+        output
     }
 
     fn present(&mut self, place: &str, subject: &str) -> bool {
@@ -406,6 +433,7 @@ impl Model {
                 present: self.content(place, subject).is_some(),
                 fields: BTreeMap::new(),
                 cause: None,
+                candidate: None,
             })
     }
 
@@ -1471,6 +1499,7 @@ impl Model {
             }
             let run_key = self.run_key(occ);
             self.marks.remove(&run_key);
+            let rows = rows.into_iter().map(|r| (Head::default(), r)).collect();
             return self.commit(occ, rows);
         };
         let cause = Cause::definite(format!(
@@ -1518,24 +1547,31 @@ impl Model {
                         .rows
                         .get(&key(&out.place, &out.subject))
                         .map_or(Value::Null, |r| fields_value(&r.fields));
-                    kept.push(Output::new(
-                        c,
-                        &out.subject,
-                        Content::from([
-                            ("base".to_string(), base),
-                            (
-                                "output".to_string(),
-                                Value::Object(out.content.clone().into_iter().collect()),
-                            ),
-                            ("trace".to_string(), trace.as_value()),
-                        ]),
+                    let head = Head {
+                        candidate: true,
+                        ..Head::default()
+                    };
+                    kept.push((
+                        head,
+                        Output::new(
+                            c,
+                            &out.subject,
+                            Content::from([
+                                ("base".to_string(), base),
+                                (
+                                    "output".to_string(),
+                                    Value::Object(out.content.clone().into_iter().collect()),
+                                ),
+                                ("trace".to_string(), trace.as_value()),
+                            ]),
+                        ),
                     ));
                     Route::Candidate(Place::new(c))
                 }
                 PlaceSpec::Stored {
                     class: Class::Data, ..
                 } => {
-                    kept.push(out.clone());
+                    kept.push((Head::default(), out.clone()));
                     Route::Applied
                 }
                 _ => Route::Withheld,
@@ -1554,7 +1590,7 @@ impl Model {
         self.occ_mut(occ).settled = Some(Settled::OverChangedInputs { cause, routes });
     }
 
-    fn commit(&mut self, occ: &OccurrenceId, rows: Vec<Output>) {
+    fn commit(&mut self, occ: &OccurrenceId, rows: Vec<(Head, Output)>) {
         let mut before: BTreeMap<Key, Option<Content>> = BTreeMap::new();
         if let OccurrenceId::Work { .. } = occ {
             let o = &self.occs[occ];
@@ -1564,7 +1600,7 @@ impl Model {
                     before.insert(key(p, &o.subject), Some(c.1.clone()));
                 }
             }
-            for out in &rows {
+            for (_, out) in &rows {
                 before
                     .entry(key(&out.place, &out.subject))
                     .or_insert_with(|| self.content(&out.place, &out.subject).cloned());
@@ -1572,8 +1608,8 @@ impl Model {
         }
         let by = self.occs[occ].transition.clone();
         self.commit_consumption(occ);
-        for out in rows {
-            self.put(&out.place, &out.subject, out.content, Some(&by));
+        for (head, out) in rows {
+            self.put_with(&out.place, &out.subject, head, out.content, Some(&by));
         }
         if !before.is_empty() {
             let delta = before

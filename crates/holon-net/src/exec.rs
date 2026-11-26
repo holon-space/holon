@@ -24,7 +24,6 @@ use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -950,6 +949,8 @@ pub struct Envelope {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<V = Value> {
     Record(Record<V>),
+    /// A late or upgrading result in a candidate place (NET-cand.a).
+    Candidate(Box<Candidate<V>>),
     /// `<T>.Running`: names one occurrence with an attempt running.
     Running {
         occurrence: OccurrenceId,
@@ -974,6 +975,16 @@ pub enum Payload<V = Value> {
         answer: Arc<str>,
         held: Vec<(Place, Subject, Holder)>,
     },
+}
+
+/// What a stale effect would have written to a place with a candidate: the
+/// row as the firing read it, the output, and the firing's read trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Candidate<V = Value> {
+    /// The fields the firing read of the row, `None` when it read none.
+    pub base: Option<Record<Option<V>>>,
+    pub output: Record<V>,
+    pub trace: Trace,
 }
 
 impl<V: fmt::Debug> Token<V> {
@@ -1112,7 +1123,13 @@ impl Tokens {
         content: Content,
         by: Writer,
     ) -> Result<(), PoolFull> {
-        self.put_with(place, subject, Envelope::default(), content, by)
+        self.put_with(
+            place,
+            subject,
+            Envelope::default(),
+            Payload::Record(content),
+            by,
+        )
     }
 
     /// [`put`](Self::put) with a header. Equal content with another header
@@ -1123,7 +1140,7 @@ impl Tokens {
         place: &Place,
         subject: &Subject,
         envelope: Envelope,
-        content: Content,
+        payload: Payload,
         by: Writer,
     ) -> Result<(), PoolFull> {
         if let Some(&size) = self.pools.get(place) {
@@ -1136,7 +1153,6 @@ impl Tokens {
         let id = self.next_id;
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
-        let payload = Payload::Record(content);
         if fifo {
             slot.tokens.push_back(Token {
                 id,
@@ -1223,7 +1239,7 @@ impl Tokens {
 }
 
 /// Everything a firing's enabledness check read, captured once.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Trace {
     rows: BTreeMap<(Place, Subject), RowRead>,
     /// The first place read that the net does not declare.
@@ -1234,13 +1250,15 @@ pub struct Trace {
     cycle: Option<Vec<Place>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct RowRead {
     version: u64,
     present: bool,
     fields: BTreeMap<String, Option<Value>>,
     /// The header cause, when a reader asked for it.
     cause: Option<Option<Cause>>,
+    /// The output of a candidate token, when a reader asked for it.
+    candidate: Option<Option<Content>>,
 }
 
 impl Trace {
@@ -1252,33 +1270,19 @@ impl Trace {
                 present: tokens.token(place, subject).is_some(),
                 fields: BTreeMap::new(),
                 cause: None,
+                candidate: None,
             })
     }
 
-    fn as_value(&self) -> Value {
-        Value::Array(
-            self.rows
-                .iter()
-                .map(|((p, s), r)| {
-                    Value::Object(HashMap::from([
-                        ("place".to_string(), Value::String(p.to_string())),
-                        ("subject".to_string(), Value::String(s.to_string())),
-                        ("version".to_string(), Value::Integer(r.version as i64)),
-                        ("fields".to_string(), fields_value(&r.fields)),
-                    ]))
-                })
-                .collect(),
-        )
-    }
-}
-
-fn fields_value(fields: &BTreeMap<String, Option<Value>>) -> Value {
-    Value::Object(
-        fields
+    /// Every row read: place, subject, its version at the read, and the
+    /// fields read (`None` for an absent field).
+    pub fn rows(
+        &self,
+    ) -> impl Iterator<Item = (&Place, &Subject, u64, &BTreeMap<String, Option<Value>>)> {
+        self.rows
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone().unwrap_or(Value::Null)))
-            .collect(),
-    )
+            .map(|((p, s), r)| (p, s, r.version, &r.fields))
+    }
 }
 
 /// The view a guard, a binding or a derived place reads the marking through.
@@ -1303,9 +1307,15 @@ impl Reader<'_> {
             {
                 None
             }
-            // An executor place holds no fields: a read of one refuses the
-            // firing like a read of an undeclared place.
-            PlaceKind::Stored { .. } if net.owned.contains(place) => {
+            // An executor place or a candidate holds no fields: a read of one
+            // refuses the firing like a read of an undeclared place.
+            PlaceKind::Stored { .. }
+                if net.owned.contains(place)
+                    || self
+                        .tokens
+                        .token(place, subject)
+                        .is_some_and(|t| matches!(t.payload, Payload::Candidate(_))) =>
+            {
                 self.trace
                     .undeclared
                     .get_or_insert_with(|| Place::new(place));
@@ -1347,6 +1357,23 @@ impl Reader<'_> {
             .and_then(|t| t.envelope.cause.clone());
         self.trace.row(self.tokens, place, subject).cause = Some(cause.clone());
         cause
+    }
+
+    /// The output of the oldest token of a candidate place when it is a
+    /// candidate; the apply transition reads it (NET-cand.a).
+    pub fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
+        if !self.declared(place) {
+            return None;
+        }
+        let output = self
+            .tokens
+            .token(place, subject)
+            .and_then(|t| match &t.payload {
+                Payload::Candidate(c) => Some(c.output.clone()),
+                _ => None,
+            });
+        self.trace.row(self.tokens, place, subject).candidate = Some(output.clone());
+        output
     }
 
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
@@ -1422,11 +1449,15 @@ impl Reader<'_> {
             let into = self.trace.rows.entry(k.clone()).or_insert_with(|| RowRead {
                 fields: BTreeMap::new(),
                 cause: None,
+                candidate: None,
                 ..row.clone()
             });
             into.fields.extend(row.fields.clone());
             if row.cause.is_some() {
                 into.cause = row.cause.clone();
+            }
+            if row.candidate.is_some() {
+                into.candidate = row.candidate.clone();
             }
         }
         if self.trace.undeclared.is_none() {
@@ -2020,7 +2051,7 @@ type Decision = (Arc<str>, Subject);
 
 /// What the commit of a work occurrence of an ask changed: the content before
 /// it and the version after it, per (place, subject).
-type Delta = BTreeMap<(Place, Subject), (Option<Content>, u64)>;
+type Delta = BTreeMap<(Place, Subject), (Option<Payload>, u64)>;
 
 /// The work occurrence of an answer (ruling 3.b): derived from the answer
 /// id, so a Keyed receiver dedups it and the settled chain finds it.
@@ -2559,7 +2590,10 @@ impl Executor {
             } else if let Some(holder) = self.holder(&place, &subject) {
                 ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
-                match self.tokens.put(&place, &subject, content, None) {
+                match self
+                    .tokens
+                    .put_with(&place, &subject, Envelope::default(), content, None)
+                {
                     Ok(()) => ReversalOutcome::Restored,
                     Err(PoolFull) => ReversalOutcome::PoolFull,
                 }
@@ -2830,8 +2864,13 @@ impl Executor {
                     }
                     match before {
                         Some(content) => {
-                            if let Err(PoolFull) = self.tokens.put(&place, &subject, content, None)
-                            {
+                            if let Err(PoolFull) = self.tokens.put_with(
+                                &place,
+                                &subject,
+                                Envelope::default(),
+                                content,
+                                None,
+                            ) {
                                 self.disclose(Condition::PoolFull {
                                     place,
                                     transition: work.clone(),
@@ -3589,6 +3628,10 @@ impl Executor {
             }
             self.marks
                 .remove(&(a.transition.clone(), a.subject.clone()));
+            let rows = rows
+                .into_iter()
+                .map(|o| (o.place, o.subject, Payload::Record(o.content)))
+                .collect();
             return self.commit(a, rows);
         };
         let cause = Cause::definite(format!(
@@ -3621,7 +3664,6 @@ impl Executor {
                 .insert(a.occurrence.clone(), Some(Settled::Failed(cause)));
             return;
         }
-        let trace = a.trace.as_value();
         let (mut kept, mut routes) = (Vec::new(), Vec::new());
         for f in facts {
             if self.moved_read_row(&a, &f) {
@@ -3640,19 +3682,24 @@ impl Executor {
                     .trace
                     .rows
                     .get(&(o.place.clone(), o.subject.clone()))
-                    .map_or(Value::Null, |r| fields_value(&r.fields));
-                let content = Content::from([
-                    ("base".to_string(), base),
-                    (
-                        "output".to_string(),
-                        Value::Object(o.content.clone().into_iter().collect()),
-                    ),
-                    ("trace".to_string(), trace.clone()),
-                ]);
-                kept.push(Output::new(c, &o.subject, content));
+                    .map(|r| r.fields.clone());
+                let candidate = Candidate {
+                    base,
+                    output: o.content.clone(),
+                    trace: a.trace.clone(),
+                };
+                kept.push((
+                    c.clone(),
+                    o.subject.clone(),
+                    Payload::Candidate(Box::new(candidate)),
+                ));
                 Route::Candidate(c.clone())
             } else if self.net.places[&o.place].class == Class::Data {
-                kept.push(o.clone());
+                kept.push((
+                    o.place.clone(),
+                    o.subject.clone(),
+                    Payload::Record(o.content.clone()),
+                ));
                 Route::Applied
             } else {
                 Route::Withheld
@@ -3703,7 +3750,13 @@ impl Executor {
     /// A firing's put; a token into a full pool is not put, and the net
     /// discloses it once per place and transition.
     fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
-        self.put_by_with(place, subject, Envelope::default(), content, by);
+        self.put_by_with(
+            place,
+            subject,
+            Envelope::default(),
+            Payload::Record(content),
+            by,
+        );
     }
 
     fn put_by_with(
@@ -3711,12 +3764,12 @@ impl Executor {
         place: &Place,
         subject: &Subject,
         envelope: Envelope,
-        content: Content,
+        payload: Payload,
         by: &Arc<str>,
     ) {
         if let Err(PoolFull) = self
             .tokens
-            .put_with(place, subject, envelope, content, Some(by))
+            .put_with(place, subject, envelope, payload, Some(by))
         {
             self.disclose(Condition::PoolFull {
                 place: place.clone(),
@@ -3731,7 +3784,7 @@ impl Executor {
             cause: Some(cause),
             ..Envelope::default()
         };
-        self.put_by_with(port, subject, envelope, Content::new(), by);
+        self.put_by_with(port, subject, envelope, Payload::Record(Content::new()), by);
     }
 
     fn disclose(&mut self, c: Condition) {
@@ -3796,7 +3849,7 @@ impl Executor {
         }
     }
 
-    fn commit(&mut self, a: Attempt, rows: Vec<Output>) {
+    fn commit(&mut self, a: Attempt, rows: Vec<(Place, Subject, Payload)>) {
         let mut before = BTreeMap::new();
         if let OccurrenceId::Work { .. } = &a.occurrence {
             let answered = self.net.answered_of(&a.transition);
@@ -3807,24 +3860,28 @@ impl Executor {
                     .slot(p, &a.subject)
                     .is_some_and(|s| !s.tokens.is_empty() && !s.reserved);
                 if !rewritten && (keep_answered || Some(p) != answered.as_ref()) {
-                    before.insert((p.clone(), a.subject.clone()), Some(token.record().clone()));
+                    before.insert((p.clone(), a.subject.clone()), Some(token.payload.clone()));
                 }
             }
-            for o in &rows {
+            for (place, subject, _) in &rows {
                 before
-                    .entry((o.place.clone(), o.subject.clone()))
+                    .entry((place.clone(), subject.clone()))
                     .or_insert_with(|| {
-                        self.tokens
-                            .token(&o.place, &o.subject)
-                            .map(|t| t.record().clone())
+                        self.tokens.token(place, subject).map(|t| t.payload.clone())
                     });
             }
         }
         for (p, _) in &a.taken {
             self.commit_consumption(p, &a.subject, &a.transition);
         }
-        for o in rows {
-            self.put_by(&o.place, &o.subject, o.content, &a.transition);
+        for (place, subject, payload) in rows {
+            self.put_by_with(
+                &place,
+                &subject,
+                Envelope::default(),
+                payload,
+                &a.transition,
+            );
         }
         if !before.is_empty() {
             let delta = before
@@ -4038,6 +4095,21 @@ fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
                 Some(c) => {
                     h.update(&[1, u8::from(c.retryable)]);
                     encode_str(h, &c.text);
+                }
+            }
+        }
+        if let Some(output) = &row.candidate {
+            h.update(&[3]);
+            match output {
+                None => {
+                    h.update(&[0]);
+                }
+                Some(o) => {
+                    h.update(&[1]);
+                    for (field, value) in o {
+                        encode_str(h, field);
+                        encode_value(h, value);
+                    }
                 }
             }
         }

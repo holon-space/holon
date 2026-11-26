@@ -11,6 +11,7 @@ pub mod twin_names;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::time::Duration;
@@ -62,6 +63,8 @@ pub trait Reads {
     fn present(&mut self, place: &str, subject: &str) -> bool;
     /// The cause in the header of a port token.
     fn cause(&mut self, place: &str, subject: &str) -> Option<String>;
+    /// The output of a candidate token.
+    fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content>;
 
     /// A field as a string; `None` when absent or not a string.
     fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
@@ -83,6 +86,10 @@ impl Reads for Reader<'_> {
 
     fn cause(&mut self, place: &str, subject: &str) -> Option<String> {
         Reader::cause(self, place, subject).map(|c| c.text)
+    }
+
+    fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
+        Reader::candidate_output(self, place, subject)
     }
 }
 
@@ -782,8 +789,9 @@ impl Driver {
                             .map(|(c, n)| (c.0.to_string(), *n))
                             .collect(),
                         cause: t.envelope.cause.as_ref().map(|c| c.text.clone()),
+                        candidate: matches!(t.payload, Payload::Candidate(_)),
                     };
-                    (head, t.record().clone())
+                    (head, as_content(&t.payload))
                 })
                 .collect::<Vec<_>>();
             let sut = (tokens.version(p, s), row);
@@ -990,6 +998,47 @@ impl Driver {
                 );
             }
         }
+    }
+}
+
+/// A token as the model holds it: a candidate as its base, output and read
+/// trace in fields.
+fn as_content(payload: &Payload) -> Content {
+    let fields = |f: &BTreeMap<String, Option<Value>>| {
+        Value::Object(
+            f.iter()
+                .map(|(k, v)| (k.clone(), v.clone().unwrap_or(Value::Null)))
+                .collect(),
+        )
+    };
+    match payload {
+        Payload::Record(r) => r.clone(),
+        Payload::Candidate(c) => {
+            let trace = c
+                .trace
+                .rows()
+                .map(|(p, s, version, f)| {
+                    Value::Object(HashMap::from([
+                        ("place".to_string(), Value::String(p.to_string())),
+                        ("subject".to_string(), Value::String(s.to_string())),
+                        ("version".to_string(), Value::Integer(version as i64)),
+                        ("fields".to_string(), fields(f)),
+                    ]))
+                })
+                .collect();
+            Content::from([
+                (
+                    "base".to_string(),
+                    c.base.as_ref().map_or(Value::Null, fields),
+                ),
+                (
+                    "output".to_string(),
+                    Value::Object(c.output.clone().into_iter().collect()),
+                ),
+                ("trace".to_string(), Value::Array(trace)),
+            ])
+        }
+        other => panic!("a net place holds {other:?}"),
     }
 }
 

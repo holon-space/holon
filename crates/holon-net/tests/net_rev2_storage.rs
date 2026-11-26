@@ -39,6 +39,7 @@ use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
+use holon_net::exec::Payload;
 use holon_net::exec::Receiver;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
@@ -425,9 +426,14 @@ fn apply_storage_candidate() -> Transition {
         "ApplyStorageCandidate",
         Trigger::Auto,
         bind!(|r, s| {
-            let mut input: Content = match r.field("StorageCandidate", s, "output")? {
-                Value::Object(token) => token.into_iter().collect(),
-                other => panic!("StorageCandidate.output is {other:?}, not a store token"),
+            // A background try writes the store token as a record; a stale
+            // effect's output arrives as a typed candidate.
+            let mut input: Content = match r.candidate_output("StorageCandidate", s) {
+                Some(output) => output,
+                None => match r.field("StorageCandidate", s, "output")? {
+                    Value::Object(token) => token.into_iter().collect(),
+                    other => panic!("StorageCandidate.output is {other:?}, not a store token"),
+                },
             };
             let provider = str_of(&input, "provider");
             let spent = r.field("RetiredStorage", s, &provider).is_some();
@@ -907,6 +913,20 @@ fn token_content<'a>(d: &'a Driver, place: &str) -> Option<&'a Content> {
     d.exec().tokens().token(place, VAULT).map(|t| t.record())
 }
 
+/// The store token a slot holds: a candidate's output, a background try's
+/// `output` record, or the token itself.
+fn store_in(d: &Driver, place: &str) -> Option<Content> {
+    let t = d.exec().tokens().token(place, VAULT)?;
+    Some(match &t.payload {
+        Payload::Candidate(c) => c.output.clone(),
+        Payload::Record(r) => match r.get("output") {
+            Some(Value::Object(token)) => token.clone().into_iter().collect(),
+            _ => r.clone(),
+        },
+        other => panic!("{place} holds {other:?}"),
+    })
+}
+
 /// Settles the oldest pending request of ONE transition. The order of the
 /// queue is the effect runner's business, not the net's, so a test that needs a
 /// particular interleaving picks the request it answers.
@@ -1111,12 +1131,7 @@ fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
             }
             let holders: Vec<&str> = ["Storage", "SecondaryStorage", "StorageCandidate"]
                 .into_iter()
-                .filter(|p| {
-                    token_content(d, p).is_some_and(|t| match t.get("output") {
-                        Some(Value::Object(token)) => token["provider"] == text(name),
-                        _ => str_of(t, "provider") == *name,
-                    })
-                })
+                .filter(|p| store_in(d, p).is_some_and(|t| str_of(&t, "provider") == *name))
                 .collect();
             assert_eq!(
                 holders.len(),
@@ -1130,7 +1145,7 @@ fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
 
 fn assert_a_slot_store_has_a_primary(d: &Driver) {
     for slot in ["SecondaryStorage", "StorageCandidate"] {
-        if token_content(d, slot).is_some() {
+        if d.exec().tokens().token(slot, VAULT).is_some() {
             assert!(
                 !d.pending.is_empty() || token_content(d, "Storage").is_some(),
                 "store_serves: a store is open in {slot}, yet the net is quiescent \
@@ -1569,10 +1584,7 @@ fn a_held_write_never_triggers_the_promotion() {
         token_content(&d, "Storage").map_or(String::new(), |t| str_of(t, "provider"))
     );
     assert_eq!(
-        token_content(&d, "StorageCandidate").map(|t| match &t["output"] {
-            Value::Object(token) => token["provider"].clone(),
-            other => panic!("a candidate output of {other:?}"),
-        }),
+        store_in(&d, "StorageCandidate").map(|t| t["provider"].clone()),
         Some(text(TURSO)),
         "the candidate waits for the write"
     );
