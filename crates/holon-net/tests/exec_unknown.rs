@@ -667,3 +667,47 @@ fn every_attempt_failed_returns_the_input() {
         "all_failed_clears_unknown"
     );
 }
+
+proptest! {
+    /// A `Keyed` re-issue is a take of the same token: after every attempt
+    /// of the run failed and the run waits for its retry, the returned token
+    /// counts one try per attempt, as the model does.
+    #[test]
+    fn a_keyed_reissue_counts_a_try_on_the_returned_token(
+        reissues in 1..3u32,
+        oldest_first in any::<bool>(),
+    ) {
+        let send = Transition::new(
+            "Send",
+            Trigger::Manual,
+            bind!(|r, s| Some(content(&[("n", r.field("Msg", s, "n")?)]))),
+            Body::Effectful(Receiver::Keyed),
+        )
+        .consumes("Msg")
+        .abandon(Duration::from_secs(ABANDON))
+        .retry(Duration::from_secs(100), reissues + 2);
+        let net = Spec::default()
+            .place("Msg", Class::Process)
+            .place("Sent", Class::Process)
+            .transition(send);
+        let mut d = Driver::new(net);
+        d.write("Msg", APP, content(&[("n", Value::Integer(1))]))
+            .expect("the net quiesces");
+        d.fire("Send", APP, OccurrenceId::caller("send#1"))
+            .expect("Msg holds a message");
+        for _ in 0..reissues {
+            d.tick(ABANDON + 1).expect("the keyed receiver re-issues");
+        }
+        let mut attempts: Vec<_> = d.pending.iter().map(|r| r.attempt).collect();
+        prop_assert_eq!(attempts.len() as u32, reissues + 1);
+        if !oldest_first {
+            attempts.reverse();
+        }
+        for attempt in attempts {
+            d.complete(attempt, EffectResult::Failed(Cause::retryable("rejected")))
+                .expect("the attempt ran");
+        }
+        prop_assert!(d.exec().tokens().token("Msg", APP).is_some(), "the input returns");
+        d.tick(101).expect("the retry takes the token again");
+    }
+}

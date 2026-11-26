@@ -8,6 +8,7 @@ use std::sync::Arc;
 use holon_net::exec::Content;
 use holon_net::exec::Holder;
 use holon_net::exec::OccurrenceId;
+use holon_net::exec::Payload;
 use holon_net::exec::Settled;
 use holon_net::exec::WhyNot;
 use holon_pattern::Value as PValue;
@@ -189,21 +190,10 @@ impl Tools {
                         .subjects(place)
                         .into_iter()
                         .map(|s| {
-                            // A port token's cause sits in its header; the
-                            // marking shows it beside the record's fields.
                             let contents: Vec<_> = exec
                                 .tokens()
                                 .row(place, &s)
-                                .map(|t| {
-                                    let mut c = t.record().clone();
-                                    if let Some(cause) = &t.envelope.cause {
-                                        c.insert(
-                                            "cause".to_owned(),
-                                            PValue::String(cause.text.clone()),
-                                        );
-                                    }
-                                    c
-                                })
+                                .map(|t| token_view(&t.payload))
                                 .collect();
                             for c in &contents {
                                 let c = serde_json::to_string(c).expect("contents are JSON");
@@ -357,5 +347,23 @@ impl ServerHandler for Tools {
             )),
             ..ServerInfo::default()
         }
+    }
+}
+
+/// A token as the marking shows it: net data as its fields, an executor
+/// token by its variant.
+pub fn token_view(payload: &Payload) -> Content {
+    match payload {
+        Payload::Record(r) => r.clone(),
+        Payload::Failure { cause } => Content::from([(
+            holon_net::exec::FAILURE_CAUSE_FIELD.to_owned(),
+            PValue::String(cause.text.clone()),
+        )]),
+        Payload::Answered(a) => holon_net::uft::answer::answered_content(a),
+        Payload::Candidate(c) => Content::from([(
+            "output".to_owned(),
+            PValue::Object(c.output.clone().into_iter().collect()),
+        )]),
+        other => Content::from([("executor".to_owned(), PValue::String(format!("{other:?}")))]),
     }
 }

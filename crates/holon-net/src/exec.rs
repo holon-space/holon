@@ -165,6 +165,8 @@ pub fn expired_place(work: &str) -> String {
     format!("Expired.{work}")
 }
 
+/// The field a bind reads the cause of a [`Payload::Failure`] token by.
+pub const FAILURE_CAUSE_FIELD: &str = "cause";
 /// `Asks.T`: the [`hash_text`] of the ask.
 pub const HASH_FIELD: &str = "hash";
 
@@ -910,18 +912,23 @@ pub struct ContributionId(pub Arc<str>);
 /// (ADR 0032 §9.1, REV11-running.a).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Envelope {
-    /// Takes per consumer, a crashed or failed attempt included.
+    /// Takes per consumer in its current run, a crashed or failed attempt
+    /// included.
     pub tries: BTreeMap<ContributionId, u32>,
-    /// Why the run that put this token failed, on a failure or timeout port.
-    pub cause: Option<Cause>,
     pub next_try: Option<Duration>,
 }
 
-/// What a token holds. Only `Record` is net data; the other variants are the
-/// executor's own tokens in the places [`NetDef::check`] declares for it.
+/// What a token holds. `Record`, `Failure`, `Candidate` and `Answered` are
+/// net data; the other variants are the executor's own tokens in the places
+/// [`NetDef::check`] declares for it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Payload<V = Value> {
     Record(Record<V>),
+    /// A failure or timeout port token: why the run failed. A bind reads it
+    /// as the field [`FAILURE_CAUSE_FIELD`].
+    Failure {
+        cause: Cause,
+    },
     /// A late or upgrading result in a candidate place (NET-cand.a).
     Candidate(Box<Candidate<V>>),
     /// An `Answered.T` token: the user answer the work of `T` consumes.
@@ -1034,20 +1041,19 @@ impl Tokens {
             .flat_map(|s| &s.tokens)
     }
 
-    /// The records of a net place's row, oldest first.
-    pub fn contents(&self, place: &str, subject: &str) -> Vec<Content> {
-        self.slot(place, subject).map_or_else(Vec::new, |s| {
-            s.tokens.iter().map(|t| t.record().clone()).collect()
-        })
-    }
-
     /// How many tokens of a pool are free: not held by a running firing.
     pub fn free(&self, place: &str) -> usize {
-        self.contents(place, POOL_SUBJECT).len()
+        self.row(place, POOL_SUBJECT).count()
     }
 
     pub fn version(&self, place: &str, subject: &str) -> u64 {
         self.slot(place, subject).map_or(0, |s| s.version)
+    }
+
+    /// A pool token serves every subject's run, so it counts no tries: the
+    /// run's attempts are the count.
+    fn counts_tries(&self, place: &str) -> bool {
+        !self.pools.contains_key(place)
     }
 
     /// Who committed the current version: see [`Slot::writer`].
@@ -1306,7 +1312,10 @@ impl Reader<'_> {
                     .token(place, subject)
                     .and_then(|t| match &t.payload {
                         Payload::Answered(a) => answer::answered_field(a, field, !self.hide_value),
-                        _ => t.record().get(field).cloned(),
+                        Payload::Failure { cause } => (field == FAILURE_CAUSE_FIELD)
+                            .then(|| Value::String(cause.text.clone())),
+                        Payload::Record(r) => r.get(field).cloned(),
+                        other => unreachable!("the arm above refuses a read of {other:?}"),
                     });
                 self.trace
                     .row(self.tokens, place, subject)
@@ -1336,7 +1345,10 @@ impl Reader<'_> {
         let cause = self
             .tokens
             .token(place, subject)
-            .and_then(|t| t.envelope.cause.clone());
+            .and_then(|t| match &t.payload {
+                Payload::Failure { cause } => Some(cause.clone()),
+                _ => None,
+            });
         self.trace.row(self.tokens, place, subject).cause = Some(cause.clone());
         cause
     }
@@ -3013,7 +3025,22 @@ impl Executor {
         if let (Some(a), EffectResult::Unknown(_)) = (&live, &result)
             && let Some(probe) = self.continuation(a)
         {
-            self.issue(a.clone(), probe, now);
+            let mut a = a.clone();
+            if !probe {
+                let contribution = ContributionId(a.transition.clone());
+                for (_, token) in a
+                    .taken
+                    .iter_mut()
+                    .filter(|(p, _)| self.tokens.counts_tries(p))
+                {
+                    *token
+                        .envelope
+                        .tries
+                        .get_mut(&contribution)
+                        .expect("the take counted it") += 1;
+                }
+            }
+            self.issue(a, probe, now);
             return Completion::Recorded;
         }
         match outcome(&self.attempts[occurrence]) {
@@ -3321,10 +3348,10 @@ impl Executor {
         {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
-        if let Some(p) = &self.net.answered_of(&t.name) {
-            if !answer::work_input(&mut input, self.answered(p, s)) {
-                return Err(WhyNot::BindsAnswerInput);
-            }
+        if let Some(p) = &self.net.answered_of(&t.name)
+            && !answer::work_input(&mut input, self.answered(p, s))
+        {
+            return Err(WhyNot::BindsAnswerInput);
         }
         Ok(input)
     }
@@ -3415,6 +3442,10 @@ impl Executor {
         let t = self.net.transition_def(transition);
         let consumes = t.consumes.clone();
         let mut taken = Vec::new();
+        let key = (transition.clone(), subject.clone());
+        if self.retry_due(transition, &subject).is_some() {
+            self.end_run(&key);
+        }
         for p in consumes {
             let hidden = self.twin(Twin::HiddenReservation);
             let slot = self.tokens.slot_mut(&p, &subject);
@@ -3425,26 +3456,36 @@ impl Executor {
                 slot.tokens.pop_front()
             }
             .expect("decide checked every consumed token");
-            *token
-                .envelope
-                .tries
-                .entry(ContributionId(transition.clone()))
-                .or_default() += 1;
+            if self.tokens.counts_tries(&p) {
+                *token
+                    .envelope
+                    .tries
+                    .entry(ContributionId(transition.clone()))
+                    .or_default() += 1;
+            }
             self.tokens.lend(&p);
             taken.push((p, token));
         }
-        let key = (transition.clone(), subject.clone());
-        if self.retry_due(transition, &subject).is_some() {
-            self.end_run(&key);
+        let run = self.runs.entry(key).or_insert(Run {
+            started: now,
+            attempts: 0,
+            failed: None,
+        });
+        run.attempts += 1;
+        let attempts = run.attempts;
+        // A parked occurrence keeps the run open with its own token, so a
+        // newer token joins a run that already counts that token's tries.
+        let shared = self
+            .parked
+            .values()
+            .any(|a| &a.transition == transition && a.subject == subject);
+        for (p, token) in taken.iter().filter(|(p, _)| self.tokens.counts_tries(p)) {
+            let tries = token.envelope.tries[&ContributionId(transition.clone())];
+            assert!(
+                tries == attempts || shared && tries < attempts,
+                "the {p} token of {subject} counts {tries} tries of '{transition}', its run {attempts}"
+            );
         }
-        self.runs
-            .entry(key)
-            .or_insert(Run {
-                started: now,
-                attempts: 0,
-                failed: None,
-            })
-            .attempts += 1;
         self.occurrences.insert(occurrence.clone(), None);
         let a = Attempt {
             occurrence,
@@ -3476,9 +3517,23 @@ impl Executor {
             .mark_slot(&Place::retry_pending(&key.0), &key.1, payload);
     }
 
+    /// The tries a returned token counts belong to the run that ends.
     fn end_run(&mut self, key: &(Arc<str>, Subject)) {
         self.runs.remove(key);
         self.set_retry_due(key, None);
+        let contribution = ContributionId(key.0.clone());
+        for p in &self.net.transition_def(&key.0).consumes {
+            if let Some(slot) = self
+                .tokens
+                .slots
+                .get_mut(p)
+                .and_then(|row| row.get_mut(&key.1))
+            {
+                for t in &mut slot.tokens {
+                    t.envelope.tries.remove(&contribution);
+                }
+            }
+        }
     }
 
     fn occupy_running(&mut self, a: &Attempt) {
@@ -3616,7 +3671,11 @@ impl Executor {
             // A pure firing that never committed is no try.
             let mut a = a;
             let by = ContributionId(a.transition.clone());
-            for (_, token) in &mut a.taken {
+            for (_, token) in a
+                .taken
+                .iter_mut()
+                .filter(|(p, _)| self.tokens.counts_tries(p))
+            {
                 let tries = token
                     .envelope
                     .tries
@@ -3749,11 +3808,13 @@ impl Executor {
 
     /// A failure or timeout port token: no data, the cause in its header.
     fn put_port(&mut self, port: &Place, subject: &Subject, cause: Cause, by: &Arc<str>) {
-        let envelope = Envelope {
-            cause: Some(cause),
-            ..Envelope::default()
-        };
-        self.put_by_with(port, subject, envelope, Payload::Record(Content::new()), by);
+        self.put_by_with(
+            port,
+            subject,
+            Envelope::default(),
+            Payload::Failure { cause },
+            by,
+        );
     }
 
     fn disclose(&mut self, c: Condition) {
@@ -3807,13 +3868,14 @@ impl Executor {
             return;
         }
         if let Some(held) = self.tokens.token(&o.place, &o.subject) {
+            let put = self.net.payload(&o.place, o.content.clone());
             assert!(
-                *held.record() == o.content,
+                held.payload == put,
                 "a put with no compare-and-set into the single-token place {} of {} would drop the held token {:?} for {:?}",
                 o.place,
                 o.subject,
-                held.record(),
-                o.content
+                held.payload,
+                put
             );
         }
     }
@@ -3886,9 +3948,20 @@ impl Executor {
     }
 
     /// The inputs go back with no version change: see [`Tokens::restore`].
+    /// A token that returns after its run ended counts no tries of it.
     fn rollback(&mut self, a: &Attempt) {
+        let run_ended = !self
+            .runs
+            .contains_key(&(a.transition.clone(), a.subject.clone()));
         for (p, token) in &a.taken {
-            self.tokens.restore(p, &a.subject, token);
+            let mut token = token.clone();
+            if run_ended {
+                token
+                    .envelope
+                    .tries
+                    .remove(&ContributionId(a.transition.clone()));
+            }
+            self.tokens.restore(p, &a.subject, &token);
         }
         self.release_running(&a.transition, &a.subject);
     }

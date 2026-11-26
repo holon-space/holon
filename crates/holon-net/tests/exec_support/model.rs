@@ -1237,6 +1237,13 @@ impl Model {
         input: Content,
         now: Duration,
     ) -> AttemptId {
+        if self
+            .runs
+            .get(&key(&t.name, s))
+            .is_some_and(|r| r.retry_due.is_some())
+        {
+            self.end_run(&key(&t.name, s));
+        }
         let taken = t
             .consumes
             .iter()
@@ -1250,13 +1257,6 @@ impl Model {
                 (p.clone(), c)
             })
             .collect();
-        if self
-            .runs
-            .get(&key(&t.name, s))
-            .is_some_and(|r| r.retry_due.is_some())
-        {
-            self.runs.remove(&key(&t.name, s));
-        }
         self.runs
             .entry(key(&t.name, s))
             .or_insert(Run {
@@ -1329,6 +1329,19 @@ impl Model {
             probe,
         };
         self.requests.push(req);
+    }
+
+    /// The tries a returned token counts belong to the run that ends.
+    fn end_run(&mut self, run_key: &Key) {
+        self.runs.remove(run_key);
+        let consumes = self.transition(&run_key.0).consumes.clone();
+        for p in consumes {
+            if let Some(slot) = self.slots.get_mut(&key(&p, &run_key.1)) {
+                for (head, _) in &mut slot.content {
+                    head.tries.remove(&run_key.0);
+                }
+            }
+        }
     }
 
     fn issue(&mut self, occ: &OccurrenceId, probe: bool, now: Duration) {
@@ -1435,10 +1448,15 @@ impl Model {
                 let run_key = self.run_key(occ);
                 let run = self.runs.get_mut(&run_key)?;
                 let retry = t.retry.expect("a Keyed receiver has a count bound");
-                (run.attempts < retry.max_attempts).then(|| {
-                    run.attempts += 1;
-                    false
-                })
+                if run.attempts >= retry.max_attempts {
+                    return None;
+                }
+                run.attempts += 1;
+                let name = t.name.clone();
+                for (_, (head, _)) in &mut self.occ_mut(occ).taken {
+                    *head.tries.get_mut(&name).expect("the take counted it") += 1;
+                }
+                Some(false)
             }
             Receiver::StateProbe if !live.probe => Some(true),
             _ => None,
@@ -1622,7 +1640,7 @@ impl Model {
             self.deltas.insert(occ.clone(), delta);
         }
         let run_key = self.run_key(occ);
-        self.runs.remove(&run_key);
+        self.end_run(&run_key);
         self.occ_mut(occ).settled = Some(Settled::Done);
     }
 
@@ -1650,7 +1668,12 @@ impl Model {
     fn rollback(&mut self, occ: &OccurrenceId) {
         let o = &self.occs[occ];
         let (taken, s) = (o.taken.clone(), o.subject.clone());
-        for (p, c) in taken {
+        let run_ended = !self.runs.contains_key(&key(&o.transition, &s));
+        let name = o.transition.clone();
+        for (p, mut c) in taken {
+            if run_ended {
+                c.0.tries.remove(&name);
+            }
             let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
             if fifo {
@@ -1662,13 +1685,15 @@ impl Model {
         }
     }
 
-    /// A failure or timeout port token: no content, the cause in its header.
+    /// A failure or timeout port token: its cause is its data, so a new
+    /// cause is a new version.
     fn put_port(&mut self, port: &str, subject: &str, cause: &Cause, by: &str) {
         let head = Head {
             cause: Some(cause.text.clone()),
             ..Head::default()
         };
-        self.put_with(port, subject, head, Content::new(), Some(by));
+        let data = Content::from([("cause".to_string(), Value::String(cause.text.clone()))]);
+        self.put_with(port, subject, head, data, Some(by));
     }
 
     fn set_mark(&mut self, occ: &OccurrenceId, cause: &Cause) {
@@ -1698,7 +1723,7 @@ impl Model {
             run.retry_due = Some(now + retry.backoff);
             return;
         }
-        self.runs.remove(&run_key);
+        self.end_run(&run_key);
         if let Some(port) = &t.on_failure {
             self.put_port(port, &run_key.1, cause, &run_key.0);
         }
@@ -1741,7 +1766,7 @@ impl Model {
             let t = self.transition(&k.0);
             let run = &self.runs[&k];
             if t.run_timer.is_some_and(|d| run.started + d <= now) {
-                self.runs.remove(&k);
+                self.end_run(&k);
                 if let Some(port) = &t.on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", k.0));
                     self.put_port(port, &k.1, &cause, &k.0);

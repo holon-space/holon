@@ -153,7 +153,7 @@ fn a_stale_effect_on_a_data_place_applies_and_discloses() {
     d.complete_oldest(lowered).expect("the net quiesces");
 
     let stored = string(
-        &d.exec()
+        d.exec()
             .tokens()
             .token("DocC", DOC)
             .expect("edited")
@@ -270,7 +270,7 @@ fn a_stale_pure_firing_rolls_back_and_refires() {
     d.write("Src", "x", n(2)).expect("the net quiesces");
 
     let out = int(
-        &d.exec()
+        d.exec()
             .tokens()
             .token("Out", "x")
             .expect("doubled")
@@ -361,7 +361,7 @@ fn a_consumed_input_is_never_stale() {
 
     assert_eq!(
         int(
-            &d.exec()
+            d.exec()
                 .tokens()
                 .token("Store", DOC)
                 .expect("a store")
@@ -545,7 +545,7 @@ fn a_fact_rewrite_of_an_unread_single_place_refuses() {
 
 fn base_n(d: &Driver) -> i64 {
     int(
-        &d.exec()
+        d.exec()
             .tokens()
             .token("Base", DOC)
             .expect("a base")
@@ -600,4 +600,85 @@ fn fact_net(capacity: Capacity, reads: ReadArc) -> Spec {
         ReadArc::Base => work.reads("Base"),
         ReadArc::Nothing => work,
     })
+}
+
+/// `Try` puts its failure cause into the port `Failed`; `Report` reads that
+/// cause while its effect runs.
+fn cause_net() -> Spec {
+    Spec::default()
+        .place("Failed", Class::Process)
+        .place("Reported", Class::Process)
+        .transition(
+            Transition::new(
+                "Try",
+                Trigger::Manual,
+                bind!(|_r, _s| Some(Content::new())),
+                Body::Effectful(Receiver::None),
+            )
+            .on_failure("Failed"),
+        )
+        .transition(
+            Transition::new(
+                "Report",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    let cause = r.cause("Failed", s)?;
+                    let field = r.field("Failed", s, "cause").unwrap_or(Value::Null);
+                    let other = r.field("Failed", s, "text").unwrap_or(Value::Null);
+                    Some(content(&[
+                        ("cause", text(&cause)),
+                        ("field", field),
+                        ("other", other),
+                    ]))
+                }),
+                Body::Effectful(Receiver::None),
+            )
+            .reads("Failed"),
+        )
+}
+
+proptest! {
+    /// The cause of a failure port is its data: a port rewrite with a new
+    /// cause makes an in-flight reader of the cause stale, an equal cause
+    /// does not. A field read of `cause` sees the cause text, any other
+    /// field reads absent.
+    #[test]
+    fn a_new_port_cause_makes_its_reader_stale(
+        causes in prop::collection::vec(prop::sample::select(vec!["a", "b"]), 2..5),
+    ) {
+        let mut d = Driver::new(cause_net());
+        for (i, cause) in causes.iter().enumerate() {
+            d.fire("Try", DOC, holon_net::exec::OccurrenceId::caller(&format!("try{i}")))
+                .expect("Try is manual and reads nothing");
+            let req = d
+                .pending
+                .iter()
+                .position(|r| &*r.transition == "Try")
+                .map(|i| d.pending.remove(i).expect("listed"))
+                .expect("Try runs");
+            d.complete(
+                req.attempt,
+                EffectResult::Failed(holon_net::exec::Cause::definite(cause.to_string())),
+            )
+            .expect("the net quiesces");
+        }
+        let report = d.requests_of("Report").next().expect("Report read the first cause").clone();
+        prop_assert_eq!(&report.input["cause"], &text(causes[0]));
+        prop_assert_eq!(&report.input["field"], &text(causes[0]));
+        prop_assert_eq!(&report.input["other"], &Value::Null);
+        d.complete(
+            report.attempt,
+            EffectResult::Done(vec![Output::new(
+                "Reported",
+                &report.subject,
+                content(&[("cause", text(causes[0]))]),
+            )]),
+        )
+        .expect("the net quiesces");
+        let stale = matches!(
+            d.exec().settled(&report.occurrence),
+            Ok(Some(Settled::OverChangedInputs { .. }))
+        );
+        prop_assert_eq!(stale, causes[1..].iter().any(|c| *c != causes[0]));
+    }
 }

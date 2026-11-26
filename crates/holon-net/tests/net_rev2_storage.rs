@@ -5,8 +5,9 @@
 //! The net: `ProviderTries` carries the try count per provider (token data, no
 //! engine retry attribute); `Storage` holds the primary (one token per subject
 //! IS capacity 1); `SecondaryStorage` is the standby slot; `StorageCandidate`
-//! takes every store that opened outside the boot slot, and
-//! `ApplyStorageCandidate` installs, keeps or retires it; `SwapStorage` takes
+//! takes every store that opened outside the boot slot and `StaleStorage` a
+//! store that settled over changed inputs; `ApplyStorageCandidate` and
+//! `ApplyStaleStorage` install, keep or retire it; `SwapStorage` takes
 //! BOTH store tokens in one firing, applies the final bounded delta while it
 //! holds them and puts them back exchanged; `RetireStandby` closes the demoted
 //! store. `ApplyWrite` also takes the `Storage` token, so no write falls
@@ -23,6 +24,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use exec_support::Bind;
 use exec_support::Driver;
 use exec_support::Reads;
 use exec_support::Spec;
@@ -409,109 +411,62 @@ fn exchanged(s: &Subject, input: &Content, new_primary_version: i64) -> Vec<Outp
 /// The transitions that take the primary's token for the length of a hold.
 const STORE_HOLDERS: [&str; 2] = ["ApplyWrite", "SwapStorage"];
 
-/// The candidate of a store that opened outside the boot slot: a background
-/// try writes it, and the executor routes a store token that settled over
-/// changed inputs here (NET-cand.a).
-fn candidate_token(token: Content) -> Content {
-    content(&[("output", Value::Object(token.into_iter().collect()))])
-}
+/// The places an open store's token can be in: the primary first.
+const STORE_SLOTS: [&str; 4] = [
+    "Storage",
+    "SecondaryStorage",
+    "StorageCandidate",
+    "StaleStorage",
+];
 
-/// REV2-cand.a: ONE transition applies a store candidate. It installs it when
-/// no primary exists (REV2-promote.a, disclosed unless the fallback itself
-/// serves), keeps a preferred one as the standby for the swap, and retires the
-/// rest. A holder leaves `Storage` empty while the primary exists
-/// (REV11-running.a), so every holder's in-flight places inhibit it.
+/// REV2-cand.a: a store candidate is applied by one decision. It installs it
+/// when no primary exists (REV2-promote.a, disclosed unless the fallback
+/// itself serves), keeps a preferred one as the standby for the swap, and
+/// retires the rest. A background try writes its opened store as a record into
+/// `StorageCandidate`; the executor routes a store token that settled over
+/// changed inputs into `StaleStorage` as a typed candidate (NET-cand.a). Each
+/// place has its own transition, so each holds one shape.
 fn apply_storage_candidate() -> Transition {
-    let apply = Transition::new(
+    apply_store(
         "ApplyStorageCandidate",
-        Trigger::Auto,
+        "StorageCandidate",
         bind!(|r, s| {
-            // A background try writes the store token as a record; a stale
-            // effect's output arrives as a typed candidate.
-            let mut input: Content = match r.candidate_output("StorageCandidate", s) {
-                Some(output) => output,
-                None => match r.field("StorageCandidate", s, "output")? {
-                    Value::Object(token) => token.into_iter().collect(),
-                    other => panic!("StorageCandidate.output is {other:?}, not a store token"),
-                },
-            };
-            let provider = str_of(&input, "provider");
-            let spent = r.field("RetiredStorage", s, &provider).is_some();
-            // No arcs on the slots: a read arc needs a token, and the branch is
-            // chosen by whether there is one.
-            let branch = match r.text("Storage", s, "provider") {
-                None if !spent => "install",
-                None => {
-                    input.insert("idle".to_string(), Value::Boolean(true));
-                    "retire"
-                }
-                Some(primary) => {
-                    let standby = r.text("SecondaryStorage", s, "provider");
-                    let primary_priority = int_at(r, "Storage", s, "priority")?;
-                    let idle =
-                        spent || primary == provider || standby.as_deref() == Some(&*provider);
-                    input.insert("idle".to_string(), Value::Boolean(idle));
-                    if !idle && standby.is_none() && int_of(&input, "priority") > primary_priority {
-                        "keep"
-                    } else {
-                        "retire"
-                    }
-                }
-            };
-            // Only the first install replaces a failed Loro boot; a later one
-            // re-installs a primary that a write returned.
-            if branch == "install"
-                && provider != LORO
-                && !r.present("StorageOpened", s)
-                && let Some(cause) = r.text("FallbackFailure", s, "cause")
-            {
-                input.insert("cause".to_string(), text(&cause));
-            }
-            input.insert("branch".to_string(), text(branch));
-            Some(input)
-        }),
-        Body::pure(|s, input| {
-            let provider = str_of(input, "provider");
-            let token = provider_token(
-                &provider,
-                int_of(input, "version"),
-                int_of(input, "priority"),
-            );
-            Ok(match &*str_of(input, "branch") {
-                "install" => {
-                    let mut out = vec![
-                        Output::new("Storage", s, token),
-                        Output::new(
-                            "StorageOpened",
-                            s,
-                            content(&[("provider", text(&provider))]),
-                        ),
-                    ];
-                    if let Some(Value::String(cause)) = input.get("cause") {
-                        out.push(Output::new(
-                            "StorageCondition",
-                            s,
-                            content(&[(
-                                "text",
-                                text(&format!(
-                                    "serving {provider} because {LORO} could not open: {cause}"
-                                )),
-                            )]),
-                        ));
-                    }
-                    out
-                }
-                "keep" => vec![Output::new("SecondaryStorage", s, token)],
-                // A store that serves in a slot, or is closed, has nothing to
-                // close.
-                "retire" if input.get("idle") == Some(&Value::Boolean(true)) => vec![],
-                "retire" => vec![Output::new("RetiringStorage", s, token)],
-                other => panic!("no candidate branch '{other}'"),
-            })
+            let input = content(&[
+                (
+                    "provider",
+                    text(&r.text("StorageCandidate", s, "provider")?),
+                ),
+                (
+                    "version",
+                    Value::Integer(int_at(r, "StorageCandidate", s, "version")?),
+                ),
+                (
+                    "priority",
+                    Value::Integer(int_at(r, "StorageCandidate", s, "priority")?),
+                ),
+            ]);
+            store_branch(r, s, input)
         }),
     )
-    .consumes("StorageCandidate")
-    .inhibits("RetiringStorage");
+}
+
+fn apply_stale_storage() -> Transition {
+    apply_store(
+        "ApplyStaleStorage",
+        "StaleStorage",
+        bind!(|r, s| {
+            let input = r.candidate_output("StaleStorage", s)?;
+            store_branch(r, s, input)
+        }),
+    )
+}
+
+/// A holder leaves `Storage` empty while the primary exists
+/// (REV11-running.a), so every holder's in-flight places inhibit the apply.
+fn apply_store(name: &str, place: &str, bind: Bind) -> Transition {
+    let apply = Transition::new(name, Trigger::Auto, bind, Body::pure(store_outputs))
+        .consumes(place)
+        .inhibits("RetiringStorage");
     // A retirement in flight decides whether a late candidate is spent.
     ["RetireStandby"]
         .iter()
@@ -520,6 +475,82 @@ fn apply_storage_candidate() -> Transition {
             t.inhibits(&format!("{holder}.Running"))
                 .inhibits(&format!("{holder}.OutcomeUnknown"))
         })
+}
+
+fn store_branch(r: &mut dyn Reads, s: &Subject, mut input: Content) -> Option<Content> {
+    let provider = str_of(&input, "provider");
+    let spent = r.field("RetiredStorage", s, &provider).is_some();
+    // No arcs on the slots: a read arc needs a token, and the branch is
+    // chosen by whether there is one.
+    let branch = match r.text("Storage", s, "provider") {
+        None if !spent => "install",
+        None => {
+            input.insert("idle".to_string(), Value::Boolean(true));
+            "retire"
+        }
+        Some(primary) => {
+            let standby = r.text("SecondaryStorage", s, "provider");
+            let primary_priority = int_at(r, "Storage", s, "priority")?;
+            let idle = spent || primary == provider || standby.as_deref() == Some(&*provider);
+            input.insert("idle".to_string(), Value::Boolean(idle));
+            if !idle && standby.is_none() && int_of(&input, "priority") > primary_priority {
+                "keep"
+            } else {
+                "retire"
+            }
+        }
+    };
+    // Only the first install replaces a failed Loro boot; a later one
+    // re-installs a primary that a write returned.
+    if branch == "install"
+        && provider != LORO
+        && !r.present("StorageOpened", s)
+        && let Some(cause) = r.text("FallbackFailure", s, "cause")
+    {
+        input.insert("cause".to_string(), text(&cause));
+    }
+    input.insert("branch".to_string(), text(branch));
+    Some(input)
+}
+
+fn store_outputs(s: &Subject, input: &Content) -> Result<Vec<Output>, Cause> {
+    let provider = str_of(input, "provider");
+    let token = provider_token(
+        &provider,
+        int_of(input, "version"),
+        int_of(input, "priority"),
+    );
+    Ok(match &*str_of(input, "branch") {
+        "install" => {
+            let mut out = vec![
+                Output::new("Storage", s, token),
+                Output::new(
+                    "StorageOpened",
+                    s,
+                    content(&[("provider", text(&provider))]),
+                ),
+            ];
+            if let Some(Value::String(cause)) = input.get("cause") {
+                out.push(Output::new(
+                    "StorageCondition",
+                    s,
+                    content(&[(
+                        "text",
+                        text(&format!(
+                            "serving {provider} because {LORO} could not open: {cause}"
+                        )),
+                    )]),
+                ));
+            }
+            out
+        }
+        "keep" => vec![Output::new("SecondaryStorage", s, token)],
+        // A store that serves in a slot, or is closed, has nothing to
+        // close.
+        "retire" if input.get("idle") == Some(&Value::Boolean(true)) => vec![],
+        "retire" => vec![Output::new("RetiringStorage", s, token)],
+        other => panic!("no candidate branch '{other}'"),
+    })
 }
 
 fn net() -> Spec {
@@ -545,8 +576,9 @@ fn net() -> Spec {
         .place("StorageRequest", Class::Process)
         .place("StandbyRequest", Class::Process)
         .place("ProviderTries", Class::Process)
-        .place_with_candidate("Storage", "StorageCandidate")
+        .place_with_candidate("Storage", "StaleStorage")
         .fifo("StorageCandidate", Class::Process)
+        .fifo("StaleStorage", Class::Process)
         .place("SecondaryStorage", Class::Process)
         .place("RetiringStorage", Class::Process)
         .place("RetiredStorage", Class::Process)
@@ -697,6 +729,7 @@ fn net() -> Spec {
             .consumes("StandbyRequest")
             .inhibits("SecondaryStorage")
             .inhibits("StorageCandidate")
+            .inhibits("StaleStorage")
             // An opened store is a fact (NET-fire.a): a late answer still lands.
             .fact("StorageCandidate")
             .on_failure("TursoFailed")
@@ -731,6 +764,7 @@ fn net() -> Spec {
         )
         .transition(swap)
         .transition(apply_storage_candidate())
+        .transition(apply_stale_storage())
         .transition(
             Transition::new(
                 "RetireStandby",
@@ -783,15 +817,7 @@ fn opened(req: &EffectRequest, place: &str, provider: &str, v: StorageVersion) -
         LORO_PRIORITY
     };
     let token = provider_token(provider, v.0 as i64, prio);
-    let mut out = vec![Output::new(
-        place,
-        &req.subject,
-        if place == "StorageCandidate" {
-            candidate_token(token)
-        } else {
-            token
-        },
-    )];
+    let mut out = vec![Output::new(place, &req.subject, token)];
     if place == "Storage" {
         out.push(Output::new(
             "StorageOpened",
@@ -913,16 +939,13 @@ fn token_content<'a>(d: &'a Driver, place: &str) -> Option<&'a Content> {
     d.exec().tokens().token(place, VAULT).map(|t| t.record())
 }
 
-/// The store token a slot holds: a candidate's output, a background try's
-/// `output` record, or the token itself.
+/// The store token a slot holds: the output of a stale store's candidate, or
+/// the record itself.
 fn store_in(d: &Driver, place: &str) -> Option<Content> {
     let t = d.exec().tokens().token(place, VAULT)?;
     Some(match &t.payload {
         Payload::Candidate(c) => c.output.clone(),
-        Payload::Record(r) => match r.get("output") {
-            Some(Value::Object(token)) => token.clone().into_iter().collect(),
-            _ => r.clone(),
-        },
+        Payload::Record(r) => r.clone(),
         other => panic!("{place} holds {other:?}"),
     })
 }
@@ -1129,7 +1152,7 @@ fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
             if !state.open || state.closed {
                 continue;
             }
-            let holders: Vec<&str> = ["Storage", "SecondaryStorage", "StorageCandidate"]
+            let holders: Vec<&str> = STORE_SLOTS
                 .into_iter()
                 .filter(|p| store_in(d, p).is_some_and(|t| str_of(&t, "provider") == *name))
                 .collect();
@@ -1137,14 +1160,14 @@ fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
                 holders.len(),
                 1,
                 "store_serves: the open store '{name}' is in {holders:?}, not in exactly one \
-                 of Storage, SecondaryStorage, StorageCandidate"
+                 of {STORE_SLOTS:?}"
             );
         }
     }
 }
 
 fn assert_a_slot_store_has_a_primary(d: &Driver) {
-    for slot in ["SecondaryStorage", "StorageCandidate"] {
+    for slot in &STORE_SLOTS[1..] {
         if d.exec().tokens().token(slot, VAULT).is_some() {
             assert!(
                 !d.pending.is_empty() || token_content(d, "Storage").is_some(),

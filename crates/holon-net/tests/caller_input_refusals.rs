@@ -25,6 +25,7 @@ use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
+use holon_net::exec::Payload;
 use holon_net::exec::Place;
 use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
@@ -408,8 +409,15 @@ proptest! {
             })?;
             prop_assert!(r.is_ok(), "the fire into Out was refused: {r:?}");
         }
-        prop_assert_eq!(exec.tokens().contents("Out", &s), vec![tagged("T")]);
+        prop_assert_eq!(payloads(&exec, "Out", &s), vec![Payload::Record(tagged("T"))]);
     }
+}
+
+fn payloads(exec: &Checked, place: &str, s: &str) -> Vec<Payload> {
+    exec.tokens()
+        .row(place, s)
+        .map(|t| t.payload.clone())
+        .collect()
 }
 
 fn effect_output_net(trigger: Trigger) -> NetDef {
@@ -1478,7 +1486,7 @@ proptest! {
         prop_assert!(seen.is_some(), "premise: the ask of {s:?} is offered");
         let r = no_panic("answer", || exec.answer(answer_call(&s, seen.unwrap_or(AskHash([0; 32])), "a1"), Duration::from_secs(1)))?;
         prop_assert!(r.is_ok(), "the answer was refused: {r:?}");
-        prop_assert_eq!(exec.tokens().contents("Out", &s), vec![tagged(W)]);
+        prop_assert_eq!(payloads(&exec, "Out", &s), vec![Payload::Record(tagged(W))]);
     }
 }
 

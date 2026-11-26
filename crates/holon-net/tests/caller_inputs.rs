@@ -1919,12 +1919,193 @@ proptest! {
         net in net_gen(),
         ops in prop::collection::vec(op(), 1..24),
     ) {
-        let Some(exec) = load(&net)? else { return Ok(()) };
-        let mut m = Machine::new(net, exec);
+        run_calls(net, &ops)?;
+    }
+}
+
+fn run_calls(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {
+    let Some(exec) = load(&net)? else {
+        return Ok(());
+    };
+    let mut m = Machine::new(net, exec);
+    for op in ops {
+        m.apply(op)?;
+    }
+    Ok(())
+}
+
+/// A generator find, kept as its state: a bind counts the free tokens of an
+/// answer place whose subject is the pool subject.
+#[test]
+fn free_of_an_answer_place_counts_its_answer() {
+    let net = NetGen {
+        places: vec![PlaceGen {
+            capacity: PlaceCapacity::Single,
+            pool: None,
+        }],
+        transitions: vec![TransGen {
+            trigger: Trigger::Auto,
+            priority: 0,
+            roles: vec![Role::None],
+            produces: vec![],
+            facts: vec![],
+            on_failure: None,
+            on_timeout: None,
+            effect: None,
+            timers: None,
+            bind: BindProg {
+                reads: vec![],
+                out: None,
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+        derived: vec![],
+        works: vec![WorkGen {
+            roles: vec![Role::Inhibits],
+            puts: vec![],
+            effect: None,
+            input: None,
+            irreversible: false,
+            undoes: None,
+            bind: BindProg {
+                reads: vec![ReadOp::Traced(Box::new(ReadOp::Free(Name::Held(
+                    2536311783032131285,
+                ))))],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+    };
+    let ops = [Op::Answer {
+        work: Name::Held(0),
+        subject: "pool".to_string(),
+        seen: SeenGen::Offered(0),
+        answer: OccGen::Fresh,
+        value: None,
+        forward: 0,
+    }];
+    run_calls(net, &ops).unwrap();
+}
+
+/// A generator find, kept as its state: a pool token goes back after a
+/// failed run and a new run of the same consumer takes it.
+#[test]
+fn a_pool_token_back_from_a_failed_run_joins_the_next_run() {
+    let net = NetGen {
+        places: vec![
+            PlaceGen {
+                capacity: PlaceCapacity::Fifo,
+                pool: Some(3),
+            },
+            PlaceGen {
+                capacity: PlaceCapacity::Single,
+                pool: None,
+            },
+        ],
+        transitions: vec![TransGen {
+            trigger: Trigger::Auto,
+            priority: 0,
+            roles: vec![Role::Consumes, Role::Consumes],
+            produces: vec![],
+            facts: vec![],
+            on_failure: None,
+            on_timeout: None,
+            effect: Some(Receiver::Keyed),
+            timers: None,
+            bind: BindProg {
+                reads: vec![ReadOp::Traced(Box::new(ReadOp::Field(
+                    Name::Held(1),
+                    Subj::Own,
+                    "x".to_owned(),
+                )))],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+        derived: vec![],
+        works: vec![],
+    };
+    // The second write replaces the read field, so the failure mark lets T0
+    // fire again.
+    let write = |x| Op::Write {
+        place: Name::Held(1),
+        subject: "s".to_string(),
+        content: vec![("x".to_owned(), Value::Integer(x))],
+        dt: Dt::Same,
+    };
+    let ops = [
+        write(0),
+        Op::Complete {
+            attempt: Pick::Known(0),
+            result: ResultGen::Failed(false),
+            dt: Dt::Same,
+        },
+        write(1),
+    ];
+    run_calls(net, &ops).unwrap();
+}
+
+/// A caller answer into the subject a pool row uses, while the work's bind
+/// counts the free tokens of a place: no call panics.
+#[test]
+fn an_answer_for_the_pool_subject_read_through_free_does_not_panic() {
+    let net = NetGen {
+        places: vec![PlaceGen {
+            capacity: PlaceCapacity::Single,
+            pool: None,
+        }],
+        transitions: vec![TransGen {
+            trigger: Trigger::Auto,
+            priority: 0,
+            roles: vec![Role::None],
+            produces: vec![],
+            facts: vec![],
+            on_failure: None,
+            on_timeout: None,
+            effect: None,
+            timers: None,
+            bind: BindProg {
+                reads: vec![],
+                out: None,
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+        derived: vec![],
+        works: vec![WorkGen {
+            roles: vec![Role::Inhibits],
+            puts: vec![],
+            effect: None,
+            input: None,
+            irreversible: false,
+            undoes: None,
+            bind: BindProg {
+                reads: vec![ReadOp::Traced(Box::new(ReadOp::Free(Name::Held(
+                    13364452132945421913,
+                ))))],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+    };
+    let ops = [Op::Answer {
+        work: Name::Held(0),
+        subject: POOL_SUBJECT.to_owned(),
+        seen: SeenGen::Offered(0),
+        answer: OccGen::Fresh,
+        value: None,
+        forward: 0,
+    }];
+    let run = || -> Result<(), TestCaseError> {
+        let Some(exec) = load(&net)? else {
+            return Ok(());
+        };
+        let mut m = Machine::new(net.clone(), exec);
         for op in &ops {
             m.apply(op)?;
         }
-    }
+        Ok(())
+    };
+    run().unwrap();
 }
 
 // ------------------------------------------------------ one defect each

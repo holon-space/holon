@@ -29,6 +29,7 @@ use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+pub use tools::token_view;
 
 pub struct Config {
     /// A loopback address; port 0 picks a free one.

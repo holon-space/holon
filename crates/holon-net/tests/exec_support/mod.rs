@@ -788,7 +788,10 @@ impl Driver {
                             .iter()
                             .map(|(c, n)| (c.0.to_string(), *n))
                             .collect(),
-                        cause: t.envelope.cause.as_ref().map(|c| c.text.clone()),
+                        cause: match &t.payload {
+                            Payload::Failure { cause } => Some(cause.text.clone()),
+                            _ => None,
+                        },
                         candidate: matches!(t.payload, Payload::Candidate(_)),
                     };
                     (head, as_content(&t.payload))
@@ -1014,6 +1017,10 @@ fn as_content(payload: &Payload) -> Content {
     match payload {
         Payload::Record(r) => r.clone(),
         Payload::Answered(a) => holon_net::uft::answer::answered_content(a),
+        Payload::Failure { cause } => Content::from([(
+            holon_net::exec::FAILURE_CAUSE_FIELD.to_string(),
+            Value::String(cause.text.clone()),
+        )]),
         Payload::Candidate(c) => {
             let trace = c
                 .trace

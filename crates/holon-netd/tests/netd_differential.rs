@@ -135,7 +135,11 @@ fn direct(ops: &[Op]) -> (Vec<bool>, Value) {
                 .subjects(place)
                 .into_iter()
                 .map(|s| {
-                    let contents = exec.tokens().contents(place, &s);
+                    let contents: Vec<_> = exec
+                        .tokens()
+                        .row(place, &s)
+                        .map(|t| holon_netd::token_view(&t.payload))
+                        .collect();
                     let json = serde_json::to_value(contents).expect("contents are JSON");
                     (s.to_string(), json)
                 })
