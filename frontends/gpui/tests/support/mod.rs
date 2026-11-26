@@ -1451,6 +1451,7 @@ pub struct DeclaresNothingQueryEngine {
     /// vocabulary-resolution window, held open under the test's control instead
     /// of raced. `None` answers immediately.
     gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    progress: holon_api::query_engine::EngineProgress,
 }
 
 impl DeclaresNothingQueryEngine {
@@ -1459,6 +1460,7 @@ impl DeclaresNothingQueryEngine {
     pub fn open() -> Self {
         Self {
             gate: std::sync::Mutex::new(None),
+            progress: Default::default(),
         }
     }
 
@@ -1470,6 +1472,7 @@ impl DeclaresNothingQueryEngine {
         (
             Self {
                 gate: std::sync::Mutex::new(Some(rx)),
+                progress: Default::default(),
             },
             tx,
         )
@@ -1507,6 +1510,10 @@ impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
 
     fn operations_in_flight(&self) -> usize {
         0
+    }
+
+    fn progress(&self) -> holon_api::query_engine::EngineProgress {
+        self.progress.clone()
     }
 
     async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {

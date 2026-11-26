@@ -38,6 +38,27 @@ impl std::fmt::Display for QueryRefused {
 
 impl std::error::Error for QueryRefused {}
 
+/// A count that moves after every change of an engine's emitted seq, routed
+/// seq or operations in flight: a waiter re-reads them when it moves.
+#[derive(Clone)]
+pub struct EngineProgress(std::sync::Arc<tokio::sync::watch::Sender<u64>>);
+
+impl Default for EngineProgress {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(tokio::sync::watch::channel(0).0))
+    }
+}
+
+impl EngineProgress {
+    pub fn moved(&self) {
+        self.0.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.subscribe()
+    }
+}
+
 /// Everything an editor mount reads off the block's row to build its editable
 /// surface.
 ///
@@ -205,6 +226,10 @@ pub trait QueryEngine: Send + Sync {
     /// The admitted operations that have not finished: their writes may not
     /// be emitted yet.
     fn operations_in_flight(&self) -> usize;
+
+    /// Moves after each change of [`Self::emitted_through`],
+    /// [`Self::routed_through`] and [`Self::operations_in_flight`].
+    fn progress(&self) -> EngineProgress;
 
     /// Non-settling read of a single block's stored task keyword
     /// (`properties.task_state`), the companion of

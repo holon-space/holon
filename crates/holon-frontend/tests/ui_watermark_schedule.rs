@@ -1,10 +1,12 @@
 //! The UI watermark over random schedules of routing, applying, handing on
 //! to a consumer on another executor, and sampling. Some subscriptions are
 //! served by an eager re-query: it reads every change off the CDC broadcast
-//! itself, so it routes on its own, and its re-query can fail.
+//! itself, so it routes on its own, and its re-query can fail. Operations
+//! are admitted and finish in between.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
@@ -18,6 +20,8 @@ use holon_api::live_data::OwedChild;
 use holon_api::live_data::Routers;
 use holon_api::live_data::reporting_cursor;
 use holon_api::live_data::reporting_to;
+use holon_api::query_engine::EngineProgress;
+use holon_api::wake_witness::WakeWitness;
 use holon_frontend::render_epoch::EngineSeq;
 use holon_frontend::render_epoch::HandedOff;
 use holon_frontend::render_epoch::UiSubscription;
@@ -26,11 +30,14 @@ use holon_frontend::render_epoch::hand_off;
 use proptest::prelude::*;
 
 /// An engine whose demux routes every change it emits at once; an eager
-/// re-query routes through its own router.
+/// re-query routes through its own router. Its progress moves after each
+/// change of what it reports, as the `QueryEngine` contract asks.
 #[derive(Default)]
 struct RoutedEngine {
     emitted: AtomicU64,
     routers: Routers,
+    in_flight: AtomicUsize,
+    progress: EngineProgress,
 }
 
 #[async_trait::async_trait]
@@ -66,7 +73,11 @@ impl holon_api::QueryEngine for RoutedEngine {
     }
 
     fn operations_in_flight(&self) -> usize {
-        0
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn progress(&self) -> EngineProgress {
+        self.progress.clone()
     }
 
     async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {
@@ -105,6 +116,10 @@ enum Event {
     EagerReceive(usize),
     /// Like `EagerReceive`, then its re-query fails with cause `c`.
     EagerFail(usize, usize),
+    /// The engine admits an operation.
+    Admit,
+    /// The engine finishes an admitted operation, if any, with no rows.
+    Finish,
 }
 
 const CAUSES: [&str; 2] = ["no such table: block", "database is locked"];
@@ -123,6 +138,8 @@ fn event(subscriptions: usize) -> impl Strategy<Value = Event> {
         Just(Event::Publish),
         (0..subscriptions).prop_map(Event::EagerReceive),
         (0..subscriptions, 0..CAUSES.len()).prop_map(|(k, c)| Event::EagerFail(k, c)),
+        Just(Event::Admit),
+        Just(Event::Finish),
     ]
 }
 
@@ -179,6 +196,41 @@ impl Consumer {
     }
 }
 
+/// What a settle waiter reads: the sample, the emitted seq, whether anything
+/// is owed, and the operations in flight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Settle {
+    sample: EngineSeq,
+    emitted: EngineSeq,
+    owed: Vec<String>,
+    in_flight: usize,
+}
+
+impl Settle {
+    fn read(watermark: &UiWatermark) -> Self {
+        Self {
+            sample: watermark.sample().expect("the engine reports its routed seq"),
+            emitted: watermark.emitted().expect("the engine reports its emitted seq"),
+            owed: watermark.owed(),
+            in_flight: watermark.operations_in_flight(),
+        }
+    }
+
+    fn settled(&self) -> bool {
+        self.sample >= self.emitted && self.owed.is_empty() && self.in_flight == 0
+    }
+}
+
+/// A waiter on [`UiWatermark::changed`] that reads [`Settle`] on each wake.
+fn settle_witness(watermark: &Arc<UiWatermark>) -> WakeWitness<Settle> {
+    let arm = watermark.clone();
+    let read = watermark.clone();
+    WakeWitness::new(
+        move || Box::pin(arm.changed()),
+        move || Settle::read(&read),
+    )
+}
+
 fn take_cursor(subscription: &UiSubscription) {
     let taken = futures::executor::block_on(reporting_to(subscription.cursor().clone(), async {
         reporting_cursor()
@@ -198,6 +250,9 @@ proptest! {
     /// An eager subscription owes every emitted change, routed or not; after
     /// a failed re-query it is owed by name with the cause until it applies
     /// again.
+    ///
+    /// Whenever the settle check holds, a waiter on `changed()` last woke to
+    /// the state as it is: every change on the way woke it.
     #[test]
     fn the_published_watermark_never_runs_ahead_of_a_view((n, eager, events) in schedule()) {
         let engine = Arc::new(RoutedEngine::default());
@@ -228,7 +283,9 @@ proptest! {
         // subscription closed, which a quiet store may never make it do.
         let mut router_held: Vec<Arc<DeliveryCursor>> = Vec::new();
         let mut seq = 0u64;
+        let witness = settle_witness(&watermark);
         for event in events {
+            let step = format!("{event:?}");
             match event {
                 Event::Route(k, child) => {
                     seq += 1;
@@ -251,6 +308,7 @@ proptest! {
                         }
                     }
                     engine.emitted.store(seq, Ordering::Release);
+                    engine.progress.moved();
                 }
                 Event::EagerReceive(k) | Event::EagerFail(k, _) => {
                     let Some(router) = routers[k].as_ref().filter(|r| r.load(Ordering::Acquire) < seq) else {
@@ -258,6 +316,7 @@ proptest! {
                     };
                     subscriptions[k].cursor().routed(seq);
                     router.fetch_max(seq, Ordering::Release);
+                    engine.progress.moved();
                     routed_to[k].push(seq);
                     if let Event::EagerFail(_, c) = event {
                         subscriptions[k].cursor().requery_failed(CAUSES[c].to_string());
@@ -270,6 +329,16 @@ proptest! {
                     subscriptions[k].applied(through);
                     shown[k] = through;
                     failed[k] = None;
+                }
+                Event::Admit => {
+                    engine.in_flight.fetch_add(1, Ordering::AcqRel);
+                    engine.progress.moved();
+                }
+                Event::Finish => {
+                    if engine.in_flight.load(Ordering::Acquire) > 0 {
+                        engine.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        engine.progress.moved();
+                    }
                 }
                 Event::Consume(k) => {
                     let _ = consumers[k].consume();
@@ -313,6 +382,15 @@ proptest! {
                         );
                     }
                 }
+            }
+            let now = Settle::read(&watermark);
+            if now.settled() {
+                prop_assert_eq!(
+                    witness.seen(),
+                    now,
+                    "after {}, the settle check holds, but no change on the way woke a waiter on changed()",
+                    step
+                );
             }
             let owed = watermark.owed_deliveries();
             for (k, failure) in failed.iter().enumerate() {

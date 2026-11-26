@@ -400,6 +400,10 @@ impl QueryEngine for BackendEngine {
         census.released + census.waiting
     }
 
+    fn progress(&self) -> holon_api::query_engine::EngineProgress {
+        self.db_handle().progress()
+    }
+
     async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
         let mut ledger = self.matview_manager().delivery_ledger();
         ledger.watch_releases_began(self.watch_releases_in_flight());

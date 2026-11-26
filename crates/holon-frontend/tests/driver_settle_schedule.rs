@@ -27,6 +27,7 @@ use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RenderProfile;
 use holon_api::streaming::Change;
 use holon_api::streaming::ChangeOrigin;
+use holon_api::wake_witness::WakeWitness;
 use holon_api::widget_spec::DataRow;
 use holon_api::widget_spec::EnrichedRow;
 use holon_frontend::AvailableSpace;
@@ -631,6 +632,8 @@ struct Run {
     applied_focus: Option<Option<u8>>,
     workers: usize,
     oracle: Oracle,
+    /// A waiter on `UiWatermark::changed` that reads `owed()` on each wake.
+    owed: WakeWitness<Vec<String>>,
     rt: tokio::runtime::Runtime,
 }
 
@@ -690,9 +693,10 @@ impl Run {
             .enable_all()
             .build()
             .expect("test runtime");
+        let services_watermark = UiWatermark::new(None);
         let services = WatchedServices {
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
-            watermark: UiWatermark::new(None),
+            watermark: services_watermark.clone(),
             profiles: Mutable::new(Arc::new(ProfileCache::empty())),
             published: Arc::default(),
             focus: Mutable::new(None),
@@ -721,6 +725,13 @@ impl Run {
             applied_focus: Some(None),
             workers: case.workers,
             oracle,
+            owed: {
+                let arm = services_watermark.clone();
+                WakeWitness::new(
+                    move || Box::pin(arm.changed()),
+                    move || services_watermark.owed(),
+                )
+            },
             rt,
         };
         for spec in &case.views {
@@ -1032,22 +1043,31 @@ impl Run {
         }
     }
 
-    /// With no input pending, `owed()` empties, and once it is empty every
-    /// live view shows its provider's rows under the current profile and its
-    /// current template.
+    /// With no input pending, `owed()` empties and the change that emptied it
+    /// wakes a waiter on `changed()`; once it is empty every live view shows
+    /// its provider's rows under the current profile and its current template.
     fn settled(&mut self, when: &str) -> Result<(), String> {
         let deadline = Instant::now() + QUIET_DEADLINE;
         loop {
-            let owed = self.services.watermark.owed();
-            if owed.is_empty() {
+            let wakes = self.owed.wakes();
+            if self.owed.seen().is_empty() {
                 break;
             }
-            if Instant::now() > deadline {
-                return Err(format!(
-                    "{when}: owed() never emptied with no further input: {owed:?}"
-                ));
+            if !self
+                .owed
+                .wait_past(wakes, deadline.saturating_duration_since(Instant::now()))
+            {
+                let owed = self.services.watermark.owed();
+                return Err(match owed.is_empty() {
+                    true => format!(
+                        "{when}: owed() emptied, but nothing woke a waiter on changed(); its last wake saw {:?}",
+                        self.owed.seen()
+                    ),
+                    false => {
+                        format!("{when}: owed() never emptied with no further input: {owed:?}")
+                    }
+                });
             }
-            std::thread::sleep(Duration::from_micros(200));
         }
         if let Some(m) = self.mismatch() {
             return Err(format!("{when}: owed() is empty, but {m}"));

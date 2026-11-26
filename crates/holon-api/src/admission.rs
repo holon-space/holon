@@ -15,6 +15,7 @@ use crate::EntityName;
 use crate::StorageEntity;
 use crate::entity_uri::EntityUri;
 use crate::operation_engine::OpOrigin;
+use crate::query_engine::EngineProgress;
 
 pub type AdmissionSeq = u64;
 
@@ -505,16 +506,34 @@ fn overlaps(a: &Footprint, b: &Footprint) -> bool {
 /// The in-flight operations of one engine and the order between them.
 #[derive(Default)]
 pub struct AdmissionOverlay {
-    state: Arc<Mutex<OverlayState>>,
+    state: Arc<Overlay>,
+}
+
+/// The progress moves after each change of the census, with the lock released.
+#[derive(Default)]
+struct Overlay {
+    state: Mutex<OverlayState>,
+    progress: EngineProgress,
+}
+
+impl Overlay {
+    fn lock(&self) -> std::sync::MutexGuard<'_, OverlayState> {
+        self.state.lock().expect("admission overlay poisoned")
+    }
 }
 
 impl AdmissionOverlay {
+    pub fn reporting_to(progress: EngineProgress) -> Self {
+        Self {
+            state: Arc::new(Overlay {
+                state: Mutex::default(),
+                progress,
+            }),
+        }
+    }
+
     pub fn admit(&self, footprint: Footprint) -> Claim {
-        let (seq, release) = self
-            .state
-            .lock()
-            .expect("admission overlay poisoned")
-            .admit(footprint);
+        let (seq, release) = self.state.lock().admit(footprint);
         Claim {
             seq,
             overlay: Arc::clone(&self.state),
@@ -527,7 +546,7 @@ impl AdmissionOverlay {
     }
 
     pub fn census(&self) -> AdmissionCensus {
-        let state = self.state.lock().expect("admission overlay poisoned");
+        let state = self.state.lock();
         let live = state.inflight.values().filter(|entry| !entry.abandoned);
         let (waiting, released): (Vec<_>, Vec<_>) =
             live.partition(|entry| !entry.waiting_on.is_empty());
@@ -550,7 +569,7 @@ pub struct AdmissionCensus {
 /// place, whether the operation completed, failed, or never ran.
 pub struct Claim {
     seq: AdmissionSeq,
-    overlay: Arc<Mutex<OverlayState>>,
+    overlay: Arc<Overlay>,
     release: Option<oneshot::Receiver<()>>,
 }
 
@@ -572,10 +591,7 @@ impl Claim {
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        self.overlay
-            .lock()
-            .expect("admission overlay poisoned")
-            .settle(self.seq);
+        self.overlay.lock().settle(self.seq);
     }
 }
 
@@ -598,11 +614,7 @@ impl Claim {
             "admission {} grows before it was released",
             self.seq
         );
-        self.release = self
-            .overlay
-            .lock()
-            .expect("admission overlay poisoned")
-            .grow(self.seq, footprint)?;
+        self.release = self.overlay.lock().grow(self.seq, footprint)?;
         Ok(())
     }
 }
@@ -611,7 +623,7 @@ impl Claim {
 #[derive(Clone)]
 pub struct ClaimRef {
     seq: AdmissionSeq,
-    overlay: Arc<Mutex<OverlayState>>,
+    overlay: Arc<Overlay>,
 }
 
 /// A nested claim that would close a wait cycle: `through` (or a claim nested
@@ -642,11 +654,7 @@ impl ClaimRef {
     /// before the nested claim, and is judged against the state it finds.
     /// The nested claim settles before this one.
     pub fn nest(&self, footprint: Footprint) -> Result<Option<Claim>, NestRefused> {
-        let nested = self
-            .overlay
-            .lock()
-            .expect("admission overlay poisoned")
-            .nest(self.seq, footprint)?;
+        let nested = self.overlay.lock().nest(self.seq, footprint)?;
         Ok(nested.map(|(seq, release)| Claim {
             seq,
             overlay: Arc::clone(&self.overlay),

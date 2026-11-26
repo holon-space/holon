@@ -93,6 +93,8 @@ pub mod type_services;
 pub mod types;
 pub mod ui_watcher;
 pub mod vault_shape;
+#[cfg(feature = "test-helpers")]
+pub mod wake_witness;
 pub mod widget_meta;
 pub mod widget_spec;
 pub mod write_seq;

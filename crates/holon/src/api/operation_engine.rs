@@ -742,6 +742,12 @@ impl DispatchingOperationEngine {
         })
     }
 
+    /// Move `progress` after each change of the operations in flight.
+    pub fn with_progress(mut self, progress: holon_api::query_engine::EngineProgress) -> Self {
+        self.state_mut().admission = AdmissionOverlay::reporting_to(progress);
+        self
+    }
+
     /// Wire the op/effect history relation (C2b). Every successful op then
     /// appends its field deltas to the stream.
     pub fn with_history_store(mut self, history: Arc<dyn HistoryStore>) -> Self {

@@ -30,6 +30,8 @@ mod edge_field_e2e;
 #[cfg(feature = "test-helpers")]
 mod empty_question_is_unrepresentable;
 #[cfg(feature = "test-helpers")]
+mod engine_progress_wakes;
+#[cfg(feature = "test-helpers")]
 mod entity_reference_boundary;
 #[cfg(feature = "test-helpers")]
 mod fts_e2e;

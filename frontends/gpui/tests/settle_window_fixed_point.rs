@@ -92,6 +92,7 @@ impl Clock for SteppingClock {
 struct SeqEngine {
     seq: AtomicU64,
     in_flight: AtomicUsize,
+    progress: holon_api::query_engine::EngineProgress,
 }
 
 #[async_trait::async_trait]
@@ -125,6 +126,10 @@ impl holon_api::QueryEngine for SeqEngine {
 
     fn operations_in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn progress(&self) -> holon_api::query_engine::EngineProgress {
+        self.progress.clone()
     }
 
     async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {
@@ -298,6 +303,7 @@ impl ScriptedWindow {
             }
         }
         self.engine.seq.store(seq, Ordering::Release);
+        self.engine.progress.moved();
     }
 }
 
@@ -323,11 +329,13 @@ impl Pump for ScriptedWindow {
             Arrival::Route(k) => self.emit(k),
             Arrival::Admit => {
                 self.engine.in_flight.fetch_add(1, Ordering::AcqRel);
+                self.engine.progress.moved();
             }
             Arrival::Finish(k) => {
                 if self.engine.in_flight.load(Ordering::Acquire) > 0 {
                     self.emit(k);
                     self.engine.in_flight.fetch_sub(1, Ordering::AcqRel);
+                    self.engine.progress.moved();
                 }
             }
             Arrival::Apply(k) => {

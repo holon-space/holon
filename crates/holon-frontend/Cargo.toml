@@ -109,6 +109,7 @@ uuid = { workspace = true, features = ["js"] }
 [dev-dependencies]
 # Only for the render DSL it ships as Rust strings (the shipped-source corpus).
 holon-app.workspace = true
+holon-api = { workspace = true, features = ["test-helpers"] }
 holon-kitchen.workspace = true
 holon-profiles.workspace = true
 tempfile.workspace = true

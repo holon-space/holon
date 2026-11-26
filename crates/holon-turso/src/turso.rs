@@ -301,7 +301,7 @@ pub enum DbCommand {
     RebuildWatchView {
         view_name: String,
         listened: ListenedTo,
-        cdc_seq: Arc<AtomicU64>,
+        cdc_seq: Arc<CdcSeq>,
         response: oneshot::Sender<Result<ViewRebuild>>,
     },
 
@@ -924,6 +924,21 @@ fn positional_params_fingerprint(sql: &str, params: &[turso::Value]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The seq of the last emitted CDC batch, and the engine progress it moves.
+#[derive(Default)]
+pub struct CdcSeq {
+    seq: AtomicU64,
+    progress: holon_api::query_engine::EngineProgress,
+}
+
+impl CdcSeq {
+    /// The seq of a batch about to be broadcast.
+    fn next(&self) -> u64 {
+        let next = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        next
+    }
+}
+
 /// Handle for sending commands to the database actor
 ///
 /// This is the public API for database operations. Clone freely - all clones
@@ -935,9 +950,9 @@ pub struct DbHandle {
     watch: Arc<ActorWatch>,
     cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     /// Monotonic counter assigned to each non-empty CDC batch immediately
-    /// before broadcast. Cloned `DbHandle`s share the same `Arc<AtomicU64>`,
-    /// so any handle reads the same global emission watermark.
-    cdc_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// before broadcast. Cloned `DbHandle`s share it, so any handle reads the
+    /// same global emission watermark.
+    cdc_seq: Arc<CdcSeq>,
     /// Matview lease counters, republished by the actor after every lease
     /// mutation so a reader never has to queue behind the command stream.
     matview_stats: Arc<MatviewStats>,
@@ -1616,7 +1631,7 @@ impl DbHandle {
     /// A witness for "which database is this?", shared by every clone of this
     /// handle and distinct between databases. `Weak` so a registry keyed by it
     /// can tell a live database from a dead one whose allocation was reused.
-    pub(crate) fn database_witness(&self) -> std::sync::Weak<std::sync::atomic::AtomicU64> {
+    pub(crate) fn database_witness(&self) -> std::sync::Weak<CdcSeq> {
         Arc::downgrade(&self.cdc_seq)
     }
 
@@ -1636,7 +1651,13 @@ impl DbHandle {
     ///
     /// `0` means "no batch has been emitted yet".
     pub fn cdc_emitted_watermark(&self) -> u64 {
-        self.cdc_seq.load(std::sync::atomic::Ordering::SeqCst)
+        self.cdc_seq.seq.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Moves after each emitted batch; the routers and the admission overlay
+    /// of an engine on this database move it too.
+    pub fn progress(&self) -> holon_api::query_engine::EngineProgress {
+        self.cdc_seq.progress.clone()
     }
 
     /// Subscribe to CDC events as a stream.
@@ -2254,9 +2275,9 @@ pub struct TursoBackend {
     tx: ActorSender,
     watch: Arc<ActorWatch>,
     /// Monotonic per-process counter assigned to each CDC batch as it is
-    /// broadcast. Cloned `DbHandle`s share this `Arc<AtomicU64>` so any
-    /// reader observes the same emission watermark.
-    cdc_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// broadcast. Cloned `DbHandle`s share it so any reader observes the same
+    /// emission watermark.
+    cdc_seq: Arc<CdcSeq>,
     /// Matview lease counters, written by the actor and read via `DbHandle`.
     matview_stats: Arc<MatviewStats>,
     /// What every relation created through this backend declares, handed to
@@ -2342,15 +2363,13 @@ impl TursoBackend {
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         timings: &holon_api::Timings,
     ) -> Result<(Self, DbHandle)> {
-        use std::sync::atomic::AtomicU64;
-        use std::sync::atomic::Ordering;
         // Create connection for actor
         let (conn, core_conn) = Self::create_connection_internal(&db)?;
 
         // Process-monotonic CDC sequence shared with every cloned `DbHandle`.
         // Stamped onto the batch metadata before broadcast so subscribers can
         // implement "wait until consumed_seq >= cdc_emitted_watermark()".
-        let cdc_seq = Arc::new(AtomicU64::new(0));
+        let cdc_seq = Arc::new(CdcSeq::default());
 
         // Set up CDC callback to broadcast to all subscribers
         if full_sql_tracing() {
@@ -2395,7 +2414,7 @@ impl TursoBackend {
             // out: every one of its changes failed to parse, which is exactly
             // when consumers most need to be told.
             if !batch.inner.items.is_empty() || batch.metadata.degraded.is_some() {
-                let next = cdc_seq_for_callback.fetch_add(1, Ordering::SeqCst) + 1;
+                let next = cdc_seq_for_callback.next();
                 batch.metadata.seq = next;
                 let _ = cdc_tx_for_callback.send(batch);
             }
@@ -4379,7 +4398,7 @@ impl TursoBackend {
         conn: &turso::Connection,
         state: &mut ActorState,
         cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
-        cdc_seq: &AtomicU64,
+        cdc_seq: &CdcSeq,
         name: &str,
         listened: &ListenedTo,
     ) -> Result<ViewRebuild> {
@@ -4475,12 +4494,12 @@ impl TursoBackend {
 
     fn send_to_view_subscribers(
         cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
-        cdc_seq: &AtomicU64,
+        cdc_seq: &CdcSeq,
         view: &str,
         items: Vec<RowChange>,
         degraded: Option<String>,
     ) {
-        let seq = cdc_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let seq = cdc_seq.next();
         // No receiver means no subscriber is left to tell.
         let _ = cdc_broadcast.send(BatchWithMetadata {
             inner: Batch { items },

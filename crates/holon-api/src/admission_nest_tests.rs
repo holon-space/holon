@@ -173,7 +173,7 @@ fn every_entry_is_gone_once_a_nested_write_settles() {
     drop(shape);
     drop(write);
     drop(d);
-    let state = overlay.state.lock().unwrap();
+    let state = overlay.state.lock();
     assert!(state.inflight.is_empty() && state.latest_by_subject.is_empty());
     assert!(state.by_relation.is_empty() && state.latest_fence.is_none());
 }

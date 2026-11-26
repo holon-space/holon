@@ -139,7 +139,7 @@ fn a_dropped_waiting_claim_keeps_its_place_then_releases_its_dependents() {
     drop(behind);
     assert!(is_released(&mut newcomer));
     drop(newcomer);
-    let state = overlay.state.lock().unwrap();
+    let state = overlay.state.lock();
     assert!(state.inflight.is_empty() && state.latest_by_subject.is_empty());
     assert!(state.by_relation.is_empty() && state.latest_fence.is_none());
 }

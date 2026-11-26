@@ -373,6 +373,7 @@ impl BackendEngine {
             db_handle.clone(),
         ));
         let op_engine = DispatchingOperationEngine::new(dispatcher.clone(), clock.clone())
+            .with_progress(db_handle.progress())
             .with_history_store(history)
             .with_write_authority(block_write_authority.clone());
         Ok(Self {
@@ -1830,6 +1831,7 @@ impl BackendEngine {
             self.clock.clone(),
         )
         .await?
+        .with_progress(self.db_handle.progress())
         .with_history_store(history)
         .with_write_authority(self.block_write_authority.clone());
         Ok(())

@@ -738,7 +738,7 @@ struct KnownViews {
 /// that does not exist.
 /// Per-database entry: the liveness token that decides when the state is
 /// dropped, plus the state itself.
-type SharedViewEntry = (std::sync::Weak<AtomicU64>, SharedViewState);
+type SharedViewEntry = (std::sync::Weak<crate::turso::CdcSeq>, SharedViewState);
 
 static SHARED_VIEW_STATE: std::sync::Mutex<Option<HashMap<usize, SharedViewEntry>>> =
     std::sync::Mutex::new(None);
@@ -797,6 +797,7 @@ impl MatviewManager {
             db_handle.cdc_broadcast().clone(),
             routed.clone(),
             shared.delivery_changed.clone(),
+            db_handle.progress(),
         );
         // The demux sees only batches broadcast after its subscription.
         routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
@@ -945,6 +946,7 @@ impl MatviewManager {
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         routed: Arc<AtomicU64>,
         delivery_changed: Arc<tokio::sync::watch::Sender<u64>>,
+        progress: holon_api::query_engine::EngineProgress,
     ) -> mpsc::Sender<DemuxCommand> {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<DemuxCommand>(64);
         let mut broadcast_rx = cdc_broadcast.subscribe();

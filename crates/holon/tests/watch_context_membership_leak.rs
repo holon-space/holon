@@ -49,7 +49,7 @@ const WATCHES: usize = 5;
 /// engine with NO block provider, and a leak test that cannot write blocks
 /// never produces the CDC batch the property depends on. Same construction as
 /// `capability_certification.rs`.
-async fn block_engine() -> Result<Arc<BackendEngine>> {
+pub(crate) async fn block_engine() -> Result<Arc<BackendEngine>> {
     create_test_engine_with_providers(":memory:".into(), |module| {
         module
             .with_operation_provider_factory(|backend| {
@@ -244,7 +244,7 @@ async fn a_failed_watch_setup_leaves_no_membership_row() -> Result<()> {
 }
 
 /// The leaf shape, deduplicated by key exactly as production builds it.
-fn leaf_sql() -> String {
+pub(crate) fn leaf_sql() -> String {
     format!(
         "SELECT b.*, wc.watch_key AS watch_key FROM {table} b \
          JOIN watch_context wc ON b.id = wc.context_id WHERE wc.kind = 'leaf'",
