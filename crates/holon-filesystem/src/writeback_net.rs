@@ -245,6 +245,46 @@ pub fn is_behind(exec: &Executor, doc: &str) -> bool {
     }
 }
 
+/// Why the file of a document and its store do not agree yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotConverged {
+    /// The net holds no `OnDisk`, `Base` or `Authority` token for it.
+    TokensMissing,
+    /// A disk read is owed, running or waiting for its retry.
+    ReadingDisk,
+    /// The disk read failed for good: only a new change of the file reads
+    /// it again.
+    ReadFailed,
+    /// This catch-up is enabled, running or waiting for its retry.
+    CatchingUp(&'static str),
+    /// The file or the store moved away from the base, and no catch-up can
+    /// land without new input.
+    Behind,
+}
+
+/// Whether the file of `doc`, its base and the store's render agree and the
+/// net owes `doc` no work. A pure read of the marking. Owed work is checked
+/// first, so no other reason hides it.
+pub fn converged(exec: &Executor, doc: &str) -> Result<(), NotConverged> {
+    if owed(exec, READ_DISK, doc) {
+        return Err(NotConverged::ReadingDisk);
+    }
+    if let Some(t) = CATCH_UP.into_iter().find(|t| owed(exec, t, doc)) {
+        return Err(NotConverged::CatchingUp(t));
+    }
+    let present = |place| exec.tokens().token(place, doc).is_some();
+    if ![ON_DISK, BASE, AUTHORITY].into_iter().all(present) {
+        return Err(NotConverged::TokensMissing);
+    }
+    if exec.tokens().token(DISK_CHANGED, doc).is_some() {
+        return Err(NotConverged::ReadFailed);
+    }
+    if is_behind(exec, doc) {
+        return Err(NotConverged::Behind);
+    }
+    Ok(())
+}
+
 pub fn why_not(exec: &Executor, transition: &str, doc: &str) -> Option<holon_net::exec::WhyNot> {
     exec.why_not(transition, doc)
         .unwrap_or_else(|e| panic!("the write-back net holds its transitions: {e}"))
@@ -257,7 +297,12 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
         .tokens()
         .subjects(BASE)
         .into_iter()
-        .filter(|doc| reading_disk(exec, doc) || CATCH_UP.iter().any(|t| catching_up(exec, t, doc)))
+        .filter(|doc| {
+            matches!(
+                converged(exec, doc),
+                Err(NotConverged::ReadingDisk | NotConverged::CatchingUp(_))
+            )
+        })
         .map(|doc| doc.to_string())
         .collect();
     docs.sort();
@@ -282,16 +327,25 @@ pub fn stop_waits_for(exec: &Executor) -> Vec<String> {
                             | holon_net::exec::WhyNot::FailedOnThisInput(_)
                     )
                 );
-            !ingest_failed || reading_disk(exec, doc) || write_may_land(exec, doc)
+            !ingest_failed || owed(exec, READ_DISK, doc) || write_may_land(exec, doc)
         })
         .collect()
 }
 
-fn reading_disk(exec: &Executor, doc: &str) -> bool {
-    exec.tokens().token(DISK_CHANGED, doc).is_some() || why_not(exec, READ_DISK, doc).is_none()
+/// When the earliest pending retry of a disk read or a catch-up of `doc`
+/// comes due.
+pub fn retry_due(exec: &Executor, doc: &str) -> Option<Duration> {
+    std::iter::once(READ_DISK)
+        .chain(CATCH_UP)
+        .filter_map(|t| match why_not(exec, t, doc) {
+            Some(holon_net::exec::WhyNot::RetryPending { due }) => Some(due),
+            _ => None,
+        })
+        .min()
 }
 
-fn catching_up(exec: &Executor, transition: &str, doc: &str) -> bool {
+/// The transition is enabled, running or waiting for its retry on `doc`.
+fn owed(exec: &Executor, transition: &str, doc: &str) -> bool {
     matches!(
         why_not(exec, transition, doc),
         None | Some(
@@ -847,17 +901,17 @@ mod tests {
 
         use super::*;
 
-        const DOCS: [&str; 2] = ["doc:a", "doc:b"];
+        pub(super) const DOCS: [&str; 2] = ["doc:a", "doc:b"];
 
         #[derive(Debug, Clone, Copy)]
-        enum Outcome {
+        pub(super) enum Outcome {
             Done,
             Retryable,
             Definite,
         }
 
         #[derive(Debug, Clone)]
-        enum Step {
+        pub(super) enum Step {
             StoreMoves(usize),
             DiskMoves(usize),
             /// The file goes back to the text of its base.
@@ -868,9 +922,11 @@ mod tests {
             Advance(u64),
             /// The store goes back to the authority of its base.
             StoreReverts(usize),
+            /// The file changes and the watcher reports it; the net reads it.
+            FileChanges(usize),
         }
 
-        fn step() -> impl Strategy<Value = Step> {
+        pub(super) fn step() -> impl Strategy<Value = Step> {
             let outcome = prop_oneof![
                 Just(Outcome::Done),
                 Just(Outcome::Retryable),
@@ -883,6 +939,7 @@ mod tests {
                 3 => (any::<usize>(), outcome).prop_map(|(i, o)| Step::Complete(i, o)),
                 2 => (1u64..250).prop_map(Step::Advance),
                 1 => (0..DOCS.len()).prop_map(Step::StoreReverts),
+                1 => (0..DOCS.len()).prop_map(Step::FileChanges),
             ]
         }
 
@@ -961,13 +1018,43 @@ mod tests {
                         self.net
                             .write(AUTHORITY, DOCS[d], content([("hash", &base)]));
                     }
+                    Step::FileChanges(d) => {
+                        // A catch-up may still run when the watcher reports;
+                        // a running read already took the last report.
+                        if self.running(READ_DISK, DOCS[d]) {
+                            return;
+                        }
+                        // shortcut: a report while `DiskChanged` is still held
+                        // is not new input to the net (a read that failed for
+                        // good stays failed, a pending read retry trips the
+                        // executor's tries check); skipped until the net counts
+                        // each report.
+                        if self.net.tokens().token(DISK_CHANGED, DOCS[d]).is_some() {
+                            return;
+                        }
+                        self.net.write(DISK_CHANGED, DOCS[d], Content::new());
+                    }
                     Step::Complete(i, outcome) => {
                         if self.outstanding.is_empty() {
                             return;
                         }
                         let req = self.outstanding.remove(i % self.outstanding.len());
+                        // shortcut: a read retry beside a running catch-up
+                        // trips the executor's tries check when the catch-up
+                        // reports a change (see `FileChanges`); such a read
+                        // fails only for good until each token counts its own
+                        // tries.
+                        let outcome = if &*req.transition == READ_DISK
+                            && matches!(outcome, Outcome::Retryable)
+                            && self.outstanding.iter().any(|r| r.subject == req.subject)
+                        {
+                            Outcome::Done
+                        } else {
+                            outcome
+                        };
                         let doc = DOCS[doc_index(&req)];
                         let subject = Subject::new(doc);
+                        let read = self.fresh("h");
                         let seen = self.seen.get_mut(doc).unwrap();
                         let result = match (outcome, &*req.transition) {
                             (Outcome::Done, CATCH_UP_INGEST) => {
@@ -1009,6 +1096,11 @@ mod tests {
                                     _ => Cause::definite("no such document"),
                                 })
                             }
+                            (Outcome::Done, READ_DISK) => EffectResult::Done(vec![output(
+                                ON_DISK,
+                                &subject,
+                                [("hash", &read)],
+                            )]),
                             (_, other) => panic!("the generator fires no {other}"),
                         };
                         self.net
@@ -1027,6 +1119,7 @@ mod tests {
             }
 
             fn check(&self) -> Result<(), TestCaseError> {
+                running_catch_ups_stay_unsettled(&self.net)?;
                 let unsettled = unsettled(&self.net);
                 let stop = stop_waits_for(&self.net);
                 let failed = failed_writebacks(&self.net);
@@ -1067,6 +1160,8 @@ mod tests {
                         && !write_running
                         && !seen.write_retry_pending
                         && !ingest_running
+                        && !self.running(READ_DISK, doc)
+                        && self.net.tokens().token(DISK_CHANGED, doc).is_none()
                     {
                         prop_assert!(
                             !waited,
@@ -1119,6 +1214,18 @@ mod tests {
             use Outcome::*;
             use Step::*;
             let fixed = [
+                // A disk read runs while the ingest of the file waits for its
+                // retry.
+                vec![DiskMoves(1), Complete(0, Retryable), FileChanges(1)],
+                // A change reported again while its read waits for a retry: the
+                // generator skips the second report.
+                vec![
+                    FileChanges(0),
+                    Complete(0, Retryable),
+                    Advance(12),
+                    FileChanges(0),
+                    Advance(88),
+                ],
                 // A write retry is due over a file back at its base after its
                 // ingest failed.
                 vec![
@@ -1198,6 +1305,15 @@ mod tests {
                     DiskReverts(0),
                     Complete(0, Retryable),
                 ],
+                // A disk read fails for good while a write runs.
+                vec![
+                    StoreMoves(0),
+                    StoreMoves(0),
+                    FileChanges(0),
+                    DiskMoves(1),
+                    StoreMoves(0),
+                    Complete(11448191397739138975, Definite),
+                ],
             ];
             for steps in &fixed {
                 if let Err(e) = run(steps) {
@@ -1211,6 +1327,707 @@ mod tests {
             })
             .run(&prop::collection::vec(step(), 1..40), |steps| run(&steps))
             .unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// No document leaves [`unsettled`] while a catch-up of it runs.
+    fn running_catch_ups_stay_unsettled(
+        exec: &Executor,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let unsettled = unsettled(exec);
+        for doc in exec.tokens().subjects(BASE) {
+            for t in CATCH_UP {
+                if why_not(exec, t, doc.as_str()) == Some(holon_net::exec::WhyNot::InFlight) {
+                    proptest::prop_assert!(
+                        unsettled.iter().any(|d| d == doc.as_str()),
+                        "{} left unsettled while {t} runs: {:?}",
+                        doc.as_str(),
+                        converged(exec, doc.as_str())
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An effect fails while a catch-up of the same document runs or waits
+    /// for its retry: the document stays unsettled.
+    #[test]
+    fn a_failed_effect_beside_an_owed_catch_up_stays_unsettled() {
+        use holon_net::exec::Cause;
+        for failing in [READ_DISK, ACCEPT_REMOVAL, REWRITE_FROM_STORE] {
+            for definite in [true, false] {
+                for catch_up in CATCH_UP {
+                    for catch_up_fails in [false, true] {
+                        let case = format!(
+                            "{failing} fails (definite: {definite}) beside {catch_up} \
+                             (failed: {catch_up_fails})"
+                        );
+                        let mut exec = seeded();
+                        let remedy = (failing != READ_DISK).then(|| {
+                            exec.write(
+                                REFUSED,
+                                DOC,
+                                content([("seen", "h1"), ("authority", "a1")]),
+                            );
+                            let quiesced = exec
+                                .exec
+                                .fire(
+                                    failing,
+                                    DOC,
+                                    OccurrenceId::caller("remedy:doc:a:0"),
+                                    Content::new(),
+                                    Duration::ZERO,
+                                )
+                                .expect("the remedy is enabled for a refused file");
+                            exec.pending.extend(quiesced.requests);
+                            one(&mut exec, 0)
+                                .into_iter()
+                                .find(|r| &*r.transition == failing)
+                                .expect("the remedy runs")
+                        });
+                        if catch_up == CATCH_UP_WRITE {
+                            exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
+                        } else {
+                            exec.write(ON_DISK, DOC, content([("hash", "h2")]));
+                        }
+                        let running = one(&mut exec, 0);
+                        let running = running
+                            .iter()
+                            .find(|r| &*r.transition == catch_up)
+                            .unwrap_or_else(|| panic!("{case}: the catch-up runs"));
+                        if catch_up_fails {
+                            exec.complete(
+                                running.attempt,
+                                EffectResult::Failed(Cause::retryable("disk full")),
+                                Duration::from_millis(1),
+                            )
+                            .unwrap();
+                        }
+                        let effect = remedy.unwrap_or_else(|| {
+                            exec.write(DISK_CHANGED, DOC, Content::new());
+                            one(&mut exec, 2)
+                                .into_iter()
+                                .find(|r| &*r.transition == READ_DISK)
+                                .expect("the read runs")
+                        });
+                        let cause = if definite {
+                            Cause::definite("no such document")
+                        } else {
+                            Cause::retryable("busy")
+                        };
+                        exec.complete(
+                            effect.attempt,
+                            EffectResult::Failed(cause),
+                            Duration::from_millis(3),
+                        )
+                        .unwrap();
+                        assert!(
+                            owed(&exec, catch_up, DOC),
+                            "{case}: the catch-up is still owed: {:?}",
+                            why_not(&exec, catch_up, DOC)
+                        );
+                        let read_owed = failing == READ_DISK && !definite;
+                        let reason = if read_owed {
+                            NotConverged::ReadingDisk
+                        } else {
+                            NotConverged::CatchingUp(catch_up)
+                        };
+                        assert_eq!(converged(&exec, DOC), Err(reason), "{case}");
+                        assert_eq!(unsettled(&exec), vec![DOC.to_string()], "{case}");
+                        running_catch_ups_stay_unsettled(&exec)
+                            .unwrap_or_else(|e| panic!("{case}: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`converged`] against a model that keeps the file, the store's render
+    /// and the base as texts of its own. A text is its own hash.
+    mod converge {
+        use std::collections::BTreeMap;
+        use std::collections::BTreeSet;
+
+        use holon_net::exec::Cause;
+        use proptest::prelude::*;
+
+        use super::stop::DOCS;
+        use super::stop::Outcome;
+        use super::stop::Step;
+        use super::stop::step;
+        use super::*;
+
+        /// The executor alone on the test's clock, or behind the shell that
+        /// production drives.
+        trait Drive {
+            fn write(&mut self, place: &str, doc: &str, content: Content);
+            fn step(&mut self, now: Duration) -> Vec<EffectRequest>;
+            fn complete(&mut self, req: &EffectRequest, result: EffectResult, now: Duration);
+            fn exec<R>(&self, f: impl FnOnce(&Executor) -> R) -> R;
+        }
+
+        impl Drive for Net {
+            fn write(&mut self, place: &str, doc: &str, content: Content) {
+                Net::write(self, place, doc, content);
+            }
+
+            fn step(&mut self, now: Duration) -> Vec<EffectRequest> {
+                one(self, now.as_millis() as u64)
+            }
+
+            fn complete(&mut self, req: &EffectRequest, result: EffectResult, now: Duration) {
+                Net::complete(self, req.attempt, result, now).expect("the attempt is outstanding");
+            }
+
+            fn exec<R>(&self, f: impl FnOnce(&Executor) -> R) -> R {
+                f(&self.exec)
+            }
+        }
+
+        impl Drive for holon_net_shell::Shell {
+            fn write(&mut self, place: &str, doc: &str, content: Content) {
+                holon_net_shell::Shell::write(self, place, doc, content);
+            }
+
+            fn step(&mut self, _: Duration) -> Vec<EffectRequest> {
+                holon_net_shell::Shell::step(self).expect("the net terminates")
+            }
+
+            fn complete(&mut self, req: &EffectRequest, result: EffectResult, _: Duration) {
+                holon_net_shell::Shell::complete(self, req, result)
+                    .expect("the attempt is outstanding");
+            }
+
+            fn exec<R>(&self, f: impl FnOnce(&Executor) -> R) -> R {
+                self.read(f)
+            }
+        }
+
+        #[derive(Debug)]
+        struct Doc {
+            file: String,
+            store: String,
+            /// The text Holon last wrote or ingested.
+            base: String,
+            /// The render the base holds; unknown after an ingest until a
+            /// write confirms it.
+            base_render: Option<String>,
+            /// Bumped when the base changes: an effect's base lands only over
+            /// the base it read.
+            base_version: u32,
+            /// The file as the net's `OnDisk` holds it.
+            disk_seen: String,
+            /// Bumped on each write of `OnDisk`: an effect's `OnDisk` lands
+            /// only over the `OnDisk` it read.
+            disk_version: u32,
+            /// The watcher reported a change no disk read has taken yet.
+            unread: bool,
+            /// The failed tries of the disk read of the last reported change.
+            read_failures: u32,
+            /// A catch-up reported a file change while the disk read ran.
+            read_overtaken: bool,
+        }
+
+        struct Model<D> {
+            net: D,
+            backoff: Duration,
+            now: Duration,
+            docs: BTreeMap<&'static str, Doc>,
+            /// Each effect the net asked for, with the base and disk versions
+            /// it read.
+            outstanding: Vec<(EffectRequest, u32, u32)>,
+            /// When the retry of a failed (transition, document) comes due.
+            retries: BTreeMap<(String, &'static str), Duration>,
+            counter: u32,
+        }
+
+        impl<D: Drive> Model<D> {
+            fn new(mut net: D, backoff: Duration) -> Self {
+                let mut docs = BTreeMap::new();
+                for doc in DOCS {
+                    net.write(AUTHORITY, doc, content([("hash", "t0")]));
+                    net.write(BASE, doc, content([("hash", "t0"), ("authority", "t0")]));
+                    net.write(ON_DISK, doc, content([("hash", "t0")]));
+                    docs.insert(
+                        doc,
+                        Doc {
+                            file: "t0".into(),
+                            store: "t0".into(),
+                            base: "t0".into(),
+                            base_render: Some("t0".into()),
+                            base_version: 0,
+                            disk_seen: "t0".into(),
+                            disk_version: 0,
+                            unread: false,
+                            read_failures: 0,
+                            read_overtaken: false,
+                        },
+                    );
+                }
+                let mut model = Self {
+                    net,
+                    backoff,
+                    now: Duration::ZERO,
+                    docs,
+                    outstanding: Vec::new(),
+                    retries: BTreeMap::new(),
+                    counter: 0,
+                };
+                model.step_net();
+                model
+            }
+
+            fn fresh(&mut self) -> String {
+                self.counter += 1;
+                format!("t{}", self.counter)
+            }
+
+            fn render(&mut self, doc: &'static str) {
+                let store = self.docs[doc].store.clone();
+                self.net.write(AUTHORITY, doc, content([("hash", &store)]));
+            }
+
+            fn step_net(&mut self) {
+                for req in self.net.step(self.now) {
+                    let doc = doc_of(&req);
+                    self.retries.remove(&(req.transition.to_string(), doc));
+                    if &*req.transition == READ_DISK {
+                        self.docs.get_mut(doc).unwrap().unread = false;
+                    }
+                    let d = &self.docs[doc];
+                    let read = (d.base_version, d.disk_version);
+                    self.outstanding.push((req, read.0, read.1));
+                }
+                let now = self.now;
+                self.retries.retain(|_, due| *due > now);
+            }
+
+            fn rebase(&mut self, doc: &'static str, read: u32, base: &str, render: Option<&str>) {
+                let d = self.docs.get_mut(doc).unwrap();
+                if d.base_version != read
+                    || (d.base.as_str(), d.base_render.as_deref()) == (base, render)
+                {
+                    return;
+                }
+                d.base = base.to_string();
+                d.base_render = render.map(str::to_string);
+                d.base_version += 1;
+            }
+
+            /// A write of an equal `OnDisk` leaves the version where it is.
+            fn put_disk(&mut self, doc: &'static str, text: &str) {
+                let d = self.docs.get_mut(doc).unwrap();
+                if d.disk_seen != text {
+                    d.disk_seen = text.to_string();
+                    d.disk_version += 1;
+                }
+            }
+
+            fn write_disk(&mut self, doc: &'static str, text: &str) {
+                self.put_disk(doc, text);
+                self.net.write(ON_DISK, doc, content([("hash", text)]));
+            }
+
+            fn land_disk(&mut self, doc: &'static str, read: u32, text: &str) {
+                if self.docs[doc].disk_version == read {
+                    self.put_disk(doc, text);
+                }
+            }
+
+            fn apply(&mut self, step: &Step) {
+                match *step {
+                    Step::StoreMoves(d) => {
+                        let text = self.fresh();
+                        self.docs.get_mut(DOCS[d]).unwrap().store = text;
+                        self.render(DOCS[d]);
+                    }
+                    Step::StoreReverts(d) => {
+                        let Some(render) = self.docs[DOCS[d]].base_render.clone() else {
+                            return;
+                        };
+                        self.docs.get_mut(DOCS[d]).unwrap().store = render;
+                        self.render(DOCS[d]);
+                    }
+                    Step::DiskMoves(d) => {
+                        let text = self.fresh();
+                        self.docs.get_mut(DOCS[d]).unwrap().file = text.clone();
+                        self.write_disk(DOCS[d], &text);
+                    }
+                    Step::DiskReverts(d) => {
+                        let doc = self.docs.get_mut(DOCS[d]).unwrap();
+                        doc.file = doc.base.clone();
+                        let text = doc.file.clone();
+                        self.write_disk(DOCS[d], &text);
+                    }
+                    Step::FileChanges(d) => {
+                        // A catch-up may still run when the watcher reports;
+                        // a running read already took the last report.
+                        if self.busy(READ_DISK, DOCS[d]) {
+                            return;
+                        }
+                        // shortcut: a report while `DiskChanged` is still held
+                        // is not new input to the net (a read that failed for
+                        // good stays failed, a pending read retry trips the
+                        // executor's tries check); skipped until the net counts
+                        // each report.
+                        if self
+                            .net
+                            .exec(|exec| exec.tokens().token(DISK_CHANGED, DOCS[d]).is_some())
+                        {
+                            return;
+                        }
+                        let text = self.fresh();
+                        let doc = self.docs.get_mut(DOCS[d]).unwrap();
+                        doc.file = text;
+                        doc.unread = true;
+                        doc.read_failures = 0;
+                        self.net.write(DISK_CHANGED, DOCS[d], Content::new());
+                    }
+                    Step::Complete(i, outcome) => {
+                        if self.outstanding.is_empty() {
+                            return;
+                        }
+                        let (req, read, disk) = self.outstanding.remove(i % self.outstanding.len());
+                        // shortcut: a `DiskChanged` that a catch-up outputs
+                        // while the read runs is not new input to the net
+                        // either (see `FileChanges`), and a read retry beside a
+                        // running catch-up trips the executor's tries check
+                        // when the catch-up reports a change; such a read
+                        // succeeds or fails for good until each token counts
+                        // its own tries.
+                        let doc = doc_of(&req);
+                        let outcome = if &*req.transition == READ_DISK
+                            && (self.docs[doc].read_overtaken
+                                || (matches!(outcome, Outcome::Retryable)
+                                    && self
+                                        .outstanding
+                                        .iter()
+                                        .any(|(r, ..)| r.subject == req.subject)))
+                        {
+                            Outcome::Done
+                        } else {
+                            outcome
+                        };
+                        self.complete(&req, read, disk, outcome);
+                    }
+                    Step::Advance(ms) => self.now += Duration::from_millis(ms),
+                }
+                self.step_net();
+            }
+
+            fn complete(&mut self, req: &EffectRequest, read: u32, disk: u32, outcome: Outcome) {
+                let doc = doc_of(req);
+                let subject = Subject::new(doc);
+                if &*req.transition == READ_DISK {
+                    self.docs.get_mut(doc).unwrap().read_overtaken = false;
+                }
+                let failed = |cause| {
+                    let cause = match cause {
+                        Outcome::Retryable => Cause::retryable("disk busy"),
+                        _ => Cause::definite("no such document"),
+                    };
+                    EffectResult::Failed(cause)
+                };
+                if !matches!(outcome, Outcome::Done) {
+                    self.net.complete(req, failed(outcome), self.now);
+                    let read = &*req.transition == READ_DISK;
+                    if read {
+                        let d = self.docs.get_mut(doc).unwrap();
+                        d.read_failures = match outcome {
+                            Outcome::Retryable => d.read_failures + 1,
+                            _ => READ_TRIES,
+                        };
+                    }
+                    if matches!(outcome, Outcome::Retryable)
+                        && !(read && self.docs[doc].read_failures >= READ_TRIES)
+                    {
+                        self.retries
+                            .insert((req.transition.to_string(), doc), self.now + self.backoff);
+                    }
+                    return;
+                }
+                let file = self.docs[doc].file.clone();
+                match &*req.transition {
+                    READ_DISK => {
+                        self.docs.get_mut(doc).unwrap().read_failures = 0;
+                        let result =
+                            EffectResult::Done(vec![output(ON_DISK, &subject, [("hash", &file)])]);
+                        self.net.complete(req, result, self.now);
+                        self.land_disk(doc, disk, &file);
+                    }
+                    CATCH_UP_INGEST => {
+                        let result = EffectResult::Done(vec![
+                            output(BASE, &subject, [("hash", &file), ("authority", INGESTED)]),
+                            output(ON_DISK, &subject, [("hash", &file)]),
+                        ]);
+                        self.net.complete(req, result, self.now);
+                        self.land_disk(doc, disk, &file);
+                        self.rebase(doc, read, &file, None);
+                        self.docs.get_mut(doc).unwrap().store = file;
+                        self.render(doc);
+                    }
+                    CATCH_UP_WRITE if file != field(&req.input, "disk") => {
+                        let reading = self.busy(READ_DISK, doc);
+                        let d = self.docs.get_mut(doc).unwrap();
+                        // shortcut: a report over a read that failed for good
+                        // is not new input either (see `FileChanges`).
+                        d.unread |= d.read_failures < READ_TRIES;
+                        d.read_overtaken |= reading;
+                        let result = EffectResult::Done(vec![output(DISK_CHANGED, &subject, [])]);
+                        self.net.complete(req, result, self.now);
+                    }
+                    // The write lands the render the store held when the net
+                    // asked for it; a text is its own hash here.
+                    CATCH_UP_WRITE => {
+                        let render = field(&req.input, "authority").to_string();
+                        self.docs.get_mut(doc).unwrap().file = render.clone();
+                        let result = EffectResult::Done(vec![
+                            output(BASE, &subject, [("hash", &render), ("authority", &render)]),
+                            output(ON_DISK, &subject, [("hash", &render)]),
+                        ]);
+                        self.net.complete(req, result, self.now);
+                        self.land_disk(doc, disk, &render);
+                        self.rebase(doc, read, &render, Some(&render));
+                    }
+                    other => panic!("the generator fires no {other}"),
+                }
+            }
+
+            fn busy(&self, transition: &str, doc: &str) -> bool {
+                self.outstanding
+                    .iter()
+                    .any(|(r, ..)| &*r.transition == transition && r.subject.as_str() == doc)
+                    || self
+                        .retries
+                        .contains_key(&(transition.to_string(), doc_named(doc)))
+            }
+
+            fn expected(&self, doc: &'static str) -> Result<(), NotConverged> {
+                let d = &self.docs[doc];
+                if d.unread || self.busy(READ_DISK, doc) {
+                    return Err(NotConverged::ReadingDisk);
+                }
+                if let Some(t) = CATCH_UP.into_iter().find(|t| self.busy(t, doc)) {
+                    return Err(NotConverged::CatchingUp(t));
+                }
+                if d.read_failures >= READ_TRIES {
+                    return Err(NotConverged::ReadFailed);
+                }
+                let agree = d.disk_seen == d.file
+                    && d.file == d.store
+                    && d.base == d.file
+                    && d.base_render.as_deref() == Some(d.store.as_str());
+                if !agree {
+                    return Err(NotConverged::Behind);
+                }
+                Ok(())
+            }
+
+            fn observed(&self) -> Vec<Result<(), NotConverged>> {
+                self.net
+                    .exec(|exec| DOCS.iter().map(|doc| converged(exec, doc)).collect())
+            }
+
+            fn check(&self) -> Result<(), TestCaseError> {
+                self.net.exec(running_catch_ups_stay_unsettled)?;
+                let observed = self.observed();
+                for (doc, observed) in DOCS.iter().zip(observed) {
+                    prop_assert_eq!(
+                        observed,
+                        self.expected(doc),
+                        "{}: {:?}, outstanding {:?}, retries {:?}",
+                        doc,
+                        self.docs[doc],
+                        self.outstanding
+                            .iter()
+                            .map(|(r, ..)| format!("{} {}", r.transition, r.subject.as_str()))
+                            .collect::<BTreeSet<_>>(),
+                        self.retries
+                    );
+                }
+                prop_assert_eq!(
+                    self.net.exec(|exec| converged(exec, "doc:unseen")),
+                    Err(NotConverged::TokensMissing)
+                );
+                Ok(())
+            }
+        }
+
+        /// The tries the net gives one disk read.
+        const READ_TRIES: u32 = 3;
+
+        fn doc_named(doc: &str) -> &'static str {
+            DOCS.into_iter()
+                .find(|d| *d == doc)
+                .unwrap_or_else(|| panic!("the generator owns no {doc}"))
+        }
+
+        fn doc_of(req: &EffectRequest) -> &'static str {
+            doc_named(req.subject.as_str())
+        }
+
+        fn run(steps: &[Step]) -> Result<(), TestCaseError> {
+            let mut model = Model::new(seeded_net(), CATCH_UP_BACKOFF);
+            model.check()?;
+            for step in steps {
+                model.apply(step);
+                model.check()?;
+            }
+            Ok(())
+        }
+
+        fn seeded_net() -> Net {
+            Net {
+                exec: Executor::new(net()).expect("the write-back net loads"),
+                pending: Vec::new(),
+                now: Duration::ZERO,
+            }
+        }
+
+        /// On the shell, every operation that changes what [`converged`]
+        /// says of a document wakes a waiter. The backoff outlasts the test,
+        /// as the shell's clock is the wall clock.
+        fn run_on_shell(steps: &[Step]) -> Result<(), TestCaseError> {
+            let backoff = Duration::from_secs(3600);
+            let shell = holon_net_shell::Shell::new(net_with_backoff(backoff))
+                .expect("the write-back net loads");
+            let mut wake = shell.subscribe();
+            let mut model = Model::new(shell, backoff);
+            model.check()?;
+            for step in steps {
+                let before = model.observed();
+                wake.mark_unchanged();
+                model.apply(step);
+                model.check()?;
+                let after = model.observed();
+                prop_assert!(
+                    before == after
+                        || wake
+                            .has_changed()
+                            .expect("the shell owns the change counter"),
+                    "{:?} moved the predicate from {:?} to {:?} without a wake",
+                    step,
+                    before,
+                    after
+                );
+            }
+            Ok(())
+        }
+
+        fn cases(f: fn(&[Step]) -> Result<(), TestCaseError>, fixed: &[Vec<Step>]) {
+            for steps in fixed {
+                if let Err(e) = f(steps) {
+                    panic!("{steps:?}: {e}");
+                }
+            }
+            proptest::test_runner::TestRunner::new(ProptestConfig {
+                cases: 512,
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })
+            .run(&prop::collection::vec(step(), 1..40), |steps| f(&steps))
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
+
+        /// The predicate holds exactly when the file, the store's render and
+        /// the base hold one text and no read or catch-up is owed.
+        #[test]
+        fn converged_is_the_file_and_the_store_agreeing_with_nothing_owed() {
+            cases(
+                run,
+                // A disk read that outlasts a quiet window, then its catch-up.
+                &[
+                    vec![
+                        Step::FileChanges(0),
+                        Step::Advance(150),
+                        Step::Complete(0, Outcome::Done),
+                        Step::Advance(150),
+                        Step::Complete(0, Outcome::Done),
+                    ],
+                    vec![
+                        Step::StoreMoves(0),
+                        Step::DiskMoves(0),
+                        Step::DiskMoves(0),
+                        Step::Complete(2650211736674996942, Outcome::Done),
+                        Step::StoreMoves(0),
+                    ],
+                    vec![
+                        Step::StoreMoves(0),
+                        Step::FileChanges(0),
+                        Step::StoreMoves(0),
+                        Step::Complete(272034239675812356, Outcome::Done),
+                        Step::Complete(0, Outcome::Definite),
+                        Step::StoreMoves(0),
+                    ],
+                    vec![
+                        Step::FileChanges(1),
+                        Step::Complete(0, Outcome::Definite),
+                        Step::FileChanges(1),
+                    ],
+                    vec![
+                        Step::FileChanges(1),
+                        Step::StoreMoves(1),
+                        Step::StoreMoves(0),
+                        Step::Complete(1986577108582112715, Outcome::Retryable),
+                        Step::Complete(4455978334375579752, Outcome::Done),
+                        Step::Advance(100),
+                    ],
+                    vec![
+                        Step::FileChanges(0),
+                        Step::FileChanges(0),
+                        Step::Complete(0, Outcome::Retryable),
+                        Step::Advance(42),
+                        Step::Advance(58),
+                    ],
+                    vec![
+                        Step::FileChanges(1),
+                        Step::StoreMoves(1),
+                        Step::DiskReverts(0),
+                        Step::Advance(1),
+                        Step::Complete(17687519835443213, Outcome::Done),
+                        Step::Complete(0, Outcome::Retryable),
+                        Step::Advance(100),
+                    ],
+                    vec![
+                        Step::StoreMoves(0),
+                        Step::FileChanges(0),
+                        Step::Complete(8538321675475211017, Outcome::Definite),
+                    ],
+                ],
+            );
+        }
+
+        #[test]
+        fn every_change_of_the_predicate_wakes_its_waiters() {
+            cases(
+                run_on_shell,
+                &[
+                    vec![Step::FileChanges(0)],
+                    vec![Step::FileChanges(0), Step::Complete(0, Outcome::Definite)],
+                    vec![
+                        Step::FileChanges(0),
+                        Step::StoreMoves(0),
+                        Step::Complete(15015742719820283155, Outcome::Done),
+                        Step::Complete(0, Outcome::Definite),
+                    ],
+                    vec![
+                        Step::StoreMoves(1),
+                        Step::StoreMoves(0),
+                        Step::DiskMoves(0),
+                        Step::Complete(6118294481779761572, Outcome::Retryable),
+                        Step::DiskReverts(0),
+                        Step::DiskReverts(0),
+                        Step::Complete(5184919082893520185, Outcome::Done),
+                        Step::Complete(658760044849253869, Outcome::Definite),
+                    ],
+                    vec![
+                        Step::StoreMoves(0),
+                        Step::FileChanges(0),
+                        Step::Complete(8538321675475211017, Outcome::Definite),
+                    ],
+                ],
+            );
         }
     }
 }

@@ -255,10 +255,7 @@ fn writeback_owed(idle: &OrgSyncIdleSignal) -> Vec<String> {
             .subjects(writeback_net::BASE)
             .into_iter()
             .filter(|doc| {
-                exec.tokens()
-                    .token(writeback_net::DISK_CHANGED, doc)
-                    .is_some()
-                    || writeback_net::why_not(exec, writeback_net::READ_DISK, doc).is_none()
+                writeback_net::converged(exec, doc) == Err(writeback_net::NotConverged::ReadingDisk)
                     || writeback_net::CATCH_UP.iter().any(|t| {
                         matches!(
                             writeback_net::why_not(exec, t, doc),

@@ -670,6 +670,11 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 /// modes — the backing matview exists with or without Loro.
 pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
 
+/// The one consumer whose applies the [`BlockFeed`] subscription reports to
+/// the delivery ledger. Provided only where that consumer is built: a
+/// reporting cursor nobody applies through owes forever.
+pub struct BlockFeedConsumer(pub Arc<DeliveryCursor>);
+
 /// An owed child of a [`DeliveryCursor`]. Its parent stops owing the child's
 /// batches when this handle drops, even while a router still holds the cursor
 /// of a subscription it has not yet found closed.
@@ -707,6 +712,8 @@ pub struct DeliveryCursor {
     /// The seq this cursor was sent when its subscriber's re-query failed,
     /// and why.
     requery_failure: std::sync::Mutex<Option<(u64, String)>>,
+    /// The change counter of the ledger this cursor reports to.
+    ledger_changed: std::sync::OnceLock<Arc<tokio::sync::watch::Sender<u64>>>,
 }
 
 impl DeliveryCursor {
@@ -799,6 +806,18 @@ impl DeliveryCursor {
             "an owed child's batches are applied through its parent"
         );
         self.applied.fetch_max(seq, Ordering::Release);
+        if let Some(changed) = self.ledger_changed.get() {
+            changed.send_modify(|n| *n += 1);
+        }
+    }
+
+    /// Bump `changed` after each apply: the ledger fed by this cursor changed.
+    pub fn reports_changes_to(&self, changed: &Arc<tokio::sync::watch::Sender<u64>>) {
+        let set = self.ledger_changed.get_or_init(|| changed.clone());
+        assert!(
+            Arc::ptr_eq(set, changed),
+            "a delivery cursor reports to one ledger"
+        );
     }
 
     /// Called by the router for a batch that holds nothing for this

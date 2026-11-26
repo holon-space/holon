@@ -110,6 +110,7 @@ impl Shell {
             .at_now(|exec, now| exec.write(place, subject, content, now))
             .unwrap_or_else(|e| panic!("the net has no quiescence after a write to {place}: {e}"));
         self.queue(quiesced.requests);
+        self.inner.progress.send_modify(|n| *n += 1);
     }
 
     /// Runs `f` on the executor at [`Shell::now`]: a write, a retraction, a
@@ -192,6 +193,13 @@ impl Shell {
                 self.complete(&request, result)?;
             }
         }
+    }
+
+    /// A counter bumped after every write, fire, step and completion: each
+    /// change of the marking wakes
+    /// [`changed`](tokio::sync::watch::Receiver::changed).
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.progress.subscribe()
     }
 
     /// The settled outcome of `occurrence`, once it settles.

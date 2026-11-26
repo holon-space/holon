@@ -5844,18 +5844,25 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             .writeback_net()
             .clone();
         let subject = doc.to_string();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while net
-            .read(holon_filesystem::writeback_net::unsettled)
-            .contains(&subject)
-        {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "[disarm_write_churn] {doc} still behind its store 10s after the faults cleared: {:?}",
-                net.read(holon_filesystem::writeback_net::failed_writebacks)
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let mut wake = net.subscribe();
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            while net
+                .read(holon_filesystem::writeback_net::unsettled)
+                .contains(&subject)
+            {
+                wake.changed()
+                    .await
+                    .expect("the write-back net outlives its session");
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "[disarm_write_churn] {doc} still behind its store 10s after the faults cleared: \
+             {:?}, {:?}",
+            net.read(|exec| holon_filesystem::writeback_net::converged(exec, &subject)),
+            net.read(holon_filesystem::writeback_net::failed_writebacks)
+        );
     }
 
     async fn touch_file(&self, doc: &EntityUri) {

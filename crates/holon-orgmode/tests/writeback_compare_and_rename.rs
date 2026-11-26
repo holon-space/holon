@@ -603,27 +603,58 @@ impl Harness {
             );
     }
 
-    /// Runs the write-back net's retries until every file is settled.
+    /// Runs the write-back net's retries until every file is settled. In this
+    /// harness only a retry coming due moves the net, so each round waits
+    /// for the earliest due retry.
     async fn settle(&mut self) {
+        use holon_filesystem::writeback_net as wn;
         for _ in 0..50 {
-            if self
-                .refused
-                .read(holon_filesystem::writeback_net::unsettled)
-                .is_empty()
-            {
-                return;
-            }
-            tokio::time::sleep(holon_filesystem::writeback_net::CATCH_UP_BACKOFF).await;
             self.controller
                 .drive_writeback_net()
                 .await
                 .expect("the write-back net runs");
+            let unsettled = self.refused.read(wn::unsettled);
+            if unsettled.is_empty() {
+                return;
+            }
+            let due = self.refused.read(|exec| {
+                unsettled
+                    .iter()
+                    .filter_map(|doc| wn::retry_due(exec, doc))
+                    .min()
+            });
+            let due = due.unwrap_or_else(|| {
+                panic!(
+                    "the driven write-back net owes {unsettled:?} with no retry pending: {:?}",
+                    self.converged(&unsettled)
+                )
+            });
+            tokio::time::sleep(due.saturating_sub(self.refused.now())).await;
         }
+        let unsettled = self.refused.read(wn::unsettled);
         panic!(
-            "the write-back net did not settle: {:?}",
-            self.refused
-                .read(holon_filesystem::writeback_net::unsettled)
+            "the write-back net did not settle within 50 retries: {:?}",
+            self.converged(&unsettled)
         );
+    }
+
+    fn converged(
+        &self,
+        docs: &[String],
+    ) -> Vec<(
+        String,
+        Result<(), holon_filesystem::writeback_net::NotConverged>,
+    )> {
+        self.refused.read(|exec| {
+            docs.iter()
+                .map(|doc| {
+                    (
+                        doc.clone(),
+                        holon_filesystem::writeback_net::converged(exec, doc),
+                    )
+                })
+                .collect()
+        })
     }
 
     /// One poll tick: the tracked-file backstop, then new-file discovery.

@@ -450,6 +450,11 @@ impl LoroSyncControllerHandle {
         self.projection.is_settled().await
     }
 
+    /// See [`LoroProjection::synced`].
+    pub fn synced(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.projection.synced()
+    }
+
     /// Number of errors the controller has logged since startup. Used by the
     /// bridge invariant `I3 — no silent drops`.
     pub fn error_count(&self) -> usize {
@@ -816,6 +821,9 @@ pub struct LoroProjection {
     /// loop waits on it. Lives here because the subscriptions are installed
     /// with the projection, before the controller exists.
     wake: Arc<Notify>,
+    /// Bumped after every watermark advance: the moment
+    /// [`Self::is_settled_at`] can turn true.
+    synced: tokio::sync::watch::Sender<u64>,
     /// Keeps the `subscribe_root` registrations alive. Dropping a
     /// `loro::Subscription` unsubscribes, so these are held for the
     /// projection's lifetime.
@@ -900,6 +908,7 @@ impl LoroProjection {
             pending: Arc::new(StdMutex::new(Vec::new())),
             pending_reseed_reason: StdMutex::new(None),
             wake: Arc::new(Notify::new()),
+            synced: tokio::sync::watch::Sender::new(0),
             subscriptions: StdMutex::new(Vec::new()),
             read_model,
             degraded,
@@ -1958,7 +1967,13 @@ impl LoroProjection {
         self.persist_sidecar(&global).await?;
         *self.last_synced.lock().unwrap() = global;
         *self.layout_last_synced.lock().unwrap() = layout;
+        self.synced.send_modify(|n| *n += 1);
         Ok(())
+    }
+
+    /// Changes after every watermark advance.
+    pub fn synced(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.synced.subscribe()
     }
 
     /// Both projected documents: the replicated global tree and the

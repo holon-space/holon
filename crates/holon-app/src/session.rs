@@ -277,15 +277,12 @@ mod first_then_tests {
 /// How long a shutdown waits for the org write-back to write what it owes.
 pub const WRITEBACK_SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The write-back chain is quiet for this long before a shutdown trusts it.
-const WRITEBACK_QUIET_FLOOR: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Wait until every change the store holds has reached its org file: the Loro
-/// projection caught up with the document, CDC stopped moving, and the
-/// write-back has nothing queued, folding or rendering — all at once, for
-/// [`WRITEBACK_QUIET_FLOOR`]. The backlog import is sealed first: while it
-/// runs, every file it imports moves the Loro document and the projection
-/// never catches up.
+/// Wait until every change the store holds has reached its org file. The
+/// backlog import is sealed first: while it runs, every file it imports moves
+/// the Loro document. Then the Loro projection catches up with the document,
+/// the block feed's write-back consumer applies every CDC batch emitted up to
+/// that point, and the write-back owes nothing. Each wait wakes on the event
+/// that can end it; `budget` is only the hang guard.
 async fn wait_for_writeback(
     injector: &fluxdi::Injector,
     budget: std::time::Duration,
@@ -298,15 +295,6 @@ async fn wait_for_writeback(
                  but resolution failed: {e}"
             )
         })?;
-    let sealed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    tokio::spawn({
-        let idle = idle.clone();
-        let sealed = sealed.clone();
-        async move {
-            idle.seal_backlog().await;
-            sealed.store(true, std::sync::atomic::Ordering::Release);
-        }
-    });
     let loro_sync = if injector
         .try_resolve::<holon_loro_wiring::LoroConfig>()
         .is_ok()
@@ -330,41 +318,24 @@ async fn wait_for_writeback(
         holon::di::StorageSelector::Turso => Some(injector.resolve::<BackendEngine>()),
     };
 
-    let probe = || {
-        let idle = idle.clone();
-        let loro_sync = loro_sync.clone();
-        let engine = engine.clone();
-        let sealed = sealed.clone();
-        async move {
-            let mut busy: Vec<String> = idle
-                .writeback_stop_waits_for()
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            if !sealed.load(std::sync::atomic::Ordering::Acquire) {
-                busy.push("the backlog import has not stopped".to_string());
-            }
-            let read_model_behind = match &loro_sync {
-                Some(sync) => !sync.is_settled().await?,
-                None => false,
-            };
-            Ok(WritebackProbe {
-                busy,
-                read_model_behind,
-                cdc: engine
-                    .as_ref()
-                    .map(|e| e.db_handle().cdc_emitted_watermark()),
-                tick: idle.current_tick(),
-            })
-        }
-    };
-    let settled = settle(
-        probe,
-        || idle.queued_renders().documents(),
+    let stage = std::sync::Mutex::new(Stage::SealingBacklog);
+    let settled = tokio::time::timeout(
         budget,
-        WRITEBACK_QUIET_FLOOR,
+        writeback_settles(&idle, loro_sync.as_deref(), engine.as_deref(), &stage),
     )
     .await;
+    let settled = match settled {
+        Ok(settled) => settled,
+        Err(_elapsed) => {
+            let stage = *stage.lock().expect("stage mutex");
+            budget_spent(
+                budget,
+                stage,
+                idle.writeback_owes_handed_over(),
+                idle.queued_renders().documents(),
+            )
+        }
+    };
     let refused = idle
         .writeback_net()
         .read(holon_filesystem::writeback_net::failed_writebacks);
@@ -382,205 +353,154 @@ async fn wait_for_writeback(
     })
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct WritebackProbe {
-    /// What the write-back is still doing; empty when nothing.
-    busy: Vec<String>,
+/// How far [`writeback_settles`] got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    SealingBacklog,
     /// The Loro projection has not caught up with the document. The Loro
     /// checkpoint keeps every edit, so this alone loses nothing.
-    read_model_behind: bool,
-    cdc: Option<u64>,
-    tick: u64,
+    ReadModelBehind,
+    /// The block feed's write-back consumer has not applied through this CDC
+    /// sequence.
+    FeedBehind(u64),
+    WritebackOwes,
 }
 
-/// Poll `probe` until it reports nothing busy and the same watermarks for
-/// `floor`, or `budget` runs out. Then it is an error naming what was not
-/// written, unless only the read model is behind: that is logged.
-async fn settle<P, F>(
-    mut probe: P,
-    unwritten: impl Fn() -> Vec<String>,
-    budget: std::time::Duration,
-    floor: std::time::Duration,
-) -> Result<()>
-where
-    P: FnMut() -> F,
-    F: std::future::Future<Output = Result<WritebackProbe>>,
-{
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut last = probe().await?;
-    let mut quiet_since = tokio::time::Instant::now();
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let now = probe().await?;
-        if !now.busy.is_empty() || now.read_model_behind || now != last {
-            quiet_since = tokio::time::Instant::now();
-        } else if quiet_since.elapsed() >= floor {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let unwritten = unwritten();
-            if now.read_model_behind
-                && now.busy.is_empty()
-                && now.tick == last.tick
-                && unwritten.is_empty()
-            {
-                tracing::warn!(
-                    "shutdown: the read model is still behind the document after {budget:?}; \
-                     every document is written and the Loro checkpoint keeps every edit"
-                );
-                return Ok(());
+async fn writeback_settles(
+    idle: &holon_orgmode::OrgSyncIdleSignal,
+    loro_sync: Option<&holon_loro::LoroSyncControllerHandle>,
+    engine: Option<&BackendEngine>,
+    stage: &std::sync::Mutex<Stage>,
+) -> Result<()> {
+    let set = |s: Stage| *stage.lock().expect("stage mutex") = s;
+    idle.seal_backlog().await;
+
+    if let Some(sync) = loro_sync {
+        set(Stage::ReadModelBehind);
+        let mut synced = sync.synced();
+        loop {
+            synced.borrow_and_update();
+            if sync.is_settled().await? {
+                break;
             }
-            return Err(anyhow::anyhow!(
-                "shutdown: the org write-back did not settle within {budget:?}, so edits may be \
-                 missing from disk. Documents not written: {unwritten:?}. Still running: {:?}",
-                now.busy
-            ));
+            synced
+                .changed()
+                .await
+                .map_err(|_| anyhow::anyhow!("shutdown: the Loro projection ended unsettled"))?;
         }
-        last = now;
     }
+
+    let feed = idle.writeback_feed();
+    let mut delivered = engine.map(|e| e.matview_manager().delivery_changed());
+    let start = engine.map(|e| e.db_handle().cdc_emitted_watermark());
+    let mut net = idle.writeback_net().subscribe();
+    loop {
+        let progressed = idle.progressed();
+        if let Some(delivered) = delivered.as_mut() {
+            delivered.borrow_and_update();
+        }
+        net.borrow_and_update();
+        let behind = match (engine, start) {
+            (Some(engine), Some(start)) if feed.is_taken() => {
+                let applied = engine.matview_manager().complete_through_for(feed);
+                (applied < holon_api::delivery_ledger::Seq(start)).then_some(start)
+            }
+            _ => None,
+        };
+        match behind {
+            Some(start) => set(Stage::FeedBehind(start)),
+            None if idle.writeback_owes_handed_over().is_empty() => return Ok(()),
+            None => set(Stage::WritebackOwes),
+        }
+        let delivery = async {
+            match delivered.as_mut() {
+                Some(d) => d.changed().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            () = progressed => {}
+            changed = delivery => changed
+                .map_err(|_| anyhow::anyhow!("shutdown: the CDC router ended"))?,
+            changed = net.changed() => changed
+                .map_err(|_| anyhow::anyhow!("shutdown: the write-back net ended"))?,
+        }
+    }
+}
+
+/// The verdict once the hang guard fires: an error naming what was not
+/// written, unless only the read model is behind, which is logged.
+fn budget_spent(
+    budget: std::time::Duration,
+    stage: Stage,
+    busy: Vec<&'static str>,
+    unwritten: Vec<String>,
+) -> Result<()> {
+    if stage == Stage::ReadModelBehind && busy.is_empty() && unwritten.is_empty() {
+        tracing::warn!(
+            "shutdown: the read model is still behind the document after {budget:?}; every \
+             document is written and the Loro checkpoint keeps every edit"
+        );
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "shutdown: the org write-back did not settle within {budget:?}, so edits may be missing \
+         from disk. Waiting at: {stage:?}. Documents not written: {unwritten:?}. Still running: \
+         {busy:?}"
+    ))
 }
 
 #[cfg(test)]
 mod settle_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn a_write_back_that_never_settles_is_an_error_naming_the_unwritten_documents() {
-        let err = settle(
-            || async {
-                Ok(WritebackProbe {
-                    busy: vec!["document re-renders are queued".to_string()],
-                    read_model_behind: true,
-                    cdc: Some(1),
-                    tick: 1,
-                })
-            },
-            || vec!["doc:page.org".to_string()],
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(10),
-        )
-        .await
-        .expect_err("a write-back that stays busy must not settle");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("doc:page.org") && msg.contains("document re-renders are queued"),
-            "the error must name the unwritten document and what is still running: {msg}"
-        );
-    }
+    const STAGES: [Stage; 4] = [
+        Stage::SealingBacklog,
+        Stage::ReadModelBehind,
+        Stage::FeedBehind(7),
+        Stage::WritebackOwes,
+    ];
 
-    #[tokio::test]
-    async fn a_quiet_write_back_settles() {
-        settle(
-            || async {
-                Ok(WritebackProbe {
-                    busy: Vec::new(),
-                    read_model_behind: false,
-                    cdc: Some(7),
-                    tick: 3,
-                })
-            },
-            Vec::new,
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_millis(10),
-        )
-        .await
-        .expect("a quiet write-back settles within the floor");
-    }
-
-    #[tokio::test]
-    async fn a_moving_watermark_is_not_quiet() {
-        let mut tick = 0;
-        let err = settle(
-            move || {
-                tick += 1;
-                async move {
-                    Ok(WritebackProbe {
-                        busy: Vec::new(),
-                        read_model_behind: false,
-                        cdc: Some(0),
-                        tick,
-                    })
-                }
-            },
-            Vec::new,
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(20),
-        )
-        .await;
-        assert!(
-            err.is_err(),
-            "a tick that advances on every probe is activity, not quiet"
-        );
-    }
-    #[tokio::test]
-    async fn a_read_model_still_catching_up_with_every_document_written_is_ok() {
-        let mut cdc = 0;
-        settle(
-            move || {
-                cdc += 1;
-                async move {
-                    Ok(WritebackProbe {
-                        busy: Vec::new(),
-                        read_model_behind: true,
-                        cdc: Some(cdc),
-                        tick: 4,
-                    })
-                }
-            },
-            Vec::new,
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(10),
-        )
-        .await
-        .expect("a lagging read model loses no edit: the Loro checkpoint keeps them");
-    }
-
-    /// Every probe shape at the budget: only a lagging read model, with nothing
-    /// busy, nothing unwritten and a still tick, may end the shutdown Ok.
-    #[tokio::test]
-    async fn only_a_lagging_read_model_is_ok_at_the_budget() {
-        for case in 0u8..32 {
-            let busy = case & 1 != 0;
-            let behind = case & 2 != 0;
-            let cdc_moves = case & 4 != 0;
-            let tick_moves = case & 8 != 0;
-            let unwritten = case & 16 != 0;
-            let mut n = 0u64;
-            let got = settle(
-                move || {
-                    n += 1;
-                    async move {
-                        Ok(WritebackProbe {
-                            busy: if busy {
-                                vec!["renders queued".to_string()]
-                            } else {
-                                Vec::new()
-                            },
-                            read_model_behind: behind,
-                            cdc: Some(if cdc_moves { n } else { 0 }),
-                            tick: if tick_moves { n } else { 0 },
-                        })
+    /// Every verdict shape at the budget: only a lagging read model, with
+    /// nothing running and nothing unwritten, may end the shutdown Ok; every
+    /// error names the stage, the unwritten documents and what still runs.
+    #[test]
+    fn only_a_lagging_read_model_is_ok_at_the_budget() {
+        for stage in STAGES {
+            for (busy, unwritten) in [(false, false), (true, false), (false, true), (true, true)] {
+                let busy = if busy {
+                    vec!["document re-renders are queued"]
+                } else {
+                    Vec::new()
+                };
+                let unwritten = if unwritten {
+                    vec!["doc:page.org".to_string()]
+                } else {
+                    Vec::new()
+                };
+                let ok = stage == Stage::ReadModelBehind && busy.is_empty() && unwritten.is_empty();
+                let got = budget_spent(
+                    std::time::Duration::from_secs(1),
+                    stage,
+                    busy.clone(),
+                    unwritten.clone(),
+                );
+                match got {
+                    Ok(()) => assert!(ok, "{stage:?} {busy:?} {unwritten:?} must be an error"),
+                    Err(e) => {
+                        assert!(!ok, "{stage:?} with nothing owed must be Ok: {e:#}");
+                        let msg = e.to_string();
+                        for named in busy
+                            .iter()
+                            .copied()
+                            .chain(unwritten.iter().map(String::as_str))
+                        {
+                            assert!(msg.contains(named), "the error must name {named}: {msg}");
+                        }
+                        assert!(msg.contains(&format!("{stage:?}")), "{msg}");
                     }
-                },
-                move || {
-                    if unwritten {
-                        vec!["doc:page.org".to_string()]
-                    } else {
-                        Vec::new()
-                    }
-                },
-                std::time::Duration::from_millis(50),
-                std::time::Duration::from_millis(10),
-            )
-            .await;
-            let quiet = !busy && !behind && !cdc_moves && !tick_moves;
-            let only_read_model_lags = behind && !busy && !tick_moves && !unwritten;
-            assert_eq!(
-                got.is_ok(),
-                quiet || only_read_model_lags,
-                "busy={busy} behind={behind} cdc_moves={cdc_moves} tick_moves={tick_moves} \
-                 unwritten={unwritten}: {got:?}"
-            );
+                }
+            }
         }
     }
 }

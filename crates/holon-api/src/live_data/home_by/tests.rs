@@ -760,43 +760,99 @@ enum Engine {
 /// document, a stale neighbour pointer reorders the document, and a torn
 /// re-seed blanks one — all surface as a mismatch at the step that caused
 /// them.
+///
+/// Each event is one delivered batch whose sequence is stored after its diff
+/// is queued, as the feed does; an op that changes nothing is a batch with no
+/// diff. The real engine must close every step with exactly one `Through` of
+/// that sequence, after all the step's diffs.
 fn run_convergence(ops: Vec<Op>, engine: Engine) -> std::result::Result<(), TestCaseError> {
     let tree = Arc::new(Mutex::new(Tree::new()));
     let authority = Arc::new(TestAuthority::new(tree.clone()));
+    let consumed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let advanced = Arc::new(tokio::sync::Notify::new());
+    let mut seq = 0u64;
 
     let (tx, rx) = futures::channel::mpsc::unbounded::<MapDiff<String, Arc<Item>>>();
     let mut real;
     let mut straw;
-    let stream: &mut (dyn Stream<Item = Result<HomedDiff<String, Item>>> + Unpin) = match engine {
+    let stream: &mut (dyn Stream<Item = Result<Homed<String, Item>>> + Unpin) = match engine {
         Engine::Real => {
-            real = Box::pin(home_diffs(rx, authority.clone()));
+            real = Box::pin(home_diffs_with_progress(
+                rx,
+                authority.clone(),
+                Arc::new(HomeByProgress::default()),
+                Consumed {
+                    seq: consumed.clone(),
+                    advanced: advanced.clone(),
+                },
+            ));
             &mut real
         }
         Engine::Strawman => {
-            straw = Box::pin(home_diffs_strawman(rx, authority.clone()));
+            straw =
+                Box::pin(home_diffs_strawman(rx, authority.clone()).map(|d| d.map(Homed::Diff)));
             &mut straw
         }
     };
+    let mut deliver = |diff: Option<MapDiff<String, Arc<Item>>>| {
+        if let Some(diff) = diff {
+            tx.unbounded_send(diff).expect("channel open");
+        }
+        seq += 1;
+        consumed.store(seq, std::sync::atomic::Ordering::SeqCst);
+        advanced.notify_waiters();
+        seq
+    };
+    let step_diffs =
+        |step: Vec<Result<Homed<String, Item>>>,
+         seq: u64|
+         -> std::result::Result<Vec<Result<HomedDiff<String, Item>>>, TestCaseError> {
+            let mut diffs = Vec::new();
+            let mut through = Vec::new();
+            for item in step {
+                match item {
+                    Ok(Homed::Through(n)) => through.push((diffs.len(), n)),
+                    Ok(Homed::Diff(d)) => diffs.push(Ok(d)),
+                    Err(e) => diffs.push(Err(e)),
+                }
+            }
+            if matches!(engine, Engine::Real) {
+                prop_assert_eq!(
+                    through,
+                    vec![(diffs.len(), seq)],
+                    "the step must end with one Through of its delivered sequence"
+                );
+            }
+            Ok(diffs)
+        };
 
     // Seed the feed with the root page so every step has a document.
     {
         let mut t = tree.lock().unwrap();
         t.live.insert(ROOT.into());
     }
-    tx.unbounded_send(MapDiff::Insert {
+    let seeded = deliver(Some(MapDiff::Insert {
         key: ROOT.into(),
         value: arc(0),
-    })
-    .expect("channel open");
+    }));
     let mut folded: Folded = BTreeMap::new();
-    fold_emitted(&mut folded, drain(stream));
+    fold_emitted(&mut folded, step_diffs(drain(stream), seeded)?);
 
     for op in &ops {
         let diff = {
             let mut t = tree.lock().unwrap();
             to_diff(&mut t, op)
         };
-        let Some(diff) = diff else { continue };
+        let Some(diff) = diff else {
+            let delivered = deliver(None);
+            let step = step_diffs(drain(stream), delivered)?;
+            prop_assert!(
+                step.is_empty(),
+                "a batch with no diff yields none: {:?}",
+                step
+            );
+            continue;
+        };
 
         // The real feed mirrors every block, so a live block always has
         // live ancestors. A generator hole that breaks this produces a
@@ -818,8 +874,8 @@ fn run_convergence(ops: Vec<Op>, engine: Engine) -> std::result::Result<(), Test
             }
         }
 
-        tx.unbounded_send(diff).expect("channel open");
-        let step = drain(stream);
+        let delivered = deliver(Some(diff));
+        let step = step_diffs(drain(stream), delivered)?;
 
         // Law 2: for every element re-homed in this step, the retraction
         // must precede the addition.
@@ -1882,7 +1938,7 @@ mod supervision {
         seed_root(&tree, &feed);
 
         let progress = Arc::new(HomeByProgress::default());
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Supervised<Homed<String, Item>>>();
         let stream_feed = feed.clone();
         let stream_authority = authority.clone();
         let stream_progress = progress.clone();

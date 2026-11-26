@@ -644,6 +644,9 @@ pub struct MatviewManager {
     /// whose demux delivers to its subscribers.
     subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
     delivery: Arc<std::sync::Mutex<Delivery>>,
+    /// Bumped after a demux routes a batch and after a reporting
+    /// subscription applies one: each change of [`Self::delivery_ledger`].
+    delivery_changed: Arc<tokio::sync::watch::Sender<u64>>,
     /// Counters for measuring cache effectiveness. `cache_hits` is the number
     /// of `ensure_view`/`preload` calls that returned via the in-memory cache
     /// without a `view_exists` SQL round trip. `exists_calls` is the number of
@@ -670,6 +673,7 @@ struct SharedViewState {
     view_sql: Arc<std::sync::Mutex<HashMap<String, String>>>,
     subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
     delivery: Arc<std::sync::Mutex<Delivery>>,
+    delivery_changed: Arc<tokio::sync::watch::Sender<u64>>,
     ddl_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -770,6 +774,7 @@ fn shared_for_database(
         view_sql: Arc::new(std::sync::Mutex::new(HashMap::new())),
         subscriptions: Arc::new(std::sync::Mutex::new(Subscriptions::default())),
         delivery: Arc::new(std::sync::Mutex::new(Delivery::default())),
+        delivery_changed: Arc::new(tokio::sync::watch::Sender::new(0)),
         ddl_mutex: seed_mutex,
     };
     table.insert(key, (witness, state.clone()));
@@ -788,7 +793,11 @@ impl MatviewManager {
             .expect("delivery mutex")
             .routed
             .add(0);
-        let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone(), routed.clone());
+        let demux_cmd_tx = Self::spawn_demux(
+            db_handle.cdc_broadcast().clone(),
+            routed.clone(),
+            shared.delivery_changed.clone(),
+        );
         // The demux sees only batches broadcast after its subscription.
         routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
         Self {
@@ -802,6 +811,7 @@ impl MatviewManager {
             view_sql: shared.view_sql,
             subscriptions: shared.subscriptions,
             delivery: shared.delivery,
+            delivery_changed: shared.delivery_changed,
             cache_hits: Arc::new(AtomicU64::new(0)),
             exists_calls: Arc::new(AtomicU64::new(0)),
             ddl_creates: Arc::new(AtomicU64::new(0)),
@@ -839,6 +849,30 @@ impl MatviewManager {
             cursor.feed(&mut ledger, key, true);
         }
         ledger
+    }
+
+    /// Changes after every change of [`Self::delivery_ledger`]: a demux
+    /// routed a batch, or a reporting subscription applied one.
+    pub fn delivery_changed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.delivery_changed.subscribe()
+    }
+
+    /// The highest seq through which the subscription reporting to `cursor`
+    /// shows every routed batch.
+    pub fn complete_through_for(&self, cursor: &Arc<DeliveryCursor>) -> Seq {
+        let key = {
+            let delivery = self.delivery.lock().expect("delivery mutex");
+            let entry = delivery
+                .cursors
+                .iter()
+                .find(|e| e.reports_applied && std::ptr::eq(e.cursor.as_ptr(), Arc::as_ptr(cursor)))
+                .expect("the cursor reports to a subscription of this database");
+            ViewKey {
+                name: entry.view_name.clone(),
+                instance: Arc::as_ptr(cursor) as usize as u64,
+            }
+        };
+        self.delivery_ledger().complete_through_view(&key)
     }
 
     /// A router that hands every batch emitted from now on to one consumer
@@ -910,6 +944,7 @@ impl MatviewManager {
     fn spawn_demux(
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         routed: Arc<AtomicU64>,
+        delivery_changed: Arc<tokio::sync::watch::Sender<u64>>,
     ) -> mpsc::Sender<DemuxCommand> {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<DemuxCommand>(64);
         let mut broadcast_rx = cdc_broadcast.subscribe();
@@ -1039,6 +1074,7 @@ impl MatviewManager {
                                     }
                                 }
                                 routed.fetch_max(seq, Ordering::Release);
+                                delivery_changed.send_modify(|n| *n += 1);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 // A broadcast lag means the demux missed `n` CDC
@@ -1508,6 +1544,9 @@ impl MatviewManager {
         let reporting = holon_api::live_data::reporting_cursor();
         let reports_applied = reporting.is_some();
         let cursor = reporting.unwrap_or_default();
+        if reports_applied {
+            cursor.reports_changes_to(&self.delivery_changed);
+        }
         self.delivery
             .lock()
             .expect("delivery mutex")

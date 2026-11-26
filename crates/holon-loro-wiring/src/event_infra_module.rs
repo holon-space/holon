@@ -106,9 +106,14 @@ impl Module for EventInfraModule {
         // matview CDC). Built once; downstream sinks resolve and share it.
         injector.provide::<BlockFeed>(Provider::root_async(|resolver| async move {
             let matview_manager = resolver.resolve::<holon::sync::MatviewManager>();
-            let watch = matview_manager
-                .watch("SELECT * FROM block")
-                .await
+            let watch = matview_manager.watch("SELECT * FROM block");
+            let watch =
+                match resolver.optional_resolve::<holon_api::live_data::BlockFeedConsumer>() {
+                    Some(consumer) => {
+                        holon_api::live_data::reporting_to(consumer.0.clone(), watch).await
+                    }
+                    None => watch.await,
+                }
                 .expect("[EventInfraModule] watch block matview for BlockFeed");
             let live = LiveData::new(
                 watch.initial_rows,

@@ -217,6 +217,15 @@ pub enum HomedDiff<K, T> {
     Remove { doc: K, key: String },
 }
 
+/// An item of [`LiveData::home_by_with_progress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Homed<K, T> {
+    Diff(HomedDiff<K, T>),
+    /// Every change the feed consumed up to this CDC sequence has been
+    /// yielded before this item. Emitted once per burst that advanced it.
+    Through(u64),
+}
+
 /// Whether a `home_by` stream currently owes its consumer output.
 ///
 /// The fold between a source diff arriving and the last item it produces being
@@ -259,23 +268,41 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         K: Clone + Ord + Send + 'static,
         A: HomeAuthority<K> + 'static,
     {
+        use futures::stream::StreamExt as _;
         self.home_by_with_progress(authority, Arc::new(HomeByProgress::default()))
+            .filter_map(|item| async move {
+                match item {
+                    Ok(Homed::Diff(d)) => Some(Ok(d)),
+                    Ok(Homed::Through(_)) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
     }
 
     /// [`home_by`](Self::home_by), reporting mid-fold state into `progress` so
-    /// a settle can tell "no output yet" apart from "nothing to output".
+    /// a settle can tell "no output yet" apart from "nothing to output", and
+    /// marking with [`Homed::Through`] how far the feed's deliveries are
+    /// handed over.
     pub fn home_by_with_progress<K, A>(
         &self,
         authority: Arc<A>,
         progress: Arc<HomeByProgress>,
-    ) -> impl Stream<Item = Result<HomedDiff<K, T>>>
+    ) -> impl Stream<Item = Result<Homed<K, T>>>
     where
         K: Clone + Ord + Send + 'static,
         A: HomeAuthority<K> + 'static,
     {
         let mut source = self.signal_map();
         let diffs = futures::stream::poll_fn(move |cx| source.poll_map_change_unpin(cx));
-        home_diffs_with_progress(diffs, authority, progress)
+        home_diffs_with_progress(
+            diffs,
+            authority,
+            progress,
+            Consumed {
+                seq: self.last_consumed_seq.clone(),
+                advanced: self.seq_advanced.clone(),
+            },
+        )
     }
 }
 
@@ -312,6 +339,24 @@ struct HomeState<S, K, T, A> {
     /// still gets processed, then we end.
     source_done: bool,
     progress: Arc<HomeByProgress>,
+    consumed: Consumed,
+    /// The last [`Homed::Through`] taken from the feed.
+    through: u64,
+    /// A [`Homed::Through`] owed once `pending` is drained.
+    marker: Option<u64>,
+}
+
+/// The feed's consumed CDC sequence. `seq` is stored only after that batch's
+/// diffs are queued on the source, then `advanced` is notified.
+struct Consumed {
+    seq: Arc<std::sync::atomic::AtomicU64>,
+    advanced: Arc<tokio::sync::Notify>,
+}
+
+impl Consumed {
+    fn load(&self) -> u64 {
+        self.seq.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// A stream that stops being polled — dropped mid-fold, or abandoned by a
@@ -338,14 +383,31 @@ where
     T: Send + Sync + 'static,
     A: HomeAuthority<K> + 'static,
 {
-    home_diffs_with_progress(source, authority, Arc::new(HomeByProgress::default()))
+    use futures::stream::StreamExt as _;
+    home_diffs_with_progress(
+        source,
+        authority,
+        Arc::new(HomeByProgress::default()),
+        Consumed {
+            seq: Arc::default(),
+            advanced: Arc::default(),
+        },
+    )
+    .filter_map(|item| async move {
+        match item {
+            Ok(Homed::Diff(d)) => Some(Ok(d)),
+            Ok(Homed::Through(_)) => None,
+            Err(e) => Some(Err(e)),
+        }
+    })
 }
 
 fn home_diffs_with_progress<S, K, T, A>(
     source: S,
     authority: Arc<A>,
     progress: Arc<HomeByProgress>,
-) -> impl Stream<Item = Result<HomedDiff<K, T>>>
+    consumed: Consumed,
+) -> impl Stream<Item = Result<Homed<K, T>>>
 where
     S: Stream<Item = MapDiff<String, Arc<T>>>,
     K: Clone + Ord + Send + 'static,
@@ -360,12 +422,18 @@ where
         errored: false,
         source_done: false,
         progress,
+        consumed,
+        through: 0,
+        marker: None,
     };
     futures::stream::unfold(state, |mut st| async move {
         use futures::stream::StreamExt as _;
         loop {
             if let Some(item) = st.pending.pop_front() {
-                return Some((item, st));
+                return Some((item.map(Homed::Diff), st));
+            }
+            if let Some(through) = st.marker.take() {
+                return Some((Ok(Homed::Through(through)), st));
             }
             if st.errored || st.source_done {
                 st.progress.set(false);
@@ -384,8 +452,24 @@ where
             // the downstream controller collapse the fan to one render per
             // document. A write that lands mid-burst is echoed by its own diff
             // in the NEXT burst, with a fresh memo: convergence at quiescence.
-            let mut burst = vec![st.source.next().await?];
-            // A diff is in hand. The authority reads below are the window this
+            //
+            // A consumed batch with no diff left to take (one an earlier
+            // burst drained, or one that changed nothing) starts a burst too:
+            // it is owed its `Through`.
+            let advanced = st.consumed.advanced.clone();
+            let woken = advanced.notified();
+            futures::pin_mut!(woken);
+            let mut burst = Vec::new();
+            if st.consumed.load() <= st.through {
+                match futures::future::select(st.source.next(), woken).await {
+                    futures::future::Either::Left((item, _)) => burst.push(item?),
+                    futures::future::Either::Right(((), _)) => {}
+                }
+            }
+            // Read before the drain: every batch up to it has its diffs
+            // queued already, so the drain takes them all.
+            let through = st.consumed.load();
+            // A burst has begun. The authority reads below are the window this
             // flag exists for, so it must be raised BEFORE them: everything
             // downstream is idle for their whole duration.
             st.progress.set(true);
@@ -422,6 +506,10 @@ where
                     st.pending.push_back(Err(e));
                     break;
                 }
+            }
+            if !st.errored && through > st.through {
+                st.through = through;
+                st.marker = Some(through);
             }
         }
     })

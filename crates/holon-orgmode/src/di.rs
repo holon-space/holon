@@ -342,11 +342,10 @@ pub struct OrgSyncIdleSignal {
     poll_requested: tokio::sync::Notify,
     /// Passes the loop has entered and not yet finished.
     ///
-    /// [`tick`](Self::tick) advances only when a pass COMPLETES, so a pass that
-    /// runs longer than a settle's quiet floor — a write-back render is several
-    /// authority reads plus disk — is indistinguishable from an idle loop. A
-    /// settle that only samples the tick therefore concludes mid-pass and reads
-    /// a half-written vault.
+    /// [`tick`](Self::tick) advances only when a pass COMPLETES, so a waiter
+    /// that samples only the tick cannot tell a running pass — a write-back
+    /// render is several authority reads plus disk — from an idle loop, and
+    /// reads a half-written vault.
     in_pass: std::sync::atomic::AtomicUsize,
     /// A debounced bulk re-render is armed and its 50ms tick has not fired.
     bulk_pending: std::sync::atomic::AtomicBool,
@@ -355,10 +354,15 @@ pub struct OrgSyncIdleSignal {
     /// shutdown must name what it would leave unwritten.
     queued_renders: Arc<QueuedRenders>,
     writeback_net: holon_net_shell::Shell,
+    /// The block feed's delivery cursor: the write-back fold applies a CDC
+    /// batch once every render it implies is queued.
+    writeback_feed: Arc<holon_api::live_data::DeliveryCursor>,
     /// Requests to the watch loop to drop its ingest writer. Set once, at
     /// wiring; unset in a container whose loop is never built.
     backlog_seal: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<BacklogSealRequest>>,
 }
+
+const FOLD_RUNNING: &str = "the home_by fold is running";
 
 /// Answered by the watch loop once its ingest writer is dropped.
 type BacklogSealRequest = tokio::sync::oneshot::Sender<()>;
@@ -422,6 +426,7 @@ impl OrgSyncIdleSignal {
             writeback_fold: std::sync::OnceLock::new(),
             backlog_seal: std::sync::OnceLock::new(),
             queued_renders: Arc::new(QueuedRenders::default()),
+            writeback_feed: Arc::default(),
             writeback_net: holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
                 .expect("the write-back net loads"),
         })
@@ -429,6 +434,16 @@ impl OrgSyncIdleSignal {
 
     pub fn queued_renders(&self) -> &QueuedRenders {
         &self.queued_renders
+    }
+
+    /// The block feed's cursor for the write-back consumer.
+    pub fn writeback_feed(&self) -> &Arc<holon_api::live_data::DeliveryCursor> {
+        &self.writeback_feed
+    }
+
+    /// Resolves at the next pass end or loop progress.
+    pub fn progressed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
     }
 
     /// The per-file write-back net the controller drives.
@@ -455,6 +470,15 @@ impl OrgSyncIdleSignal {
         )
     }
 
+    /// [`Self::writeback_stop_waits_for`] for a caller that waits for the
+    /// [`Self::writeback_feed`] to apply through a sequence instead: those
+    /// applies come after the fold handed over every render they imply.
+    pub fn writeback_owes_handed_over(&self) -> Vec<&'static str> {
+        let mut busy = self.writeback_stop_waits_for();
+        busy.retain(|b| *b != FOLD_RUNNING);
+        busy
+    }
+
     fn writeback_busy(&self, behind: Vec<String>) -> Vec<&'static str> {
         let mut busy = Vec::new();
         if self.in_pass.load(std::sync::atomic::Ordering::Acquire) > 0 {
@@ -464,7 +488,7 @@ impl OrgSyncIdleSignal {
             busy.push("a bulk re-render is owed");
         }
         if self.writeback_fold_in_flight() {
-            busy.push("the home_by fold is running");
+            busy.push(FOLD_RUNNING);
         }
         if !self.queued_renders.documents().is_empty() {
             busy.push("document re-renders are queued");
@@ -607,6 +631,7 @@ impl Drop for PassGuard {
         self.0
             .in_pass
             .fetch_sub(1, std::sync::atomic::Ordering::Release);
+        self.0.notify.notify_waiters();
     }
 }
 
@@ -888,6 +913,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
     let idle_signal = OrgSyncIdleSignal::new();
     let idle_signal_for_factory = idle_signal.clone();
     injector.provide::<OrgSyncIdleSignal>(Provider::root(move |_| idle_signal_for_factory.clone()));
+    let writeback_feed = idle_signal.writeback_feed().clone();
+    injector.provide::<holon_api::live_data::BlockFeedConsumer>(Provider::root(move |_| {
+        Shared::new(holon_api::live_data::BlockFeedConsumer(
+            writeback_feed.clone(),
+        ))
+    }));
     let idle_signal_for_loop = idle_signal;
 
     // Register OrgRenderer
@@ -1146,11 +1177,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     );
 
                     let writeback_cancel = shutdown.token();
+                    let idle_signal_for_feed = idle_signal.clone();
                     spawn_writeback_task(
                         &shutdown,
                         "org-writeback-consumer",
                         writeback_disclosure.clone(),
                         async move {
+                            use holon_api::live_data::home_by::Homed;
                             use holon_api::live_data::home_by::HomedDiff;
                             use holon_api::live_data::supervision::Supervised;
 
@@ -1180,6 +1213,15 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                 // span: this task is spawned at container
                                 // construction, so its span is the process
                                 // boot.
+                                let item = match item {
+                                    Supervised::Diff(Homed::Through(seq)) => {
+                                        // Everything before it is queued.
+                                        idle_signal_for_feed.writeback_feed().applied_through(seq);
+                                        continue;
+                                    }
+                                    Supervised::Diff(Homed::Diff(diff)) => Supervised::Diff(diff),
+                                    Supervised::Reset => Supervised::Reset,
+                                };
                                 let origins = match &item {
                                     Supervised::Diff(HomedDiff::Upsert { key, .. })
                                     | Supervised::Diff(HomedDiff::Remove { key, .. }) => {
@@ -2296,9 +2338,8 @@ async fn run_file_sync_controller(
                 // first lets `on_block_changed_coalesced` spend one render per
                 // DOCUMENT. Pure latency win — nothing waits for a timer, and a
                 // lone message drains to a batch of one.
-                // Held for the whole pass, not just bumped at the end: the
-                // renders below are several authority reads plus disk, which
-                // outlasts a settle's quiet floor.
+                // Held for the whole pass, not just bumped at the end: a
+                // waiter must see the pass busy through its renders.
                 let _pass = idle_signal_for_task.enter_pass();
                 let mut drained = vec![first];
                 while let Ok(next) = rerender_rx.try_recv() {

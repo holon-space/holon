@@ -200,16 +200,36 @@ impl DeliveryLedger {
     pub fn complete_through(&self) -> Seq {
         self.views
             .iter()
-            .filter_map(|(key, view)| match view.applied {
-                None => Some(view.published.unwrap_or_else(|| {
-                    panic!("{key:?} applied nothing and the UI published no seq for it")
-                })),
-                Some(applied) if applied < view.sent || view.unresolved_failure().is_some() => {
-                    Some(applied)
-                }
-                Some(_) => None,
-            })
+            .filter_map(|(key, view)| view.holds_at(key))
             .fold(self.routed_through(), Seq::min)
+    }
+
+    /// The highest seq through which the one view `key` shows every routed
+    /// batch.
+    pub fn complete_through_view(&self, key: &ViewKey) -> Seq {
+        let view = self
+            .views
+            .get(key)
+            .unwrap_or_else(|| panic!("{key:?} was never fed"));
+        view.holds_at(key).map_or(self.routed_through(), |held| {
+            held.min(self.routed_through())
+        })
+    }
+}
+
+impl View {
+    /// Where the view holds completeness, `None` when it shows everything it
+    /// was sent.
+    fn holds_at(&self, key: &ViewKey) -> Option<Seq> {
+        match self.applied {
+            None => Some(self.published.unwrap_or_else(|| {
+                panic!("{key:?} applied nothing and the UI published no seq for it")
+            })),
+            Some(applied) if applied < self.sent || self.unresolved_failure().is_some() => {
+                Some(applied)
+            }
+            Some(_) => None,
+        }
     }
 }
 

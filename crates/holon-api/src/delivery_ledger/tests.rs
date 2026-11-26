@@ -263,12 +263,18 @@ impl Model {
     fn floor(&self) -> Option<Seq> {
         self.live_views()
             .into_iter()
-            .filter_map(|(_, v)| match v.applied {
-                None => Some(v.published),
-                Some(a) if a < v.sent || Self::unresolved(&v).is_some() => Some(Some(a)),
-                Some(_) => None,
-            })
+            .filter_map(|(_, v)| Self::held(&v))
             .try_fold(self.routed_through(), |floor, held| Some(floor.min(held?)))
+    }
+
+    /// Where one view holds the floor; `Some(None)` when it applied nothing
+    /// and nothing was published for it.
+    fn held(v: &ModelView) -> Option<Option<Seq>> {
+        match v.applied {
+            None => Some(v.published),
+            Some(a) if a < v.sent || Self::unresolved(v).is_some() => Some(Some(a)),
+            Some(_) => None,
+        }
     }
 }
 
@@ -363,6 +369,12 @@ proptest! {
             prop_assert_eq!(floor, model.floor());
 
             for (key, v) in model.live_views() {
+                let view_floor = std::panic::catch_unwind(|| ledger.complete_through_view(&key)).ok();
+                let expected = match Model::held(&v) {
+                    None => Some(model.routed_through()),
+                    Some(held) => held.map(|h| h.min(model.routed_through())),
+                };
+                prop_assert_eq!(view_floor, expected, "{:?}: the one view's floor", key);
                 if let (Some(applied), Some(floor)) = (v.applied.filter(|a| *a < v.sent), floor) {
                     prop_assert!(floor <= applied, "{key:?} lags at {applied:?}, floor {floor:?}");
                 }
