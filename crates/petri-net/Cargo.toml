@@ -1,0 +1,16 @@
+[package]
+name = "petri-net"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "A coloured Petri-net kernel: keyed places with disciplines, level-semantics settle, footprints."
+
+[features]
+testkit = ["dep:proptest"]
+
+[dependencies]
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+petri-net = { path = ".", features = ["testkit"] }
+proptest.workspace = true

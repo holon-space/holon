@@ -51,6 +51,7 @@ members = [
   "crates/holon-sharing",
   "crates/holon-views",
   "crates/holon-architecture-tests",
+  "crates/petri-net",
   "frontends/tui",
   "frontends/mcp",
   "frontends/gpui",

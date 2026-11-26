@@ -10133,6 +10133,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "petri-net"
+version = "0.1.0"
+dependencies = [
+ "petri-net",
+ "proptest 1.11.0",
+]
+
+[[package]]
 name = "pharos"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

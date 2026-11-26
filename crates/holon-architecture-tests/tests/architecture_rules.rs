@@ -95,6 +95,35 @@ fn holon_frontend_does_not_depend_on_holon_loro() {
     );
 }
 
+/// `petri-net` is a kernel publishable alone: no Holon crate and no
+/// `workspace-hack` in any of its dependency tables. Checked at the manifest
+/// for the same reason as the rule above.
+#[test]
+fn petri_net_depends_on_no_holon_crate() {
+    let manifest = repo_root().join("crates/petri-net/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+
+    let offenders: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| {
+            ["holon", "workspace-hack"].iter().any(|name| {
+                line.starts_with(name)
+                    || line.contains(&format!("dep:{name}"))
+                    || line.contains(&format!(r#"package = "{name}"#))
+            })
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "crates/petri-net/Cargo.toml declares a Holon or workspace-hack dependency: {offenders:?}.\n\
+         petri-net is the L0 kernel of docs/Architecture/PetriNetLayers.md and must build alone."
+    );
+}
+
 const LATENCY_TARGET_MARKER: &str = r#"target: "holon_latency""#;
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
