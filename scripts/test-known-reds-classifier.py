@@ -6,6 +6,7 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
 - P1: the classifier's verdict, with the tests its NOTE line names and the
   location of each signature it prints, equals the model's, on the clean and
   the interleaved rendering of each draw;
+  a TIMEOUT counts as collateral of a row only when all panics of its own test match that one row;
 - P2: LC_ALL, TMPDIR and the working directory do not change the output;
 - P3: interleaving never moves a printed panic out of the output, except under
   the message a cut location leaves it;
@@ -71,9 +72,22 @@ def check(work, text, want, label):
         failures.append(f"P1 {label}: classifier {show(got)}\n   model {show(want)}")
     env = dict(os.environ, LC_ALL="en_US.UTF-8", TMPDIR=str(work / "tmp"))
     (work / "tmp").mkdir(exist_ok=True)
-    if classify(log, env=env, cwd=work)[1] != classify(log)[1]:
+    out = classify(log)[1]
+    if classify(log, env=env, cwd=work)[1] != out:
         failures.append(f"P2 {label}: LC_ALL / TMPDIR / cwd changed the output")
+    if len(re.findall(r"^PRIMARY: ", out, re.M)) > 1:
+        failures.append(f"P7 {label}: more than one PRIMARY line:\n{out}")
     return failures, got
+
+
+def one_primary_examples():
+    """Static examples of P7: a timed-out test attributed to a row right after the first printed signature."""
+    cycle = (logs.CYCLE_SITE, logs.CYCLE_MSG)
+    unit = logs.STABLE_ID_UNIT
+    def rendered(*runs):
+        return logs.render([logs.Run(shape, unit[0], [logs.Test(unit[1], status, False, [logs.Panic("known", unit[1], *pm) for pm in ps])]) for shape, status, ps in runs],
+                           random.Random(0), interleave=False)
+    return [rendered(("serial", "TIMEOUT", [cycle])), rendered(("captured", "TIMEOUT", []), ("captured", "TIMEOUT", [cycle] * 3))]
 
 
 def report(text, failures):
@@ -97,6 +111,8 @@ def kinds(runs, clean, mixed):
         r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
     k["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
     for what, n in logs.collateral_placements(clean).items():
+        k[what] += n
+    for what, n in logs.timeout_placements(clean).items():
         k[what] += n
     for what in logs.DRAWN:
         k[what] += mixed.drawn[what]
@@ -270,6 +286,11 @@ def main():
         for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng) + path_spelling_location_failures(work, rng) + twin_failures(work, rng, cases):
             failed += 1
             print(failure)
+        for r in one_primary_examples():
+            failures, _ = check(work, r.text, logs.verdict(r), "static")
+            if failures:
+                failed += 1
+                report(r.text, failures)
         print(f"drawn with seed {seed} ({cases} cases)")
 
         def draw():

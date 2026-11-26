@@ -297,7 +297,8 @@ for log in "$@"; do
     # is printed with a fixed message.
     #
     # A failed test whose output holds a panic has that panic as its signature.
-    # Otherwise its status line is the signature, under nextest's long label
+    # A timeout's signature starts with its test instance, so the matching pass
+    # can read it beside that instance's panics. Otherwise its status line is the signature, under nextest's long label
     # (`TMT` reads as `TIMEOUT`), followed by the first `Error: ` line of its
     # output when it returned one, so two root causes stay two signatures.
     # Labels are nextest-runner's reporter/displayer/imp.rs `status_str` /
@@ -512,8 +513,8 @@ for log in "$@"; do
             head = head substr(line, RSTART)
             return head ~ /:[0-9]+:[0-9]+:$/ ? substr(head, 1, length(head) - 1) : ""
         }
-        function emit(sig) {
-            if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
+        function emit(sig, inst) {
+            if (!((inst SUBSEP sig) in killed)) { killed[inst SUBSEP sig] = 1; print (inst != "" ? inst "\035" : "") "nextest\t" sig }
         }
         BEGIN {
             split("|ok|FAILED", glued, "|"); no_message = "(no message line: another panic head follows)"
@@ -591,7 +592,8 @@ for log in "$@"; do
             if (LABEL ~ /^SETUP /) { emit(FAIL_LABEL ": " UNIT); next }
             if ((inst in passed) && !(inst in flaky_failed)) next
             if (LABEL ~ /^TRY [0-9]+ / && try_of(LABEL) != last_try[inst]) next
-            if (FAIL_LABEL !~ /^(FAIL|FAIL \+ LEAK|FLKY-FL)$/) emit(FAIL_LABEL ": " UNIT)
+            if (FAIL_LABEL == "TIMEOUT") emit(FAIL_LABEL ": " UNIT, inst)
+            else if (FAIL_LABEL !~ /^(FAIL|FAIL \+ LEAK|FLKY-FL)$/) emit(FAIL_LABEL ": " UNIT)
             else if (!has_real_panic(inst)) emit(FAIL_LABEL ": " UNIT ((inst in error_of) ? ": " error_of[inst] : ""))
             next
         }
@@ -848,6 +850,14 @@ for log in "$@"; do
         function fork_wrapper(norm, loc) {
             return (norm ~ "^Test failed normally in child process\\.$" && loc ~ "/proptest-[0-9.]+/src/test_runner/runner\\.rs:[0-9]+:[0-9]+$") || norm == "failed in other process"
         }
+        # The row a timed-out instance is attributed to, or 0: a timeout re-reports
+        # the panics of its test, so it belongs to a row only when every panic of its
+        # instance is known and they all name that one row.
+        function timeout_row(inst,    i) {
+            if (inst == "" || (inst in unclean) || inst_rows[inst] != 1) return 0
+            for (i = 1; i <= nrows; i++) if ((inst SUBSEP i) in inst_hit) return i
+            return 0
+        }
         # Splits a signature line into INST, LOC and SIG.
         function read_sig(line,    d, tab) {
             d = index(line, "\035")
@@ -873,14 +883,17 @@ for log in "$@"; do
         # of its signatures (other than a fixed-rule collateral) is unknown.
         sig_pass == 1 {
             read_sig($0)
-            if (INST == "" || LOC == "note") next
+            if (INST == "" || LOC == "note" || LOC == "nextest") next
             sub(/^\t+/, "", SIG); sub(/\t+$/, "", SIG)
             if (index(SIG, "\037")) { unclean[INST] = 1; next }
             if (index(SIG, "Any { .. }") || LOC ~ /tracing-subscriber-.*sharded\.rs/) next
             if (fork_wrapper(normalize(SIG), LOC)) next
             match_rows(normalize(SIG), LOC, INST)
             if (cross_hit || novel_pieces != "") { unknown_of[INST] = unknown_of[INST] LOC "\t" normalize(SIG) "\n" }
-            for (h = 1; h <= nhits; h++) { inst_hit[INST, HIT[h]] = 1; inst_known[INST] = 1 }
+            for (h = 1; h <= nhits; h++) {
+                if (!((INST, HIT[h]) in inst_hit)) inst_rows[INST]++
+                inst_hit[INST, HIT[h]] = 1; inst_known[INST] = 1
+            }
             next
         }
         # An instance is clean when each of its unknown signatures is a collateral
@@ -908,7 +921,19 @@ for log in "$@"; do
                 green_declared++
                 next
             }
-            line_no++
+            timeout_of = 0
+            if (LOC == "nextest" && INST != "" && index(SIG, "TIMEOUT: ") == 1) {
+                if ((timeout_of = timeout_row(INST))) {
+                    replay_case = ""
+                    match_rows(normalize(sig), loc, INST)
+                    if (nhits || cross_hit) timeout_of = 0
+                }
+                if (!timeout_of) {
+                    if (SIG in timeout_novel) next
+                    timeout_novel[SIG] = 1
+                }
+            }
+            if (!timeout_of) line_no++
             replay_case = ""; declared_row = ""
             first = index(sig, "\037")
             if (first) {
@@ -925,6 +950,9 @@ for log in "$@"; do
                 class = "replay-report"
             } else if (index(sig, "Any { .. }") || loc ~ /tracing-subscriber-.*sharded\.rs/) {
                 class = "collateral"
+                collateral++
+            } else if (timeout_of) {
+                class = "collateral:timeout:" key[timeout_of]
                 collateral++
             } else if (replay_case == "" && (crow = collateral_row(INST, norm, loc))) {
                 class = "collateral:" key[crow]
@@ -968,7 +996,7 @@ for log in "$@"; do
                 }
             }
             entry = "[" class "] " ENVIRON["LOG_BASE"] " @ " loc (replay_case != "" ? " case \"" replay_case "\"" : "") ": " substr(norm, 1, 240)
-            if (line_no == 1) print "PRIMARY: " entry
+            if (line_no == 1 && !timeout_of) print "PRIMARY: " entry
             else tail[++ntail] = entry
         }
         END {

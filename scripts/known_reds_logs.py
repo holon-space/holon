@@ -189,6 +189,23 @@ def foreign_thread(rng, name):
     return rng.choice([WORKER, f"{name}{sep}w", f"w{sep}{name}"])
 
 
+def draw_shrink(rng, used, name):
+    """The panics of a test that timed out while proptest shrank one failure: the same panic again and again, and
+    sometimes a second row's, a novel one or the row's collateral beside them."""
+    first = draw_panic(rng, used, name)
+    while first.kind not in ("known", "row"):
+        first = draw_panic(rng, used, name)
+    panics = [Panic(first.kind, name, first.site, first.msg) for _ in range(rng.randint(1, 4))]
+    if rng.random() < 0.3:
+        other = Panic("row" if first.kind == "known" else "known", name, *((ROW_SITE, ROW_MSG) if first.kind == "known" else (KNOWN_SITE, KNOWN_MSG)))
+        panics.insert(rng.randrange(len(panics) + 1), other)
+    if rng.random() < 0.2:
+        panics.insert(rng.randrange(len(panics) + 1), draw_panic(rng, used, name) if rng.random() < 0.5 else Panic("novel", name, f"crates/{word(rng, used)}/tests/{word(rng, used)}.rs:1:1", "novel defect " + word(rng, used)))
+    if first.kind == "row" and rng.random() < 0.5:
+        panics.insert(rng.randrange(len(panics) + 1), Panic("collateral", rng.choice([name, WORKER]), *rng.choice(COLLATERAL)))
+    return panics
+
+
 def draw_test(rng, used, shape, name=None):
     name = name or f"{word(rng, used)}::case_{word(rng, used)}"
     should_panic = rng.random() < 0.5
@@ -207,6 +224,8 @@ def draw_test(rng, used, shape, name=None):
     if any(p.kind == "row" for p in panics) and rng.random() < 0.6:
         for _ in range(rng.choice([1, 2])):
             panics.insert(rng.randrange(len(panics) + 1), Panic("collateral", rng.choice([name, WORKER]), *rng.choice(COLLATERAL)))
+    if status in ("TMT", "TIMEOUT") and rng.random() < 0.7:
+        panics = draw_shrink(rng, used, name)
     # shortcut: a libtest test fails here only by a novel panic of its own; a failure
     # without one reads as "no signature", which a printed known red masks. Draw it once the classifier attributes libtest failures.
     if status == "FAILED" and not any(p.kind == "novel" and p.thread == name for p in panics):
@@ -569,6 +588,19 @@ def render(runs, rng, interleave):
     return out
 
 
+def timeout_row(inst, proven):
+    """The row a timed-out test's panics are attributed to, or None.
+
+    `proven` is (scope, panic, demoted) of every printed panic whose owner the text proves. The timeout is
+    attributed when the panics of `inst` name exactly one row and no novel panic or undemoted collateral panic
+    stands beside them; with no panic of its own the timeout stays novel.
+    """
+    own = [(p, d) for scope, p, d in proven if scope == inst and p.kind != "injected"]
+    rows = {p.kind for p, _ in own if p.kind in ("known", "row")}
+    clean = all(p.kind in ("known", "row") or p.kind == "collateral" and d for p, d in own)
+    return rows.pop() if len(rows) == 1 and clean else None
+
+
 def verdict(r):
     """The classifier's verdict on `r`, from the owners and names its text states.
 
@@ -578,7 +610,7 @@ def verdict(r):
     libtest run that completed. Every other panic is printed, except an
     injected one. A failing status is a signature
     unless its label is FAIL / FAIL + LEAK and its owner printed a panic or an
-    injected one.
+    injected one, or TIMEOUT and `timeout_row` attributes it.
 
     A collateral panic is collateral, not novel, only when the text proves its
     owner and that test instance printed a row panic and no novel one.
@@ -597,11 +629,15 @@ def verdict(r):
     note = len(r.panics) - len(kept)
     listed = Counter(p.msg for (_, p, _), d in zip(kept, demoted) if p.kind == "novel" or p.kind == "collateral" and not d)
     matched = sum(p.kind in ("known", "row") for _, p, _ in kept)
+    kept_flags = kept
     kept = [(scope, p) for scope, p, _ in kept]
     sites = Counter(p.site for _, p in kept if p.kind != "injected")
     owners = {scope for scope, _ in kept}
     for inst, label in r.statuses:
         long = FAIL_LABELS.get(label)
+        if long == "TIMEOUT" and timeout_row(inst, [(scope, p, d) for (scope, p, proven), d in zip(kept_flags, demoted) if proven]):
+            sites["nextest"] += 1
+            continue
         if long and not (long in ("FAIL", "FAIL + LEAK") and inst in owners) and f"{long}: {inst[2]}" not in listed:
             listed[f"{long}: {inst[2]}"] = 1
             sites["nextest"] += 1
@@ -634,6 +670,33 @@ def collateral_placements(r):
             k[PLACEMENTS[1]] += 1
         else:
             k[PLACEMENTS[2] if scope in novel else PLACEMENTS[0]] += 1
+    return k
+
+
+TIMEOUT_CASES = [
+    "a timed-out test whose proven panics name one row",
+    "a timed-out test whose proven panics name two rows",
+    "a timed-out test with a novel panic beside a row's",
+    "a timed-out test without a proven panic",
+]
+
+
+def timeout_placements(r):
+    """How often each of TIMEOUT_CASES stands in `r`, which the attribution rule tells apart."""
+    k = Counter(dict.fromkeys(TIMEOUT_CASES, 0))
+    for inst, label in r.statuses:
+        if FAIL_LABELS.get(label) != "TIMEOUT":
+            continue
+        own = [p for i, (scope, _, p) in enumerate(r.panics) if scope == inst and i in r.proven and p.kind != "injected"]
+        rows = {p.kind for p in own if p.kind in ("known", "row")}
+        if not own:
+            k[TIMEOUT_CASES[3]] += 1
+        elif any(p.kind == "novel" for p in own) and rows:
+            k[TIMEOUT_CASES[2]] += 1
+        elif len(rows) == 2:
+            k[TIMEOUT_CASES[1]] += 1
+        elif len(rows) == 1:
+            k[TIMEOUT_CASES[0]] += 1
     return k
 
 
@@ -1216,6 +1279,46 @@ def job_capture(text, rng):
     return "".join(stamp() + line for line in text.splitlines(keepends=True))
 
 
+CYCLE_SITE = "crates/holon-loro/tests/stable_id_index_pbt.rs:370:22"
+CYCLE_MSG = 'called `Result::unwrap()` on an `Err` value: CyclicMove { id: "block:s4", target_parent: "block:s3" }'
+SHRINK_SITE = "crates/holon-integration-tests/src/pbt/composed/harness.rs:2233:5"
+SHRINK_MSG = (r'reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: '
+              r'[\"block-edited-in-two-files on a subject whose final path component is `block:archive-80`, naming the files [\\\"Archive.org\\\"]\"]. x")]')
+SHRINK_UNIT = ("holon-integration-tests::integration", "general_e2e_composed_pbt::general_e2e_composed_pbt")
+SAMPLE_OK = "[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK\n"
+OWN_ROW_TIMEOUT_UNIT = ("holon-integration-tests::snapshot_boot", "a_template_of_another_key_is_refused")
+STABLE_ID_UNIT = ("holon-loro::stable_id_index_pbt", "stable_id_index_matches_the_full_scan")
+
+
+def timeout_log(unit, panics, *others):
+    """A captured nextest run whose test `unit` (binary, name) timed out after printing `panics` (site, message), beside `others`: (unit, status, panics)."""
+    tests = [(unit, "TIMEOUT", panics), *others]
+    run = Run("captured", unit[0], [Test(n, status, False, [Panic("novel", n, *pm) for pm in ps]) for (_, n), status, ps in ((u, st, ps) for u, st, ps in tests)])
+    return render([run], random.Random(0), interleave=False).text
+
+
+def timeout_examples():
+    cycle, shrink = (CYCLE_SITE, CYCLE_MSG), (SHRINK_SITE, SHRINK_MSG)
+    row, known, novel = (ROW_SITE, ROW_MSG), (KNOWN_SITE, KNOWN_MSG), ("crates/x/tests/y.rs:1:1", "novel defect zzz")
+    pass_note = r"^\[known-reds\] PASS-WITH-NOTE: %d known-red panic[(]s[)], 0 novel, 1 collateral [(]ignored[)][.]$"
+    return [
+        # The shrink of a draw-dependent row timed out after 540 re-panics of it.
+        ("timeout-after-540-panics-of-one-row", timeout_log(STABLE_ID_UNIT, [cycle] * 540), 0, pass_note % 540),
+        ("timeout-of-a-keystone-shrink-on-its-row", timeout_log(SHRINK_UNIT, [shrink] * 4) + SAMPLE_OK, 0, pass_note % 4),
+        ("timeout-without-a-panic", timeout_log(STABLE_ID_UNIT, []), 1, r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 0 known-red"),
+        ("timeout-beside-an-unmatched-panic", timeout_log(STABLE_ID_UNIT, [cycle, novel]), 1, r"^\[known-reds\] FAIL: 2 novel panic[(]s[)], 1 known-red"),
+        ("timeout-beside-panics-of-two-rows", timeout_log(STABLE_ID_UNIT, [cycle, shrink]), 1, r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 2 known-red"),
+        ("timeout-beside-another-tests-row-panic", timeout_log(STABLE_ID_UNIT, [], (SHRINK_UNIT, "FAIL", [shrink])), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 1 known-red"),
+        # A row of its own for the timeout line keeps its verdict; the panics beside it are matched as usual.
+        ("timeout-with-a-row-of-its-own-beside-another-rows-panics",
+         timeout_log(OWN_ROW_TIMEOUT_UNIT, [(ROW_SITE, ROW_MSG)] * 2), 0,
+         r"^\[known-reds\] PASS-WITH-NOTE: 3 known-red panic[(]s[)], 0 novel, 0 collateral [(]ignored[)][.]$"),
+        ("signal-beside-panics-of-one-row", timeout_log(STABLE_ID_UNIT, [cycle] * 3).replace("TIMEOUT", "SIGSEGV"), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 3 known-red"),
+    ]
+
+
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
@@ -1389,7 +1492,7 @@ error: test run failed
             "test a::case_b ... ok", status_line("PASS", 1, 1, "holon-x::main a::case_b"),
             "     Summary [   1.000s] 1 test run: 1 passed, 0 skipped",
         ]) + "\n", 1, r"^ *1 FAIL [+] LEAK: holon-x::main a::case_b$"),
-    ]
+    ] + timeout_examples()
 
 
 TWIN_PATTERN = "^twin defect [a-z ]+$"
