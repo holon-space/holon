@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use holon::api::QueryEngine;
 use holon::api::backend_engine::BackendEngine;
+use holon_api::delivery_ledger::Owed;
 use holon::core::SqlOperationProvider;
 use holon::di::test_helpers::create_test_engine_with_path;
 use holon::storage::BLOCK_WRITE_TABLE;
@@ -489,7 +490,7 @@ impl ApplyGate {
 /// The engine settle: poll what the engine still owes until nothing is owed on
 /// two reads in a row. Returns the reads it took, or the owed stages when
 /// `hang_after` passes first.
-async fn settle(engine: &BackendEngine, hang_after: Duration) -> Result<u32, Vec<String>> {
+async fn settle(engine: &BackendEngine, hang_after: Duration) -> Result<u32, Vec<Owed>> {
     let deadline = tokio::time::Instant::now() + hang_after;
     let mut reads = 0;
     let mut clear_in_a_row = 0;
@@ -773,8 +774,7 @@ fn settle_names_a_mirror_that_never_applies() {
             gate.set(Apply::Open);
             let owed = owed.expect_err("a held mirror must keep the settle owing");
             assert!(
-                owed.iter()
-                    .any(|o| o.starts_with("cdc-applied:") && o.contains("at applied seq")),
+                owed.iter().any(|o| matches!(o, Owed::Applied { .. })),
                 "owed stages name the mirror's stage and applied seq: {owed:?}"
             );
             settle(engine, hang_after)

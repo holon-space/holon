@@ -1493,7 +1493,7 @@ impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
         anyhow::bail!("DeclaresNothingQueryEngine does not watch queries")
     }
 
-    async fn delivery_owed(&self) -> Result<Vec<String>> {
+    async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
         anyhow::bail!("DeclaresNothingQueryEngine does not track delivery")
     }
 

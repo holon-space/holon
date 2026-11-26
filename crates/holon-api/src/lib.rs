@@ -31,6 +31,7 @@ pub mod computed;
 pub mod content_canonical;
 pub mod decision;
 pub mod decision_block;
+pub mod delivery_ledger;
 #[cfg(feature = "test-helpers")]
 pub mod duration_budget;
 pub mod edge_field;

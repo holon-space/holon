@@ -1,5 +1,7 @@
 //! The UI watermark over random schedules of routing, applying, handing on
-//! to a consumer on another executor, and sampling.
+//! to a consumer on another executor, and sampling. Some subscriptions are
+//! served by an eager re-query: it reads every change off the CDC broadcast
+//! itself, so it routes on its own, and its re-query can fail.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -8,8 +10,12 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
+use holon_api::delivery_ledger::DeliveryLedger;
+use holon_api::delivery_ledger::Owed;
+use holon_api::delivery_ledger::Seq;
 use holon_api::live_data::DeliveryCursor;
 use holon_api::live_data::OwedChild;
+use holon_api::live_data::Routers;
 use holon_api::live_data::reporting_cursor;
 use holon_api::live_data::reporting_to;
 use holon_frontend::render_epoch::EngineSeq;
@@ -19,9 +25,13 @@ use holon_frontend::render_epoch::UiWatermark;
 use holon_frontend::render_epoch::hand_off;
 use proptest::prelude::*;
 
-/// An engine that routes every change it emits at once.
+/// An engine whose demux routes every change it emits at once; an eager
+/// re-query routes through its own router.
 #[derive(Default)]
-struct RoutedEngine(AtomicU64);
+struct RoutedEngine {
+    emitted: AtomicU64,
+    routers: Routers,
+}
 
 #[async_trait::async_trait]
 impl holon_api::QueryEngine for RoutedEngine {
@@ -40,16 +50,19 @@ impl holon_api::QueryEngine for RoutedEngine {
         anyhow::bail!("RoutedEngine does not watch queries")
     }
 
-    async fn delivery_owed(&self) -> Result<Vec<String>> {
+    async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
         anyhow::bail!("RoutedEngine does not track delivery")
     }
 
     fn routed_through(&self) -> Result<u64> {
-        Ok(self.0.load(Ordering::Acquire))
+        let mut ledger = DeliveryLedger::default();
+        ledger.emitted(Seq(self.emitted.load(Ordering::Acquire)));
+        self.routers.feed(&mut ledger);
+        Ok(ledger.routed_through().0)
     }
 
     fn emitted_through(&self) -> Result<u64> {
-        Ok(self.0.load(Ordering::Acquire))
+        Ok(self.emitted.load(Ordering::Acquire))
     }
 
     fn operations_in_flight(&self) -> usize {
@@ -87,7 +100,14 @@ enum Event {
     End(usize, proptest::sample::Index),
     /// The relay samples the watermark and publishes it.
     Publish,
+    /// Eager subscription `k` reads every change emitted so far off the
+    /// broadcast and routes it to its cursor; with nothing new it does nothing.
+    EagerReceive(usize),
+    /// Like `EagerReceive`, then its re-query fails with cause `c`.
+    EagerFail(usize, usize),
 }
+
+const CAUSES: [&str; 2] = ["no such table: block", "database is locked"];
 
 fn event(subscriptions: usize) -> impl Strategy<Value = Event> {
     prop_oneof![
@@ -101,6 +121,8 @@ fn event(subscriptions: usize) -> impl Strategy<Value = Event> {
         (0..subscriptions).prop_map(Event::Child),
         (0..subscriptions, any::<proptest::sample::Index>()).prop_map(|(k, i)| Event::End(k, i)),
         Just(Event::Publish),
+        (0..subscriptions).prop_map(Event::EagerReceive),
+        (0..subscriptions, 0..CAUSES.len()).prop_map(|(k, c)| Event::EagerFail(k, c)),
     ]
 }
 
@@ -110,8 +132,15 @@ struct Child {
     routed: Vec<u64>,
 }
 
-fn schedule() -> impl Strategy<Value = (usize, Vec<Event>)> {
-    (1usize..4).prop_flat_map(|n| (Just(n), proptest::collection::vec(event(n), 0..40)))
+/// `n` subscriptions, the last `eager` of them served by an eager re-query.
+fn schedule() -> impl Strategy<Value = (usize, usize, Vec<Event>)> {
+    (1usize..5).prop_flat_map(|n| {
+        (
+            Just(n),
+            0..=n.min(2),
+            proptest::collection::vec(event(n), 0..40),
+        )
+    })
 }
 
 /// The consumer side of one subscription: a GPUI bridge, say.
@@ -153,13 +182,22 @@ proptest! {
     /// consumer has not shown, and every publish is monotonic. Once every
     /// subscription applied what its live cursors were routed and every
     /// consumer showed it, nothing is owed: an ended child holds no one.
+    ///
+    /// An eager subscription owes every emitted change, routed or not; after
+    /// a failed re-query it is owed by name with the cause until it applies
+    /// again.
     #[test]
-    fn the_published_watermark_never_runs_ahead_of_a_view((n, events) in schedule()) {
+    fn the_published_watermark_never_runs_ahead_of_a_view((n, eager, events) in schedule()) {
         let engine = Arc::new(RoutedEngine::default());
         let watermark = UiWatermark::new(Some(engine.clone()));
         let subscriptions: Vec<UiSubscription> =
             (0..n).map(|k| watermark.register(format!("view-{k}"))).collect();
         subscriptions.iter().for_each(take_cursor);
+        let is_eager = |k: usize| k >= n - eager;
+        let routers: Vec<Option<Arc<AtomicU64>>> = (0..n)
+            .map(|k| is_eager(k).then(|| engine.routers.add(0)))
+            .collect();
+        let mut failed: Vec<Option<(u64, &str)>> = vec![None; n];
         let (senders, mut consumers): (Vec<_>, Vec<_>) = (0..n)
             .map(|k| {
                 let (sender, receiver) = mpsc::unbounded();
@@ -183,29 +221,43 @@ proptest! {
                 Event::Route(k, child) => {
                     seq += 1;
                     for (j, subscription) in subscriptions.iter().enumerate() {
-                        if j != k {
+                        if j != k && !is_eager(j) {
                             subscription.cursor().skipped(seq);
                         }
                     }
-                    match child.filter(|_| !children[k].is_empty()) {
+                    match child.filter(|_| !children[k].is_empty() && !is_eager(k)) {
                         Some(i) => {
                             let len = children[k].len();
                             let child = &mut children[k][i.index(len)];
                             child.cursor.cursor().routed(seq);
                             child.routed.push(seq);
                         }
+                        None if is_eager(k) => {}
                         None => {
                             subscriptions[k].cursor().routed(seq);
                             routed_to[k].push(seq);
                         }
                     }
-                    engine.0.store(seq, Ordering::Release);
+                    engine.emitted.store(seq, Ordering::Release);
+                }
+                Event::EagerReceive(k) | Event::EagerFail(k, _) => {
+                    let Some(router) = routers[k].as_ref().filter(|r| r.load(Ordering::Acquire) < seq) else {
+                        continue;
+                    };
+                    subscriptions[k].cursor().routed(seq);
+                    router.fetch_max(seq, Ordering::Release);
+                    routed_to[k].push(seq);
+                    if let Event::EagerFail(_, c) = event {
+                        subscriptions[k].cursor().requery_failed(CAUSES[c].to_string());
+                        failed[k] = Some((seq, CAUSES[c]));
+                    }
                 }
                 Event::Apply(k) => {
                     let through = subscriptions[k].cursor().sent_with_children();
                     senders[k].unbounded_send(through).expect("the consumer lives");
                     subscriptions[k].applied(through);
                     shown[k] = through;
+                    failed[k] = None;
                 }
                 Event::Consume(k) => {
                     let _ = consumers[k].consume();
@@ -230,6 +282,13 @@ proptest! {
                     watermark.publish(sample);
                     let EngineSeq(published) = watermark.current();
                     prop_assert!(watermark.current() >= before);
+                    for k in (0..n).filter(|k| is_eager(*k)) {
+                        prop_assert!(
+                            published <= consumers[k].shown,
+                            "published {published}, but eager consumer-{k} shows through {}",
+                            consumers[k].shown
+                        );
+                    }
                     for k in 0..n {
                         let unshown = routed_to[k]
                             .iter()
@@ -242,6 +301,17 @@ proptest! {
                         );
                     }
                 }
+            }
+            let owed = watermark.owed_deliveries();
+            for (k, failure) in failed.iter().enumerate() {
+                let Some((at, cause)) = failure else {
+                    continue;
+                };
+                let named = owed.iter().any(|o| {
+                    matches!(o, Owed::RequeryFailed { view, at: owed_at, cause: owed_cause, .. }
+                        if *view == format!("view-{k}") && *owed_at == Seq(*at) && owed_cause == cause)
+                });
+                prop_assert!(named, "view-{k} failed its re-query with {cause:?}, owed {owed:?}");
             }
         }
         for (k, subscription) in subscriptions.iter().enumerate() {
@@ -256,6 +326,7 @@ proptest! {
             subscription.applied(through);
             while consumers[k].consume().is_ready() {}
         }
+        prop_assert_eq!(watermark.owed_deliveries(), Vec::<Owed>::new());
         prop_assert_eq!(watermark.owed(), Vec::<String>::new());
     }
 

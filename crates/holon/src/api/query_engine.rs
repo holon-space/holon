@@ -388,7 +388,7 @@ impl QueryEngine for BackendEngine {
     }
 
     fn routed_through(&self) -> Result<u64> {
-        Ok(self.matview_manager().settled_up_to().routed_through)
+        Ok(self.matview_manager().delivery_ledger().routed_through().0)
     }
 
     fn emitted_through(&self) -> Result<u64> {
@@ -400,35 +400,33 @@ impl QueryEngine for BackendEngine {
         census.released + census.waiting
     }
 
-    async fn delivery_owed(&self) -> Result<Vec<String>> {
-        let emitted = self.db_handle().cdc_emitted_watermark();
-        let settled = self.matview_manager().settled_up_to();
-        let mut owed = Vec::new();
-        if settled.routed_through < emitted {
-            owed.push(format!(
-                "cdc-routed: target emitted seq {emitted}, at routed seq {}",
-                settled.routed_through
-            ));
+    async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
+        let before = self.matview_manager().differential_old_owed();
+        let mut ledger = self.matview_manager().delivery_ledger();
+        let after = self.matview_manager().differential_old_owed();
+        if before == after {
+            let mut new_lagging: Vec<(String, u64)> = ledger
+                .owed()
+                .into_iter()
+                .filter_map(|o| match o {
+                    holon_api::delivery_ledger::Owed::Applied { view, applied, .. } => {
+                        Some((view, applied.0))
+                    }
+                    _ => None,
+                })
+                .collect();
+            new_lagging.sort();
+            new_lagging.dedup();
+            assert_eq!(
+                (ledger.routed_through().0, new_lagging),
+                before,
+                "DIFFERENTIAL engine owed: ledger left, old right"
+            );
+            eprintln!("DIFFERENTIAL engine owed agrees");
         }
-        for lag in settled.lagging {
-            owed.push(format!(
-                "cdc-applied: target sent seq {} to view {}, at applied seq {}",
-                lag.sent, lag.view_name, lag.applied
-            ));
-        }
-        let releases = self.watch_releases_in_flight();
-        if releases > 0 {
-            owed.push(format!(
-                "watch-release: target 0 in flight, at {releases} in flight"
-            ));
-        }
-        let registrations = self.watch_registrations_in_flight();
-        if registrations > 0 {
-            owed.push(format!(
-                "watch-register: target 0 in flight, at {registrations} in flight"
-            ));
-        }
-        Ok(owed)
+        ledger.watch_releases_began(self.watch_releases_in_flight());
+        ledger.watch_registrations_began(self.watch_registrations_in_flight());
+        Ok(ledger.owed())
     }
 }
 

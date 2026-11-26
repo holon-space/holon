@@ -5,6 +5,7 @@
 //! `BackendEngine::preload_views`, `BackendEngine::watch_query`, and
 //! `WatchedQuery::new`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
@@ -18,6 +19,9 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::BatchWithMetadata;
 use holon_api::Value;
+use holon_api::delivery_ledger::DeliveryLedger;
+use holon_api::delivery_ledger::Seq;
+use holon_api::delivery_ledger::ViewKey;
 use holon_api::live_data::DeliveryCursor;
 use holon_core::storage::Resource;
 use holon_core::storage::StorageEntity;
@@ -673,7 +677,7 @@ struct SharedViewState {
 /// batch, and every subscription's [`DeliveryCursor`].
 #[derive(Default)]
 struct Delivery {
-    routed: Vec<std::sync::Weak<AtomicU64>>,
+    routed: holon_api::live_data::Routers,
     cursors: Vec<DeliveryEntry>,
 }
 
@@ -684,22 +688,6 @@ struct DeliveryEntry {
     /// although the demux may still hold it.
     stream: mpsc::WeakSender<BatchWithMetadata<RowChange>>,
     reports_applied: bool,
-}
-
-/// What [`MatviewManager::settled_up_to`] found.
-#[derive(Debug)]
-pub struct SettledUpTo {
-    /// Every demux of the database has routed each batch up to this `seq`.
-    pub routed_through: u64,
-    /// Subscriptions whose consumer has not applied every batch routed to it.
-    pub lagging: Vec<LaggingSubscription>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaggingSubscription {
-    pub view_name: String,
-    pub sent: u64,
-    pub applied: u64,
 }
 
 /// Weak handles on the CDC subscriptions of one database, by view. Weak so
@@ -793,17 +781,11 @@ impl MatviewManager {
     /// manager on it; a later manager adopts the one already there, so two
     /// managers can never serialise their DDL against different locks.
     pub fn new(db_handle: DbHandle, ddl_mutex: Arc<tokio::sync::Mutex<()>>) -> Self {
-        let routed = Arc::new(AtomicU64::new(0));
+        let shared = shared_for_database(&db_handle, ddl_mutex);
+        let routed = shared.delivery.lock().expect("delivery mutex").routed.add(0);
         let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone(), routed.clone());
         // The demux sees only batches broadcast after its subscription.
         routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
-        let shared = shared_for_database(&db_handle, ddl_mutex);
-        shared
-            .delivery
-            .lock()
-            .expect("delivery mutex")
-            .routed
-            .push(Arc::downgrade(&routed));
         Self {
             db_handle,
             demux_cmd_tx,
@@ -821,37 +803,65 @@ impl MatviewManager {
         }
     }
 
-    /// How far this database's CDC delivery has settled: what every demux has
-    /// routed, and which reporting subscriptions still owe an apply.
-    pub fn settled_up_to(&self) -> SettledUpTo {
+    /// This database's CDC delivery: the emitted seq, what every router has
+    /// routed, and what each reporting subscription was sent and applied.
+    pub fn delivery_ledger(&self) -> DeliveryLedger {
+        let mut ledger = DeliveryLedger::default();
+        ledger.emitted(Seq(self.db_handle.cdc_emitted_watermark()));
         let mut delivery = self.delivery.lock().expect("delivery mutex");
-        delivery.routed.retain(|r| r.strong_count() > 0);
         delivery
             .cursors
             .retain(|e| e.cursor.strong_count() > 0 && Subscriptions::listening(&e.stream));
-        let routed_through = delivery
-            .routed
-            .iter()
-            .filter_map(|r| r.upgrade())
-            .map(|r| r.load(Ordering::Acquire))
-            .min()
-            .expect("the calling manager's demux is registered while the manager lives");
-        let lagging = delivery
+        assert!(
+            delivery.routed.feed(&mut ledger) > 0,
+            "the calling manager's demux is registered while the manager lives"
+        );
+        let reporting: BTreeMap<ViewKey, Arc<DeliveryCursor>> = delivery
             .cursors
             .iter()
             .filter(|e| e.reports_applied)
-            .filter_map(|e| Some((e, e.cursor.upgrade()?)))
-            .filter(|(_, c)| c.is_lagging())
-            .map(|(e, c)| LaggingSubscription {
-                view_name: e.view_name.clone(),
-                sent: c.sent(),
-                applied: c.applied(),
+            .filter_map(|e| {
+                let cursor = e.cursor.upgrade()?;
+                let key = ViewKey {
+                    name: e.view_name.clone(),
+                    instance: Arc::as_ptr(&cursor) as usize as u64,
+                };
+                Some((key, cursor))
             })
             .collect();
-        SettledUpTo {
-            routed_through,
-            lagging,
+        drop(delivery);
+        for (key, cursor) in reporting {
+            cursor.feed(&mut ledger, key, true);
         }
+        ledger
+    }
+
+    pub fn differential_old_owed(&self) -> (u64, Vec<(String, u64)>) {
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        let mut probe = DeliveryLedger::default();
+        delivery.routed.feed(&mut probe);
+        let routed_through = probe.routed_through().0;
+        let mut lagging: Vec<(String, u64)> = delivery
+            .cursors
+            .iter()
+            .filter(|e| e.reports_applied && Subscriptions::listening(&e.stream))
+            .filter_map(|e| Some((e, e.cursor.upgrade()?)))
+            .filter(|(_, c)| c.is_lagging())
+            .map(|(e, c)| (e.view_name.clone(), c.applied()))
+            .collect();
+        lagging.sort();
+        lagging.dedup();
+        (routed_through, lagging)
+    }
+
+    /// A router that hands every batch emitted from now on to one consumer
+    /// outside the demux; it counts toward the routed seq while it lives.
+    pub fn register_router(&self) -> Arc<AtomicU64> {
+        self.delivery
+            .lock()
+            .expect("delivery mutex")
+            .routed
+            .add(self.db_handle.cdc_emitted_watermark())
     }
 
     /// The last batch `seq` routed to any subscription of `view_name`.

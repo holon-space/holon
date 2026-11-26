@@ -111,7 +111,7 @@ impl holon_api::QueryEngine for SeqEngine {
         anyhow::bail!("SeqEngine does not watch queries")
     }
 
-    async fn delivery_owed(&self) -> Result<Vec<String>> {
+    async fn delivery_owed(&self) -> Result<Vec<holon_api::delivery_ledger::Owed>> {
         anyhow::bail!("SeqEngine does not track delivery")
     }
 

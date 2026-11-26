@@ -14,6 +14,11 @@ use std::task::Wake;
 use std::task::Waker;
 
 use futures::Stream;
+use holon_api::delivery_ledger::DeliveryLedger;
+use holon_api::delivery_ledger::DemuxId;
+use holon_api::delivery_ledger::Owed;
+use holon_api::delivery_ledger::Seq;
+use holon_api::delivery_ledger::ViewKey;
 use holon_api::live_data::DeliveryCursor;
 
 /// A frontend's count of committed frames.
@@ -144,21 +149,47 @@ impl UiWatermark {
             .collect()
     }
 
+    /// The subscriptions' deliveries, with no demux fed.
+    fn ledger(&self) -> DeliveryLedger {
+        let mut ledger = DeliveryLedger::default();
+        let (_, entries) = &*self.subscriptions.lock().unwrap();
+        for (id, entry) in entries {
+            let key = ViewKey {
+                name: entry.key.clone(),
+                instance: *id,
+            };
+            entry.cursor.feed(&mut ledger, key, entry.primed);
+        }
+        ledger
+    }
+
     /// The seq the UI could show now. Reads the routed seq before the
     /// subscriptions, so a batch routed in between is still counted as owed.
     pub fn sample(&self) -> anyhow::Result<EngineSeq> {
         let EngineSeq(routed) = self.routed()?;
         let published = self.published.load(Ordering::Acquire);
-        let floor = {
+        let old_floor = || {
             let (_, entries) = &*self.subscriptions.lock().unwrap();
             entries
                 .values()
                 .map(|entry| match entry.primed {
-                    true => entry.cursor.owed_floor().unwrap_or(u64::MAX),
+                    true => {
+                        let applied = entry.cursor.applied();
+                        if applied < entry.cursor.sent_with_children() { applied } else { u64::MAX }
+                    }
                     false => published,
                 })
                 .fold(routed, u64::min)
         };
+        let before = old_floor();
+        let mut ledger = self.ledger();
+        ledger.routed(DemuxId(0), Seq(routed));
+        let Seq(floor) = ledger.complete_through(Seq(published));
+        let failing = ledger.owed().iter().any(|o| matches!(o, Owed::RequeryFailed { .. }));
+        if !failing && before == old_floor() {
+            assert_eq!(floor, before, "DIFFERENTIAL ui floor: ledger left, old right");
+            eprintln!("DIFFERENTIAL ui floor agrees");
+        }
         // Read after the subscriptions: a subscription hands on before it
         // reports applied, so a hand-off for any seq counted above is seen.
         match self.pending_handoffs().is_empty() {
@@ -201,19 +232,50 @@ impl UiWatermark {
         EngineSeq(self.published.load(Ordering::Acquire))
     }
 
-    /// One line per subscription that holds the watermark: its key and why.
-    pub fn owed(&self) -> Vec<String> {
-        let mut owed: Vec<String> = {
+    /// Every delivery a subscription still owes.
+    pub fn owed_deliveries(&self) -> Vec<Owed> {
+        let old_owed = || {
             let (_, entries) = &*self.subscriptions.lock().unwrap();
-            entries
+            let mut old: Vec<(String, Option<u64>)> = entries
                 .values()
-                .filter_map(|entry| match (entry.primed, entry.cursor.owed_floor()) {
-                    (false, _) => Some(format!("{}: no event applied yet", entry.key)),
-                    (true, Some(floor)) => Some(format!("{}: applied through {floor}", entry.key)),
-                    (true, None) => None,
+                .filter_map(|entry| {
+                    let applied = entry.cursor.applied();
+                    match (entry.primed, applied < entry.cursor.sent_with_children()) {
+                        (false, _) => Some((entry.key.clone(), None)),
+                        (true, true) => Some((entry.key.clone(), Some(applied))),
+                        (true, false) => None,
+                    }
                 })
-                .collect()
+                .collect();
+            old.sort();
+            old
         };
+        let before = old_owed();
+        let owed = self.ledger().owed();
+        let mut new: Vec<(String, Option<u64>)> = owed
+            .iter()
+            .filter_map(|o| match o {
+                Owed::NotPrimed { view } => Some((view.clone(), None)),
+                Owed::Applied { view, applied, .. } => Some((view.clone(), Some(applied.0))),
+                _ => None,
+            })
+            .collect();
+        new.sort();
+        let failing = owed.iter().any(|o| matches!(o, Owed::RequeryFailed { .. }));
+        if !failing && before == old_owed() {
+            assert_eq!(new, before, "DIFFERENTIAL ui owed: ledger left, old right");
+            eprintln!("DIFFERENTIAL ui owed agrees");
+        }
+        owed
+    }
+
+    /// One line per delivery, check or hand-off that holds the watermark.
+    pub fn owed(&self) -> Vec<String> {
+        let mut owed: Vec<String> = self
+            .owed_deliveries()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         // Cloned out of the lock: a check takes its consumer's locks.
         let checks: Vec<(String, Pending)> =
             self.checks.lock().unwrap().1.values().cloned().collect();

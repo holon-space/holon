@@ -1865,7 +1865,10 @@ impl HeadlessInputRouter {
                 }
                 anyhow::bail!(
                     "not settled within {SETTLE_HANG_DEADLINE:?}; owed: [{}]",
-                    owed.join("; ")
+                    owed.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 );
             }
             if !owed.is_empty() {

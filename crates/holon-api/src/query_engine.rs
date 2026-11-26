@@ -188,11 +188,11 @@ pub trait QueryEngine: Send + Sync {
     /// `None` when the row hasn't materialised yet.
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
 
-    /// Every CDC delivery this engine still owes, one line per stage:
-    /// `"<stage>: target <target>, at <value>"`. Empty when each change up to
-    /// the emitted watermark is routed and applied, and no watch registration
-    /// or release is in flight. A test driver waits for empty after a gesture.
-    async fn delivery_owed(&self) -> Result<Vec<String>>;
+    /// Every CDC delivery this engine still owes. Empty when each change up
+    /// to the emitted watermark is routed and applied, and no watch
+    /// registration or release is in flight. A test driver waits for empty
+    /// after a gesture.
+    async fn delivery_owed(&self) -> Result<Vec<crate::delivery_ledger::Owed>>;
 
     /// The CDC seq through which every change has been routed to its watchers.
     /// A frontend's paint can reflect no seq above it.

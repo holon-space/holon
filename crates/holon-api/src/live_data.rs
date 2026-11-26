@@ -20,6 +20,10 @@ use futures_signals::signal_map::MutableSignalMap;
 use tokio::sync::Notify;
 
 use crate::Change;
+use crate::delivery_ledger::DeliveryLedger;
+use crate::delivery_ledger::DemuxId;
+use crate::delivery_ledger::Seq;
+use crate::delivery_ledger::ViewKey;
 use crate::StorageEntity;
 use crate::Value;
 
@@ -700,6 +704,9 @@ pub struct DeliveryCursor {
     /// parent's `applied` is the child's.
     parent: Option<Arc<DeliveryCursor>>,
     children: std::sync::Mutex<Vec<std::sync::Weak<DeliveryCursor>>>,
+    /// The seq this cursor was sent when its subscriber's re-query failed,
+    /// and why.
+    requery_failure: std::sync::Mutex<Option<(u64, String)>>,
 }
 
 impl DeliveryCursor {
@@ -744,15 +751,34 @@ impl DeliveryCursor {
         }
     }
 
+    /// Some batch routed to this cursor or a live owed child is not applied.
     pub fn is_lagging(&self) -> bool {
-        self.owed_floor().is_some()
+        self.applied() < self.sent_with_children()
     }
 
-    /// The highest seq through which every batch routed to this cursor and
-    /// its live owed children is applied, while some later batch is not.
-    pub fn owed_floor(&self) -> Option<u64> {
-        let applied = self.applied();
-        (applied < self.sent_with_children()).then_some(applied)
+    /// The subscriber failed to re-query what it was sent so far; it owes
+    /// that until it applies through it.
+    pub fn requery_failed(&self, cause: String) {
+        *self.requery_failure.lock().expect("requery failure mutex") = Some((self.sent(), cause));
+    }
+
+    /// Feeds this cursor to `ledger` as view `key`. Unless `primed`, the view
+    /// has applied nothing yet.
+    pub fn feed(&self, ledger: &mut DeliveryLedger, key: ViewKey, primed: bool) {
+        // Read before `sent`: the failure's seq is never above a later `sent`.
+        let failure = self
+            .requery_failure
+            .lock()
+            .expect("requery failure mutex")
+            .clone();
+        if let Some((at, cause)) = failure {
+            ledger.sent(key.clone(), Seq(at));
+            ledger.requery_failed(key.clone(), cause);
+        }
+        ledger.sent(key.clone(), Seq(self.sent_with_children()));
+        if primed {
+            ledger.applied(key, Seq(self.applied()));
+        }
     }
 
     /// Whether a subscription took this cursor through [`reporting_cursor`],
@@ -785,6 +811,37 @@ impl DeliveryCursor {
             self.sent.fetch_max(seq, Ordering::Release);
             self.applied.fetch_max(seq, Ordering::Release);
         }
+    }
+}
+
+/// The routed seq of every router that hands CDC batches to subscriptions. A
+/// router counts while the handle [`Self::add`] returned lives.
+#[derive(Debug, Default)]
+pub struct Routers(std::sync::Mutex<Vec<std::sync::Weak<AtomicU64>>>);
+
+impl Routers {
+    /// A router that has routed every batch through `routed`.
+    pub fn add(&self, routed: u64) -> Arc<AtomicU64> {
+        let router = Arc::new(AtomicU64::new(routed));
+        self.0
+            .lock()
+            .expect("routers mutex")
+            .push(Arc::downgrade(&router));
+        router
+    }
+
+    /// Feeds every live router to `ledger`; returns how many there were.
+    pub fn feed(&self, ledger: &mut DeliveryLedger) -> usize {
+        let mut routers = self.0.lock().expect("routers mutex");
+        routers.retain(|r| r.strong_count() > 0);
+        let live: Vec<Arc<AtomicU64>> = routers.iter().filter_map(|r| r.upgrade()).collect();
+        for router in &live {
+            ledger.routed(
+                DemuxId(Arc::as_ptr(router) as usize as u64),
+                Seq(router.load(Ordering::Acquire)),
+            );
+        }
+        live.len()
     }
 }
 

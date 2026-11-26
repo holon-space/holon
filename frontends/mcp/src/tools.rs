@@ -4276,10 +4276,13 @@ impl HolonMcpServer {
             let target = engine
                 .emitted_through()
                 .map_err(|e| internal("reading the emitted CDC seq", e))?;
-            let mut owed = engine
+            let mut owed: Vec<String> = engine
                 .delivery_owed()
                 .await
-                .map_err(|e| internal("reading the owed CDC deliveries", e))?;
+                .map_err(|e| internal("reading the owed CDC deliveries", e))?
+                .iter()
+                .map(ToString::to_string)
+                .collect();
             if let Some(sync) = &loro_sync {
                 let settled = sync
                     .is_settled()

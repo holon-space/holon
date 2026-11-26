@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use holon::api::BackendEngine;
 use holon_api::Value;
+use holon_api::delivery_ledger::Owed;
 use holon_api::live_data::DeliveryCursor;
 use holon_api::live_data::reporting_to;
 use holon_frontend::reactive::BuilderServices;
@@ -152,11 +153,7 @@ async fn gestures_settle_on_delivery(rt: Arc<tokio::runtime::Runtime>, rows_per_
                 .await
                 .expect("the engine reports what it owes");
             assert!(
-                owed.iter().any(|line| {
-                    (line.starts_with("cdc-applied: target sent seq")
-                        && line.contains(", at applied seq "))
-                        || line.starts_with("cdc-routed: target emitted seq")
-                }),
+                owed.iter().any(|o| matches!(o, Owed::Applied { .. } | Owed::Routed { .. })),
                 "a lagging subscriber is owed a delivery, named by stage, target and value: \
                  {owed:?}"
             );

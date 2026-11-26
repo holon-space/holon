@@ -1351,6 +1351,9 @@ impl BackendEngine {
             .query(&sql_with_params, HashMap::new())
             .await?;
         let cdc_rx = self.db_handle.subscribe_row_changes();
+        // Registered after subscribing: the stream receives every batch
+        // emitted from here on.
+        let router = self.matview_manager().register_router();
         Ok(Self::spawn_eager_stream(
             self.db_handle.clone(),
             sql_with_params,
@@ -1359,6 +1362,7 @@ impl BackendEngine {
             initial,
             cdc_rx,
             holon_api::live_data::reporting_cursor().unwrap_or_default(),
+            router,
         ))
     }
 
@@ -1415,7 +1419,9 @@ impl BackendEngine {
     /// that vanished and `Created` for rows that are new or whose content
     /// changed (the reactive layer folds a `Created` for a known key into an
     /// update). Each re-execution emits a batch, empty too, stamped with the
-    /// highest CDC seq it read, so `cursor` settles through it.
+    /// highest CDC seq it read, so `cursor` settles through it. `router`
+    /// counts toward the routed seq: it advances once `cursor` owes a batch.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_eager_stream(
         db_handle: DbHandle,
         sql: String,
@@ -1424,6 +1430,7 @@ impl BackendEngine {
         initial: Vec<StorageEntity>,
         mut cdc_rx: broadcast::Receiver<BatchWithMetadata<RowChange>>,
         cursor: std::sync::Arc<holon_api::live_data::DeliveryCursor>,
+        router: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> RowChangeStream {
         use holon_api::streaming::Batch;
         use holon_api::streaming::BatchMetadata;
@@ -1492,6 +1499,7 @@ impl BackendEngine {
                     seq = seq.max(batch.metadata.seq);
                 }
                 cursor.routed(seq);
+                router.fetch_max(seq, std::sync::atomic::Ordering::Release);
 
                 let rows = match db_handle.query(&sql, HashMap::new()).await {
                     Ok(rows) => rows,
@@ -1512,6 +1520,7 @@ impl BackendEngine {
                             "[eager_requery] re-execution failed; retaining last-known rows under \
                              the standing degraded disclosure, will retry on next change: {e}"
                         );
+                        cursor.requery_failed(format!("{e:#}"));
                         continue;
                     }
                 };

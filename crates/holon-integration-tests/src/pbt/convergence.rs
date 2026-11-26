@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon::sync::matview_manager::LaggingSubscription;
+use holon_api::delivery_ledger::DeliveryLedger;
 use holon_filesystem::InMemoryFileSystem;
 use holon_filesystem::change_source::FileChange;
 use holon_filesystem::change_source::FileChangeSource;
@@ -67,19 +67,40 @@ impl std::fmt::Display for GaveUp {
 
 /// One stage short of its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Owed {
-    pub(crate) stage: &'static str,
-    pub(crate) target: String,
-    pub(crate) value: String,
+pub(crate) enum Owed {
+    Delivery(holon_api::delivery_ledger::Owed),
+    Stage {
+        stage: &'static str,
+        target: String,
+        value: String,
+    },
+}
+
+impl Owed {
+    pub(crate) fn stage(&self) -> &'static str {
+        match self {
+            Owed::Delivery(owed) => owed.stage().name(),
+            Owed::Stage { stage, .. } => stage,
+        }
+    }
 }
 
 impl std::fmt::Display for Owed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "stage {} at {}, target {}",
-            self.stage, self.value, self.target
-        )
+        match self {
+            Owed::Delivery(owed) => write!(
+                f,
+                "stage {} at {}, target {}",
+                self.stage(),
+                owed.value(),
+                owed.target()
+            ),
+            Owed::Stage {
+                stage,
+                target,
+                value,
+            } => write!(f, "stage {stage} at {value}, target {target}"),
+        }
     }
 }
 
@@ -89,19 +110,11 @@ impl std::fmt::Display for Owed {
 pub(crate) struct Progress {
     pub(crate) loro_settled: Option<bool>,
     pub(crate) shares_idle: Option<bool>,
-    pub(crate) cdc: Option<CdcProgress>,
+    /// The engine's CDC deliveries, with its watch releases and
+    /// registrations in flight.
+    pub(crate) cdc: Option<DeliveryLedger>,
     pub(crate) block_feed: Option<FeedProgress>,
     pub(crate) org: Option<OrgProgress>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CdcProgress {
-    /// `cdc_emitted_watermark` — the target every CDC stage is judged by.
-    pub(crate) emitted: u64,
-    pub(crate) routed_through: u64,
-    pub(crate) lagging: Vec<LaggingSubscription>,
-    pub(crate) watch_releases_in_flight: u64,
-    pub(crate) watch_registrations_in_flight: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,53 +139,26 @@ pub(crate) struct OrgProgress {
 pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
     let mut owed = Vec::new();
     if progress.loro_settled == Some(false) {
-        owed.push(Owed {
+        owed.push(Owed::Stage {
             stage: "loro",
             target: "the authority's oplog frontiers".into(),
             value: "an older synced frontier".into(),
         });
     }
     if progress.shares_idle == Some(false) {
-        owed.push(Owed {
+        owed.push(Owed::Stage {
             stage: "share-projection",
             target: "every share worker idle".into(),
             value: "a share worker with work pending".into(),
         });
     }
     if let Some(cdc) = &progress.cdc {
-        if cdc.routed_through < cdc.emitted {
-            owed.push(Owed {
-                stage: "cdc-routed",
-                target: format!("emitted seq {}", cdc.emitted),
-                value: format!("routed seq {}", cdc.routed_through),
-            });
-        }
-        for lag in &cdc.lagging {
-            owed.push(Owed {
-                stage: "cdc-applied",
-                target: format!("sent seq {} to view {}", lag.sent, lag.view_name),
-                value: format!("applied seq {}", lag.applied),
-            });
-        }
-        if cdc.watch_releases_in_flight > 0 {
-            owed.push(Owed {
-                stage: "watch-release",
-                target: "0 releases in flight".into(),
-                value: format!("{} in flight", cdc.watch_releases_in_flight),
-            });
-        }
-        if cdc.watch_registrations_in_flight > 0 {
-            owed.push(Owed {
-                stage: "watch-register",
-                target: "0 registrations in flight".into(),
-                value: format!("{} in flight", cdc.watch_registrations_in_flight),
-            });
-        }
+        owed.extend(cdc.owed().into_iter().map(Owed::Delivery));
     }
     if let Some(feed) = &progress.block_feed
         && feed.consumed < feed.routed
     {
-        owed.push(Owed {
+        owed.push(Owed::Stage {
             stage: "block-feed",
             target: format!("routed seq {}", feed.routed),
             value: format!("consumed seq {}", feed.consumed),
@@ -180,7 +166,7 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
     }
     if let Some(org) = &progress.org {
         if org.processed < org.changed {
-            owed.push(Owed {
+            owed.push(Owed::Stage {
                 stage: "org-ingest",
                 target: format!("file change seq {}", org.changed),
                 value: format!("processed seq {}", org.processed),
@@ -188,14 +174,14 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
         } else if org.polled < org.changed {
             // A poll pass reads disk after the queue drained: owed once ingest
             // is.
-            owed.push(Owed {
+            owed.push(Owed::Stage {
                 stage: "org-poll",
                 target: format!("a poll pass started after file change seq {}", org.changed),
                 value: format!("polled seq {}", org.polled),
             });
         }
         if !org.writeback_unsettled.is_empty() {
-            owed.push(Owed {
+            owed.push(Owed::Stage {
                 stage: "org-writeback",
                 target: "nothing unsettled".into(),
                 value: org.writeback_unsettled.join(", "),
@@ -320,15 +306,10 @@ impl Signals<'_> {
                 .is_some()
             });
         let cdc = self.engine.map(|engine| {
-            let emitted = engine.db_handle().cdc_emitted_watermark();
-            let settled = engine.matview_manager().settled_up_to();
-            CdcProgress {
-                emitted,
-                routed_through: settled.routed_through,
-                lagging: settled.lagging,
-                watch_releases_in_flight: engine.watch_releases_in_flight(),
-                watch_registrations_in_flight: engine.watch_registrations_in_flight(),
-            }
+            let mut ledger = engine.matview_manager().delivery_ledger();
+            ledger.watch_releases_began(engine.watch_releases_in_flight());
+            ledger.watch_registrations_began(engine.watch_registrations_in_flight());
+            ledger
         });
         let block_feed = self.block_feed.as_ref().map(|feed| {
             let engine = self
@@ -400,12 +381,12 @@ pub(crate) async fn converge_signals(
             return Ok(());
         }
         for o in &owing {
-            *polls_owed_by_stage.entry(o.stage).or_default() += 1;
+            *polls_owed_by_stage.entry(o.stage()).or_default() += 1;
         }
         // The loop's own poll tick would leave each such settle waiting out its
         // period.
         if let (Some(idle), Some(org)) = (&signals.org_idle, &now_progress.org)
-            && owing.iter().any(|o| o.stage == "org-poll")
+            && owing.iter().any(|o| o.stage() == "org-poll")
             && org.changed > poll_requested_for
         {
             idle.request_poll();
@@ -444,6 +425,9 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering;
 
+    use holon_api::delivery_ledger::DemuxId;
+    use holon_api::delivery_ledger::Seq;
+    use holon_api::delivery_ledger::ViewKey;
     use holon_api::live_data::DeliveryCursor;
     use holon_api::live_data::reporting_to;
     use proptest::prelude::*;
@@ -451,11 +435,13 @@ mod tests {
 
     use super::*;
 
-    const STAGES: [&str; 10] = [
+    const STAGES: [&str; 12] = [
         "loro",
         "share-projection",
         "cdc-routed",
         "cdc-applied",
+        "cdc-primed",
+        "cdc-requery",
         "watch-release",
         "watch-register",
         "block-feed",
@@ -464,31 +450,48 @@ mod tests {
         "org-writeback",
     ];
 
-    /// Every stage wired and at its target.
+    fn view(name: &str) -> ViewKey {
+        ViewKey {
+            name: name.into(),
+            instance: 0,
+        }
+    }
+
+    /// Every stage wired and at its target, with some views that applied
+    /// through what they were sent.
     fn settled() -> impl Strategy<Value = Progress> {
-        (0u64..1_000, 0u64..3, 0u64..1_000, 0u64..1_000).prop_map(
-            |(emitted, ahead, routed, changed)| Progress {
-                loro_settled: Some(true),
-                shares_idle: Some(true),
-                cdc: Some(CdcProgress {
-                    emitted,
-                    routed_through: emitted + ahead,
-                    lagging: vec![],
-                    watch_releases_in_flight: 0,
-                    watch_registrations_in_flight: 0,
-                }),
-                block_feed: Some(FeedProgress {
-                    routed,
-                    consumed: routed,
-                }),
-                org: Some(OrgProgress {
-                    changed,
-                    processed: changed,
-                    polled: changed,
-                    writeback_unsettled: vec![],
-                }),
-            },
+        (
+            0u64..1_000,
+            0u64..3,
+            proptest::collection::vec((0u64..1_000, 0u64..3), 0..3),
+            0u64..1_000,
+            0u64..1_000,
         )
+            .prop_map(|(emitted, ahead, views, routed, changed)| {
+                let mut cdc = DeliveryLedger::default();
+                cdc.emitted(Seq(emitted));
+                cdc.routed(DemuxId(0), Seq(emitted + ahead));
+                for (i, (sent, extra)) in views.into_iter().enumerate() {
+                    let key = view(&format!("watch_view_{i}"));
+                    cdc.sent(key.clone(), Seq(sent));
+                    cdc.applied(key, Seq(sent + extra));
+                }
+                Progress {
+                    loro_settled: Some(true),
+                    shares_idle: Some(true),
+                    cdc: Some(cdc),
+                    block_feed: Some(FeedProgress {
+                        routed,
+                        consumed: routed,
+                    }),
+                    org: Some(OrgProgress {
+                        changed,
+                        processed: changed,
+                        polled: changed,
+                        writeback_unsettled: vec![],
+                    }),
+                }
+            })
     }
 
     /// `p` with only `stage` put `by` short of its target.
@@ -496,20 +499,22 @@ mod tests {
         let cdc = p.cdc.as_mut().expect("settled() wires cdc");
         let feed = p.block_feed.as_mut().expect("settled() wires the feed");
         let org = p.org.as_mut().expect("settled() wires org");
+        let lagging = view("watch_view_x");
         match stage {
             "loro" => p.loro_settled = Some(false),
             "share-projection" => p.shares_idle = Some(false),
-            "cdc-routed" => {
-                cdc.emitted += by;
-                cdc.routed_through = cdc.emitted - by;
+            "cdc-routed" => cdc.emitted(Seq(cdc.routed_through().0 + by)),
+            "cdc-applied" => {
+                cdc.sent(lagging.clone(), Seq(by));
+                cdc.applied(lagging, Seq(0));
             }
-            "cdc-applied" => cdc.lagging.push(LaggingSubscription {
-                view_name: "watch_view_x".into(),
-                sent: cdc.emitted,
-                applied: cdc.emitted.saturating_sub(by),
-            }),
-            "watch-release" => cdc.watch_releases_in_flight = by,
-            "watch-register" => cdc.watch_registrations_in_flight = by,
+            "cdc-primed" => cdc.sent(lagging, Seq(by)),
+            "cdc-requery" => {
+                cdc.sent(lagging.clone(), Seq(by));
+                cdc.requery_failed(lagging, "database is locked".into());
+            }
+            "watch-release" => cdc.watch_releases_began(by),
+            "watch-register" => cdc.watch_registrations_began(by),
             "block-feed" => feed.routed += by,
             "org-ingest" => org.changed += by,
             "org-poll" => {
@@ -534,7 +539,7 @@ mod tests {
             prop_assert_eq!(owed(&p), vec![]);
             let owing = owed(&behind(p, stage, by));
             prop_assert_eq!(owing.len(), 1, "{:?}", owing);
-            prop_assert_eq!(owing[0].stage, stage);
+            prop_assert_eq!(owing[0].stage(), stage);
         }
     }
 
@@ -711,12 +716,21 @@ mod tests {
         .await
         .expect_err("a subscriber that never applies cannot settle");
 
-        let message = gave_up.to_string();
-        let expected = format!(
-            "stage cdc-applied at applied seq {applied_before}, target sent seq {} to view ",
-            cursor.sent()
-        );
-        assert!(message.contains(&expected), "{message}\nlacks: {expected}");
+        let expected = Owed::Delivery(holon_api::delivery_ledger::Owed::Applied {
+            view: gave_up
+                .owed
+                .iter()
+                .find_map(|o| match o {
+                    Owed::Delivery(holon_api::delivery_ledger::Owed::Applied { view, .. }) => {
+                        Some(view.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no view owes an apply: {gave_up}")),
+            sent: Seq(cursor.sent()),
+            applied: Seq(applied_before),
+        });
+        assert!(gave_up.owed.contains(&expected), "{gave_up}\nlacks: {expected}");
     }
 
     fn org_signals<'a>(
@@ -766,7 +780,7 @@ mod tests {
         .await
         .expect_err("the change was never processed");
         assert_eq!(
-            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            gave_up.owed.iter().map(|o| o.stage()).collect::<Vec<_>>(),
             vec!["org-ingest"],
             "{gave_up}"
         );
@@ -794,7 +808,7 @@ mod tests {
         .await
         .expect_err("no poll pass started after the change");
         assert_eq!(
-            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            gave_up.owed.iter().map(|o| o.stage()).collect::<Vec<_>>(),
             vec!["org-poll"],
             "{gave_up}"
         );
@@ -839,7 +853,7 @@ mod tests {
             .check(took)
             .unwrap_or_else(|e| panic!("{e}: {gave_up}"));
         assert_eq!(
-            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            gave_up.owed.iter().map(|o| o.stage()).collect::<Vec<_>>(),
             vec!["org-ingest"],
             "{gave_up}"
         );
@@ -859,7 +873,7 @@ mod tests {
         .await
         .expect_err("the pass is still running");
         assert_eq!(
-            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            gave_up.owed.iter().map(|o| o.stage()).collect::<Vec<_>>(),
             vec!["org-writeback"],
             "{gave_up}"
         );
