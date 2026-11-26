@@ -54,7 +54,7 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
     `cites` replaces the cited paths of the summary; `<root>` in it is the lane root."""
     with tempfile.TemporaryDirectory() as root:
         root = Path(root)
-        base, child, other = git_repo(root)
+        base, child, other, moved = git_repo(root)
         (root / "scripts").mkdir()
         out = HEADER + "".join(line + "\n" for line in selected)
         (root / "scripts/select-tests.py").write_text(
@@ -73,7 +73,7 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
                                      for p in (cites if cites is not None else [*logs, *ran]))
                            + "".join(f"- selector line `{s}`\n" for s in spans)
                            + "\nConfidence (1-5) that the verifier will confirm: 4\n")
-        return subprocess.run([sys.executable, str(CHECKER), "--base", base, "--summary", str(summary),
+        return subprocess.run([sys.executable, str(CHECKER), "--base", moved, "--summary", str(summary),
                                "--tree", child], cwd=root, capture_output=True, text=True)
 
 
@@ -689,7 +689,9 @@ def result_line(rng, test, status):
 
 
 def git_repo(root):
-    """Three commits: the base, an empty child with the base's tree, and a commit with another tree."""
+    """The base, an empty child with the base's tree, a commit with another tree, and `moved`: a landing on the
+    base that the lane's working copy does not contain. The checker takes `moved` as --base, so each run also
+    asserts that it reads the lane's own changes and base tree from the fork point."""
     def git(*args):
         return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout.strip()
     git("init", "-q")
@@ -703,8 +705,15 @@ def git_repo(root):
     child = git("rev-parse", "HEAD")
     (root / "f").write_text("b\n")
     git("commit", "-qam", "other")
+    other = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "landed", base)
+    (root / "landed").write_text("landed\n")
+    git("add", "landed")
+    git("commit", "-qm", "landed")
+    moved = git("rev-parse", "HEAD")
+    git("checkout", "-q", "--detach", other)
     subprocess.run(["jj", "git", "init", "--colocate"], cwd=root, check=True, capture_output=True)
-    return base, child, git("rev-parse", "HEAD")
+    return base, child, other, moved
 
 
 def change_of(root, commit):
@@ -717,7 +726,7 @@ def lane_files(rng, spec, commits):
 
     `spec` maps each selected step line to its outcome. A reference problem is the tuple of needles its stderr line
     holds; it is derived from the outcome alone, not from the checker's reading of the logs."""
-    base, child, other = commits
+    base, child, other, _ = commits
     files, cites, extra, want = {}, [], [], []
 
     def log(path, line, body, tail, tree=base, mode="measure"):
@@ -896,7 +905,7 @@ def run_lane(root, spec, rng, commits):
     summary.write_text(f"# s\n\nCommit: {change_of(root, commits[1])}\n\nHow tested:\n" + prose + "".join(f"- log: {p} (`x`)\n" for p in cites)
                        + "\n".join(extra)
                        + "\n\nConfidence (1-5) that the verifier will confirm: 4\n")
-    r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[0], "--summary", str(summary),
+    r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[3], "--summary", str(summary),
                         "--tree", commits[1]], cwd=root, capture_output=True, text=True)
     return r, want
 
@@ -1747,7 +1756,8 @@ def required(chain):
 def chain_repo(root, chain):
     """A colocated repo whose base holds the stub selector and whose changes after it are `chain`; every change
     writes new text, so the diff from the base to @ is the union of the chain's paths. Returns the base and the
-    change id and commit id of the last change."""
+    change id and commit id of the last change. The returned base is a landing on the base that the chain does not
+    contain, so the checker must read the chain's own changes from the fork point."""
     env = {**os.environ, "JJ_USER": "t", "JJ_EMAIL": "t@t"}
 
     def run(*args):
@@ -1766,7 +1776,12 @@ def chain_repo(root, chain):
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             (root / path).write_text(f"change {i}\n")
         run("jj", "commit", "-m", f"change {i}")
-    return base, *run("jj", "log", "--no-graph", "-r", "@-", "-T", 'change_id ++ " " ++ commit_id').split()
+    at = run("jj", "log", "--no-graph", "-r", "@", "-T", "commit_id")
+    run("jj", "new", base, "-m", "landed")
+    (root / "landed.txt").write_text("landed\n")
+    moved = run("jj", "log", "--no-graph", "-r", "@", "-T", "commit_id")
+    run("jj", "edit", at)
+    return moved, *run("jj", "log", "--no-graph", "-r", "@-", "-T", 'change_id ++ " " ++ commit_id').split()
 
 
 def cover(root, base, change, commit, lines):

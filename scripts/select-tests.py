@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the test steps of a lane: crates owning a changed path (or reading a changed asset) plus their workspace reverse deps.
 
-    scripts/select-tests.py --base <commit>     the steps for `jj diff --from <commit> --to @`
+    scripts/select-tests.py --base <commit>     the steps for `jj diff --from 'fork_point(@ | <commit>)' --to @`
     scripts/select-tests.py --self-check        run the golden cases and the output contract
 
 Run from the workspace root. The changed files and the dependency graph (`cargo metadata --no-deps`)
@@ -762,22 +762,35 @@ def assert_workspace_root(meta, cwd):
         raise ValueError(f"cwd {cwd} is not the cargo workspace root {meta['workspace_root']}: run from the workspace root")
 
 
-def jj_changed(base):
+def fork_point(base):
+    """The commit id where `@` left `base`: a landing that moves `base` must not change a lane's own changes.
+
+    In a fix round `@-` is the earlier round's commit; the fork point stays the lane base."""
+    revset = f"fork_point(@ | {base})"
+    done = subprocess.run(["jj", "log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\n"'],
+                          capture_output=True, text=True)
+    if done.returncode:
+        sys.exit(f"select-tests: revset `{revset}` failed: {done.stderr.strip()}")
+    ids = done.stdout.split()
+    if len(ids) != 1:
+        sys.exit(f"select-tests: revset `{revset}` names {len(ids)} commits, expected one")
+    return ids[0]
+
+
+def jj_changed(fork):
     # --name-only prints a rename's destination only; the reverse diff prints its source.
     paths = set()
-    for a, b in ((base, "@"), ("@", base)):
+    for a, b in ((fork, "@"), ("@", fork)):
         out = subprocess.run(["jj", "diff", "--name-only", "--from", a, "--to", b],
                              stdout=subprocess.PIPE, text=True, check=True)
         paths.update(out.stdout.splitlines())
     return sorted(paths)
 
 
-def jj_header(base):
-    def commit_id(rev):
-        return subprocess.run(["jj", "log", "--no-graph", "-r", rev, "-T", "commit_id"],
-                              stdout=subprocess.PIPE, text=True, check=True).stdout
-    # In a fix round `@-` is the earlier round's commit; the fork point stays the lane base.
-    return [f"BASE: {commit_id(f'fork_point(@ | {base})')}", f"TREE: {commit_id('@')}"]
+def jj_header(fork):
+    tree = subprocess.run(["jj", "log", "--no-graph", "-r", "@", "-T", "commit_id"],
+                          stdout=subprocess.PIPE, text=True, check=True).stdout
+    return [f"BASE: {fork}", f"TREE: {tree}"]
 
 
 # ── self-check ───────────────────────────────────────────────────────
@@ -1236,8 +1249,9 @@ def main(argv):
         for line in gate_lines(gate_selection(cwd, meta, a.gate, changed)):
             print(line)
         return 0
-    header = jj_header(a.base)
-    changed = Path(a.paths_from).read_text().splitlines() if a.paths_from else jj_changed(a.base)
+    fork = fork_point(a.base)
+    header = jj_header(fork)
+    changed = Path(a.paths_from).read_text().splitlines() if a.paths_from else jj_changed(fork)
     lines = selection(cwd, meta, changed)
     print(*header, *lines, sep="\n")
     return 0

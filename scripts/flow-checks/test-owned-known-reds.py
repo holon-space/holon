@@ -479,7 +479,8 @@ def with_owner_cells(text):
 
 
 def cli_examples():
-    """The command end to end in a jj repository: the base comes from a commit, the tip from the working copy."""
+    """The command end to end in a jj repository: the base comes from the fork point of the working copy and the
+    given base (a landing on it that deletes a registry row), the tip from the working copy."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "lane-5-probe"
         (root / "docs/Testing").mkdir(parents=True)
@@ -488,13 +489,18 @@ def cli_examples():
         subprocess.run(["jj", "git", "init", "--quiet"], cwd=root, check=True, capture_output=True)
         reg.write_text(HEADER + row("kept-row", owner="#5") + row("gone-row", task="#5") + row("theirs", owner="#6"))
         subprocess.run(["jj", "commit", "-m", "base"], cwd=root, check=True, capture_output=True)
-        base = subprocess.run(["jj", "log", "--no-graph", "-r", "@-", "-T", "commit_id"], cwd=root, check=True,
-                              capture_output=True, text=True).stdout
+        base, at = (subprocess.run(["jj", "log", "--no-graph", "-r", rev, "-T", "commit_id"], cwd=root, check=True,
+                                   capture_output=True, text=True).stdout for rev in ("@-", "@"))
+        subprocess.run(["jj", "new", base, "-m", "landed"], cwd=root, check=True, capture_output=True)
+        reg.write_text(HEADER + row("theirs", owner="#6"))
+        moved = subprocess.run(["jj", "log", "--no-graph", "-r", "@", "-T", "commit_id"], cwd=root, check=True,
+                               capture_output=True, text=True).stdout
+        subprocess.run(["jj", "edit", at], cwd=root, check=True, capture_output=True)
         reg.write_text(HEADER + row("kept-row", owner="#5") + row("theirs", owner="#6"))
         (root / "docs/Testing/WindowedKnownReds.md").write_text("| Run | Summary line |\n| --- | --- |\n| a | b |\n")
         for k in ("kept-row", "gone-row"):
             (root / f"target/lane/{k}.log").write_text("exit: 0\n")
-        def run(text, rev=base, cwd=root):
+        def run(text, rev=moved, cwd=root):
             summary = cwd / "target/summary.md"
             summary.write_text(text)
             return subprocess.run([sys.executable, str(HERE / "owned-known-reds.py"), f"--base={rev}",
@@ -507,8 +513,8 @@ def cli_examples():
             ("a deleted row left out", run(summary_for({"kept-row": "kept"}, {5})), 1, "owned row gone-row is not named"),
             ("a deleted row said kept", run(summary_for({**both, "gone-row": "kept"}, {5})), 1,
              "row gone-row is deleted at the tip but the summary says kept"),
-            ("an unknown base", run(summary_for(both, {5}), rev="no-such-rev"), 2, "jj file list"),
-            ("a base read as an option", run(summary_for(both, {5}), rev="--help"), 2, "jj file list"),
+            ("an unknown base", run(summary_for(both, {5}), rev="no-such-rev"), 2, "fork_point(@ | no-such-rev)"),
+            ("a base read as an option", run(summary_for(both, {5}), rev="--help"), 2, "fork_point(@ | --help)"),
         ]
         other = Path(tmp) / "_sw_integ"
         root.rename(other)

@@ -33,10 +33,15 @@ CARD = re.compile(r"(?:(?<![\w/#-])|(?<=holon-work))#([1-9][0-9]*)(?![0-9])")
 CAUSE = re.compile(r"wait|lock|cpu|race|other:[a-z][a-z0-9-]*")
 
 
-def log_path_rule():
+def tests_cover_diff():
     spec = importlib.util.spec_from_file_location("tests_cover_diff", HERE / "tests-cover-diff.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def log_path_rule():
+    module = tests_cover_diff()
     return module.LOG_PATH, module.BRACE
 
 
@@ -184,8 +189,9 @@ def main():
         if cards is None:
             raise SystemExit(f"owned-known-reds: name the cards: add a `Cards:` line to {a.summary} "
                              "(the lane root is not named lane-<N>-<slug>)")
-        base_paths = jj("file", "list", f"--revision={a.base}", "--", f"glob:{REGISTRY_GLOB}").splitlines()
-        base = {path: jj("file", "show", f"--revision={a.base}", "--", path) for path in base_paths}
+        fork = tests_cover_diff().selector_module().fork_point(a.base)
+        base_paths = jj("file", "list", f"--revision={fork}", "--", f"glob:{REGISTRY_GLOB}").splitlines()
+        base = {path: jj("file", "show", f"--revision={fork}", "--", path) for path in base_paths}
         tip = {str(path): path.read_text() for path in sorted(Path.cwd().glob(REGISTRY_GLOB))}
     except SystemExit as e:
         print(e.code, file=sys.stderr)

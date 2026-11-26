@@ -680,8 +680,9 @@ def main():
                                   "jj's @)")
     a = p.parse_args()
     summary_text = a.summary.read_text()
-    code, rows = partition(chain_paths(a.base, summary_commit(summary_text)))
-    outputs = [select_lines(a.base, code), select_lines(a.base, rows)] if code and rows else [select_lines(a.base)]
+    fork = selector_module().fork_point(a.base)
+    code, rows = partition(chain_paths(fork, summary_commit(summary_text)))
+    outputs = [select_lines(fork, code), select_lines(fork, rows)] if code and rows else [select_lines(fork)]
     paths, bad = cited_logs(summary_text)
     bad += [problem for out in outputs for problem in repeated_steps(out)]
     logs = {}
@@ -695,7 +696,7 @@ def main():
     if (head := git_tree(commit)) is None:
         sys.exit(f"tests-cover-diff: git cannot resolve the source tree of the checked commit {commit}")
     notes = []
-    bad += check("".join(outputs), summary_text, logs, not_run_steps(), a.base, notes=notes, head=head,
+    bad += check("".join(outputs), summary_text, logs, not_run_steps(), fork, notes=notes, head=head,
                  static=static_steps())
     for note in notes:
         print(f"tests-cover-diff: note: {note}")
