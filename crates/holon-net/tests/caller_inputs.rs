@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Cause;
 use holon_net::exec::Content;
@@ -53,6 +55,7 @@ use holon_net::uft::Generated;
 use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::ANSWER_INPUT_KEY;
@@ -1079,6 +1082,12 @@ impl NetGen {
         }
     }
 
+    /// The ask side table of [`Self::net`].
+    fn metas(&self) -> AskMetas {
+        let descriptors: Vec<_> = (0..self.works.len()).map(|i| self.descriptor(i)).collect();
+        ask_metas(&descriptors)
+    }
+
     /// The net: the file, its derived places, then each lowered work.
     /// `Err` is a refusal of the loader or the lowering.
     fn net(&self) -> Result<NetDef, String> {
@@ -1883,8 +1892,8 @@ impl Machine {
                 if self.net.reads_undeclared(&work) {
                     return Ok(());
                 }
-                let exec = &self.exec;
-                let rows = match no_panic("asks", || forms::of(exec.asks()))? {
+                let (exec, metas) = (&self.exec, self.net.metas());
+                let rows = match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => rows,
                     Answer::Refused(_) => vec![],
                 };
@@ -1948,7 +1957,8 @@ impl Machine {
                     .into_iter()
                     .filter(|w| self.net.reads_undeclared(w))
                     .collect();
-                match no_panic("asks", || forms::of(exec.asks()))? {
+                let metas = self.net.metas();
+                match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => {
                         for row in &rows {
                             prop_assert!(

@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use holon_api::RemovedTag;
 use holon_api::Value;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -50,6 +52,7 @@ use holon_net::uft::Generated;
 use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::AnswerCall;
@@ -216,7 +219,30 @@ fn ask_net(
     bind: holon_net::exec::Read,
     effectful: bool,
 ) -> Result<NetDef, TestCaseError> {
-    let d = TransitionDescriptor {
+    let d = ask_descriptor(effectful);
+    let body = if effectful {
+        NativeBody::Effectful(Receiver::None)
+    } else {
+        NativeBody::Pure(Arc::new(|s: &Subject, _: &Content| {
+            Ok(vec![Output::new("Out", s, tagged(W))])
+        }))
+    };
+    let parts = NativeParts {
+        bind,
+        body,
+        preview: None,
+    };
+    let net = net.place("P", Class::Process).fifo("Out", Class::Process);
+    premise("the ask lowers", lower(net, &d, Some(parts)))
+}
+
+/// The side table of [`ask_net`]'s ask.
+fn metas() -> AskMetas {
+    ask_metas([&ask_descriptor(false)])
+}
+
+fn ask_descriptor(effectful: bool) -> TransitionDescriptor {
+    TransitionDescriptor {
         name: TransitionName(W.to_owned()),
         arcs: vec![HlArc {
             kind: ArcKind::Read,
@@ -235,21 +261,7 @@ fn ask_net(
             persist: false,
         }),
         undoes: None,
-    };
-    let body = if effectful {
-        NativeBody::Effectful(Receiver::None)
-    } else {
-        NativeBody::Pure(Arc::new(|s: &Subject, _: &Content| {
-            Ok(vec![Output::new("Out", s, tagged(W))])
-        }))
-    };
-    let parts = NativeParts {
-        bind,
-        body,
-        preview: None,
-    };
-    let net = net.place("P", Class::Process).fifo("Out", Class::Process);
-    premise("the ask lowers", lower(net, &d, Some(parts)))
+    }
 }
 
 fn ask_transitions() -> Vec<String> {
@@ -291,7 +303,7 @@ fn answer_call(subject: &str, seen: AskHash, id: &str) -> AnswerCall {
 
 /// The hash the `Asks` row of `W` for `subject` offers.
 fn offered(exec: &Executor, subject: &str) -> Result<Option<AskHash>, TestCaseError> {
-    let rows = no_panic("asks", || exec.asks())?;
+    let rows = no_panic("asks", || exec.asks(&metas()))?;
     Ok(rows.ok().and_then(|rows| {
         rows.into_iter()
             .find(|r| r.transition.0 == W && r.subject.0 == subject)
@@ -1129,7 +1141,7 @@ proptest! {
         for t in ["T".to_owned(), W.to_owned(), Generated::Answer.name(W), Generated::ExpireAnswer.name(W)] {
             let _ = no_panic(&format!("why_not({t})"), || format!("{:?}", exec.why_not(&t, &s)))?;
         }
-        let _ = no_panic("asks", || format!("{:?}", exec.asks()))?;
+        let _ = no_panic("asks", || format!("{:?}", exec.asks(&metas())))?;
         let _ = no_panic("derive_all", || format!("{:?}", exec.derive_all(&Generated::Asks.name(W))))?;
         let _ = no_panic("answer_settlement", || format!("{:?}", exec.answer_settlement(&AnswerId("a1".to_owned()))))?;
         let seen = offered(&exec, &s)?.unwrap_or(AskHash([0; 32]));
@@ -1642,7 +1654,7 @@ proptest! {
         prop_assert!(names_error(&all, "Cycle"), "derive_all of D: {all:?}");
         let other = no_panic("derive without the token", || exec.derive("D", &Subject::new(&t)))?;
         prop_assert!(matches!(other, Ok(None)), "derive of D for {t:?}: {other:?}");
-        let asks = no_panic("asks", || exec.asks())?;
+        let asks = no_panic("asks", || exec.asks(&metas()))?;
         if w_reads {
             prop_assert!(names_error(&asks, "Cycle"), "asks with W reading D: {asks:?}");
             let mut shown = ask_places();

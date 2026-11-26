@@ -29,22 +29,23 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::TypeHint;
 use holon_pattern::Value;
-use holon_transition_contract::AnswerCall;
 use holon_transition_contract::AnswerId;
-use holon_transition_contract::AnswerSettlement;
 use holon_transition_contract::AskHash;
-use holon_transition_contract::AskRow;
 pub use holon_transition_contract::OccurrenceId;
-use holon_transition_contract::SubjectName;
-use holon_transition_contract::TransitionName;
-use holon_transition_contract::UftError;
 
 pub use crate::host::HOST;
 pub use crate::host::encode_value;
 pub use crate::host::new_net;
-use crate::uft::answer;
+pub use crate::uft::answer::AskMeta;
+pub use crate::uft::answer::AskMetas;
+pub use crate::uft::answer::Asks;
+pub use crate::uft::answer::HASH_FIELD;
+pub use crate::uft::answer::answer_transition;
+pub use crate::uft::answer::answered_place;
+pub use crate::uft::answer::ask_places;
+pub use crate::uft::answer::asks_place;
+pub use crate::uft::answer::expired_place;
 
 /// A round fires every transition its marking enables. A net still enabled
 /// after this many rounds of one call does not terminate.
@@ -148,38 +149,50 @@ pub type Read = Arc<dyn Fn(&mut Reader<'_>, &Subject) -> Option<Content> + Send 
 /// A pure firing: its outputs from its bound input, or a definite failure.
 pub type PureBody = Arc<dyn Fn(&Subject, &Content) -> Result<Vec<Output>, Cause> + Send + Sync>;
 
-/// The places and transitions of an ask for the work transition `T`
-/// (UFT-adopt.a): the derived `Asks.T`, the manual `Answer.T` that puts the
-/// `Answered.T` token, and the `Expired.T` token of an answer that no longer
-/// applies, whose subject is the answer id.
-pub fn asks_place(work: &str) -> String {
-    format!("Asks.{work}")
+/// The places and transition of an ask on a work transition: the derived
+/// `offer` of the rows a user may answer, the manual `answer` transition that
+/// puts the `answered` token the work consumes, and the `expired` place of an
+/// answer that no longer applies, whose subject is the answer id.
+#[derive(Clone, Debug)]
+pub struct Ask {
+    pub offer: Place,
+    pub answer: Arc<str>,
+    pub answered: Place,
+    pub expired: Place,
 }
 
-pub fn answered_place(work: &str) -> String {
-    format!("Answered.{work}")
+/// The fields of an answer token the executor itself reads.
+#[derive(Clone, Copy, Debug)]
+pub struct AnswerKeys {
+    /// The answer id: a text that keys the work's failure mark, so a new
+    /// answer is a new mark key.
+    pub id: &'static str,
+    /// The user value: no reader sees it; the executor adds it to the bound
+    /// input of the work.
+    pub input: &'static str,
 }
 
-pub fn answer_transition(work: &str) -> String {
-    format!("Answer.{work}")
+/// How answer tokens look as net data.
+pub struct AnswerCodec<V> {
+    pub keys: AnswerKeys,
+    /// An `answered` token from net data, or the field it lacks.
+    pub parse: fn(Record<V>) -> Result<Answered<V>, &'static str>,
+    /// The field an `expired` token lacks.
+    pub check_expired: fn(&Record<V>) -> Result<(), &'static str>,
+    /// The failure cause of an answer whose ask expired.
+    pub expired_cause: fn() -> String,
 }
 
-pub fn expired_place(work: &str) -> String {
-    format!("Expired.{work}")
+impl<V> Clone for AnswerCodec<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
+
+impl<V> Copy for AnswerCodec<V> {}
 
 /// The field a bind reads the cause of a [`Payload::Failure`] token by.
 pub const FAILURE_CAUSE_FIELD: &str = "cause";
-/// `Asks.T`: the [`hash_text`] of the ask.
-pub const HASH_FIELD: &str = "hash";
-
-/// What the `Asks` row of an ask shows besides its hash.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AskMeta {
-    pub input: Option<TypeHint>,
-    pub irreversible: bool,
-    pub has_preview: bool,
-}
 
 #[derive(Clone)]
 pub enum PlaceKind {
@@ -421,6 +434,7 @@ pub struct Host<V> {
     /// One probe fact from a JSON line: its subject (the `subject_field`)
     /// and its record, or why the line is not a fact.
     pub fact: FactFn<V>,
+    pub answer: AnswerCodec<V>,
 }
 
 pub type FactFn<V> = fn(serde_json::Value, &str) -> Result<(Subject, Record<V>), String>;
@@ -440,7 +454,7 @@ pub struct NetDef {
     places: BTreeMap<Place, PlaceDef>,
     transitions: Vec<TransitionDef>,
     /// Keyed by the work transition.
-    asks: BTreeMap<Arc<str>, AskMeta>,
+    asks: BTreeMap<Arc<str>, Ask>,
     /// The places [`NetDef::check`] declares for the executor's own markers.
     owned: BTreeSet<Place>,
     /// The latest `now` whose every timer deadline fits i64 nanoseconds, the
@@ -547,30 +561,28 @@ impl NetDef {
         self
     }
 
-    /// Declares `work` an ask: the net must hold its places and transitions
-    /// ([`asks_place`] and the others).
-    pub fn ask(mut self, work: &str, meta: AskMeta) -> Self {
-        self.asks.insert(Arc::from(work), meta);
+    /// Declares `work` an ask: the net must hold the places and transition
+    /// `ask` names.
+    pub fn ask(mut self, work: &str, ask: Ask) -> Self {
+        self.asks.insert(Arc::from(work), ask);
         self
     }
 
-    /// `Answered.T` when `transition` is the work `T` of an ask.
+    /// The `answered` place when `transition` is the work of an ask.
     fn answered_of(&self, transition: &str) -> Option<Place> {
-        self.asks
-            .contains_key(transition)
-            .then(|| Place::new(&answered_place(transition)))
+        self.asks.get(transition).map(|a| a.answered.clone())
     }
 
     fn is_answered(&self, place: &str) -> bool {
-        self.asks.keys().any(|w| answered_place(w) == place)
+        self.asks.values().any(|a| *a.answered == *place)
     }
 
-    /// The work `T` when `transition` is `Answer.T`.
+    /// The work when `transition` is the answer transition of an ask.
     fn work_of_answer(&self, transition: &str) -> Option<Arc<str>> {
         self.asks
-            .keys()
-            .find(|w| answer_transition(w) == transition)
-            .cloned()
+            .iter()
+            .find(|(_, a)| *a.answer == *transition)
+            .map(|(w, _)| w.clone())
     }
 
     fn place_def(&self, place: &str) -> &PlaceDef {
@@ -607,9 +619,9 @@ impl NetDef {
     /// seen hash, and the answer's settlement the expiry reason.
     fn missing_answer_field(&self, place: &str, content: &Content) -> Option<&'static str> {
         if self.is_answered(place) {
-            answer::parse_answered(content.clone()).err()
-        } else if self.asks.keys().any(|w| expired_place(w) == place) {
-            answer::parse_expired(content).err()
+            (self.host.answer.parse)(content.clone()).err()
+        } else if self.asks.values().any(|a| *a.expired == *place) {
+            (self.host.answer.check_expired)(content).err()
         } else {
             None
         }
@@ -619,7 +631,7 @@ impl NetDef {
     /// [`Self::missing_answer_field`].
     fn payload(&self, place: &str, content: Content) -> Payload {
         if self.is_answered(place) {
-            Payload::Answered(answer::parse_answered(content).expect("checked at the write"))
+            Payload::Answered((self.host.answer.parse)(content).expect("checked at the write"))
         } else {
             Payload::Record(content)
         }
@@ -806,39 +818,36 @@ impl NetDef {
                 timer: longest,
             }
         })?;
-        for work in self.asks.keys() {
+        for (work, ask) in &self.asks {
             if let Some(of) = self.work_of_answer(work) {
                 return Err(LoadError::AskWorkIsAnswer {
                     work: work.to_string(),
                     of: of.to_string(),
                 });
             }
-            let place = |name: String, derived: bool| {
+            let place = |name: &Place, derived: bool| {
                 self.places
-                    .get(name.as_str())
+                    .get(name)
                     .is_some_and(|d| matches!(d.kind, PlaceKind::Derived(_)) == derived)
                     .then_some(())
-                    .ok_or(name)
+                    .ok_or_else(|| name.to_string())
             };
-            let transition = |name: String, ok: &dyn Fn(&TransitionDef) -> bool| {
+            let transition = |name: &str, ok: &dyn Fn(&TransitionDef) -> bool| {
                 self.transitions
                     .iter()
                     .any(|t| *t.name == *name && ok(t))
                     .then_some(())
-                    .ok_or(name)
+                    .ok_or_else(|| name.to_string())
             };
-            let answered = Place::new(&answered_place(work));
-            place(asks_place(work), true)
-                .and(place(answered_place(work), false))
-                .and(place(expired_place(work), false))
-                .and(transition(answer_transition(work), &|t| {
+            place(&ask.offer, true)
+                .and(place(&ask.answered, false))
+                .and(place(&ask.expired, false))
+                .and(transition(&ask.answer, &|t| {
                     t.trigger == Trigger::Manual
                         && matches!(t.body, Body::Pure(_))
                         && t.retry.is_none()
                 }))
-                .and(transition(work.to_string(), &|t| {
-                    t.consumes.contains(&answered)
-                }))
+                .and(transition(work, &|t| t.consumes.contains(&ask.answered)))
                 .map_err(|missing| LoadError::IncompleteAsk {
                     work: work.to_string(),
                     missing,
@@ -1002,6 +1011,40 @@ pub struct Answered<V = Value> {
     pub input: V,
     /// The other fields, which readers see.
     pub record: Record<V>,
+}
+
+/// A field of an `answered` token as a reader sees it: the user value only
+/// when `show_input`.
+fn answered_field(
+    host: &Host<Value>,
+    a: &Answered,
+    field: &str,
+    show_input: bool,
+) -> Option<Value> {
+    let keys = host.answer.keys;
+    if field == keys.id {
+        Some((host.text)(&a.id))
+    } else if field == keys.input {
+        show_input.then(|| a.input.clone())
+    } else {
+        a.record.get(field).cloned()
+    }
+}
+
+/// How far an answer got: undone, its work occurrence and that one's
+/// settlement (`None` while it runs), its `expired` token, or waiting.
+#[derive(Debug)]
+pub enum AnswerProgress<'a> {
+    Undone,
+    Work {
+        occurrence: OccurrenceId,
+        settled: Option<Settled>,
+    },
+    Expired {
+        place: &'a Place,
+        record: &'a Content,
+    },
+    Waiting,
 }
 
 /// What a stale effect would have written to a place with a candidate: the
@@ -1335,7 +1378,9 @@ impl Reader<'_> {
                     .tokens
                     .token(place, subject)
                     .and_then(|t| match &t.payload {
-                        Payload::Answered(a) => answer::answered_field(a, field, !self.hide_value),
+                        Payload::Answered(a) => {
+                            answered_field(&net.host, a, field, !self.hide_value)
+                        }
                         Payload::Failure { cause } => {
                             (field == FAILURE_CAUSE_FIELD).then(|| (net.host.text)(&cause.text))
                         }
@@ -1721,18 +1766,6 @@ pub struct ClockWentBack {
 pub struct ClockOutOfRange {
     pub now: Duration,
     pub last: Duration,
-}
-
-impl From<ClockWentBack> for UftError {
-    fn from(ClockWentBack { clock, now }: ClockWentBack) -> Self {
-        Self::ClockWentBack { clock, now }
-    }
-}
-
-impl From<ClockOutOfRange> for UftError {
-    fn from(ClockOutOfRange { now, last }: ClockOutOfRange) -> Self {
-        Self::ClockOutOfRange { now, last }
-    }
 }
 
 /// What an undo of an answer did (XQ2.a), disclosed in full.
@@ -2401,10 +2434,17 @@ impl Executor {
         if let Some(settled) = self.occurrences.get(&work_occurrence(work, id)) {
             return Ok(settled.clone());
         }
-        if self.tokens.token(&expired_place(work), id).is_some() {
-            return Ok(Some(Settled::Failed(Cause::definite(
-                UftError::NoLongerApplies.to_string(),
-            ))));
+        if self
+            .tokens
+            .token(&self.net.asks[work].expired, id)
+            .is_some()
+        {
+            return Ok(Some(Settled::Failed(Cause::definite((self
+                .net
+                .host
+                .answer
+                .expired_cause)(
+            )))));
         }
         if self.undone.contains(id) {
             return Ok(Some(Settled::Failed(Cause::definite(
@@ -2414,105 +2454,36 @@ impl Executor {
         Ok(None)
     }
 
-    /// Fires `Answer.T` with the user value; the answer id is the occurrence.
-    /// Three panics stay. The first is the `unreachable!` arm; the load rules
-    /// out each of its refusals: the clock check ran first (`ClockWentBack`,
-    /// `ClockOutOfRange`), `UnknownTransition` and `NotManual` by the `asks`
-    /// lookup and `NetDef::check` (`Answer.T` exists and is manual), `InFlight`
-    /// and `RetryPending` because `Answer.T` is pure without retry,
-    /// `AnswerOccurrence` because the occurrence is the answer id,
-    /// `FailedOnThisInput` because `Answer.T` is not auto, and
-    /// `BindsAnswerInput` because no ask's work is an `Answer.T`
-    /// (`LoadError::AskWorkIsAnswer`). The other two are
-    /// a firing that puts, with no compare-and-set, a different token into an
-    /// occupied single-token place (`refuse_blind_overwrite`), and a value that
-    /// holds `Value::Removed`, which the token hash refuses (`encode_value`).
-    /// A bind of `Answer.T` that returns a field the answer sets is a typed
-    /// [`UftError::AnswerBindCollides`].
-    pub fn answer(
+    /// Fires the answer transition of the ask on `work` with `value`; the
+    /// answer id is the occurrence. The clock check runs first, then the
+    /// lookup of `work`, whose miss is [`FireError::UnknownTransition`].
+    pub fn answer_ask(
         &mut self,
-        call: AnswerCall,
+        work: &str,
+        subject: &str,
+        id: &str,
+        value: Content,
         now: Duration,
-    ) -> Result<Quiesced<AnswerId>, UftError> {
-        self.advance::<UftError>(now)?;
-        let work = call.transition.0.as_str();
-        if !self.net.asks.contains_key(work) {
-            return Err(UftError::UnknownTransition(call.transition));
-        }
-        let id = call.answer.0.as_str();
-        let value = answer::answer_value(id, hash_text(&call.seen), call.value);
-        match self.fire(
-            &answer_transition(work),
-            &call.subject.0,
-            OccurrenceId::caller(id),
-            value,
-            now,
-        ) {
+    ) -> Result<Quiesced<()>, FireError> {
+        self.advance::<FireError>(now)?;
+        let Some(ask) = self.net.asks.get(work) else {
+            return Err(UnknownTransition(work.to_string()).into());
+        };
+        let answer = ask.answer.clone();
+        match self.fire(&answer, subject, OccurrenceId::caller(id), value, now) {
             Ok(fired) => Ok(Quiesced {
-                value: call.answer,
+                value: (),
                 requests: fired.requests,
             }),
-            Err(
-                FireError::DuplicateOccurrence(_)
-                | FireError::NotEnabled {
-                    why: WhyNot::Inhibited(_),
-                    ..
-                },
-            ) => Err(UftError::AlreadyAnswered),
-            Err(FireError::NotEnabled {
-                why: WhyNot::Guard | WhyNot::Needs { .. },
-                ..
-            }) => Err(UftError::NoLongerApplies),
             Err(FireError::NoQuiescence(steps)) => {
                 self.conditions.push(Condition::NoQuiescence {
                     work: Arc::from(work),
-                    subject: Subject::new(&call.subject.0),
+                    subject: Subject::new(subject),
                     steps,
                 });
-                Err(UftError::NoQuiescence {
-                    transition: call.transition,
-                    subject: call.subject,
-                    steps,
-                })
+                Err(FireError::NoQuiescence(steps))
             }
-            Err(FireError::NotEnabled {
-                why: WhyNot::ReadsUndeclared(place),
-                ..
-            }) => Err(UftError::ReadsUndeclared {
-                transition: call.transition,
-                subject: call.subject,
-                place: place.to_string(),
-            }),
-            Err(FireError::NotEnabled {
-                why: WhyNot::DerivedCycle(cycle),
-                ..
-            }) => Err(UftError::DerivedCycle {
-                transition: call.transition,
-                subject: call.subject,
-                cycle: cycle.iter().map(Place::to_string).collect(),
-            }),
-            Err(FireError::ValueCollides { field, .. }) => Err(UftError::AnswerBindCollides {
-                transition: call.transition,
-                subject: call.subject,
-                field,
-            }),
-            Err(
-                e @ (FireError::ClockWentBack(_)
-                | FireError::ClockOutOfRange(_)
-                | FireError::UnknownTransition(_)
-                | FireError::NotManual(_)
-                | FireError::AnswerOccurrence { .. }
-                | FireError::NotEnabled {
-                    why:
-                        WhyNot::InFlight
-                        | WhyNot::RetryPending { .. }
-                        | WhyNot::FailedOnThisInput(_)
-                        | WhyNot::BindsAnswerInput,
-                    ..
-                }),
-            ) => unreachable!(
-                "the clock is set and the load checks that '{work}' has a manual pure Answer without retry: {e}"
-            ),
+            Err(e) => Err(e),
         }
     }
 
@@ -2520,66 +2491,35 @@ impl Executor {
         &self.conditions
     }
 
-    /// The state of an answer for the UI and MCP (UFT-adopt.a).
-    pub fn answer_settlement(&self, answer: &AnswerId) -> Result<AnswerSettlement, UftError> {
-        let id = answer.0.as_str();
-        let Some((work, _)) = self.answers.get(id) else {
-            return Err(UftError::UnknownAnswer(answer.clone()));
-        };
+    /// How far the answer `id` got; `None` for an answer this executor
+    /// never took.
+    pub fn answer_progress(&self, id: &str) -> Option<AnswerProgress<'_>> {
+        let (work, _) = self.answers.get(id)?;
         if self.undone.contains(id) {
-            return Ok(AnswerSettlement::Undone);
+            return Some(AnswerProgress::Undone);
         }
         let occurrence = work_occurrence(work, id);
-        Ok(match self.occurrences.get(&occurrence) {
-            Some(None | Some(Settled::OutcomeUnknown(_))) => {
-                AnswerSettlement::Working { work: occurrence }
-            }
-            Some(Some(Settled::Done)) => AnswerSettlement::Done { work: occurrence },
-            Some(Some(Settled::Failed(cause) | Settled::OverChangedInputs { cause, .. })) => {
-                AnswerSettlement::Failed {
-                    cause: cause.text.clone(),
-                    work: occurrence,
+        Some(match self.occurrences.get(&occurrence) {
+            Some(settled) => AnswerProgress::Work {
+                occurrence,
+                settled: settled.clone(),
+            },
+            None => {
+                let place = &self.net.asks[work].expired;
+                match self.tokens.token(place, id) {
+                    Some(t) => AnswerProgress::Expired {
+                        place,
+                        record: t.record(),
+                    },
+                    None => AnswerProgress::Waiting,
                 }
             }
-            None => match self.tokens.token(&expired_place(work), id) {
-                Some(t) => AnswerSettlement::Expired {
-                    reason: answer::parse_expired(t.record()).unwrap_or_else(|field| {
-                        panic!(
-                            "the {} token of '{id}' lacks '{field}'",
-                            expired_place(work)
-                        )
-                    }),
-                },
-                None => AnswerSettlement::Waiting,
-            },
         })
     }
 
-    /// The rows of every `Asks.T`, in work and subject order.
-    pub fn asks(&self) -> Result<Vec<AskRow>, DeriveError> {
-        let mut rows = Vec::new();
-        for (work, meta) in &self.net.asks {
-            for (subject, row) in self.derive_all(&asks_place(work))? {
-                let hash = match row.get(HASH_FIELD) {
-                    Some(Value::String(text)) => hash_from_text(text).map_err(|e| e.to_string()),
-                    other => Err(format!("{other:?} is no text")),
-                }
-                .map_err(|reason| DeriveError::AskRowHash {
-                    place: Place::new(&asks_place(work)),
-                    subject: subject.to_string(),
-                    reason,
-                })?;
-                rows.push(AskRow {
-                    transition: TransitionName(work.to_string()),
-                    subject: SubjectName(subject.to_string()),
-                    hash,
-                    input: meta.input.clone(),
-                    irreversible: meta.irreversible,
-                    has_preview: meta.has_preview,
-                });
-            }
-        }
-        Ok(rows)
+    /// The asks of the net, keyed by their work transition.
+    pub fn declared_asks(&self) -> &BTreeMap<Arc<str>, Ask> {
+        &self.net.asks
     }
 
     /// Evaluates the derived `place` for one subject, outside any firing.
@@ -2656,7 +2596,7 @@ impl Executor {
         if let Some(None | Some(Settled::OutcomeUnknown(_))) = self.occurrences.get(&occurrence) {
             return Err(UndoError::WorkUnsettled(occurrence));
         }
-        let answered = Place::new(&answered_place(&work));
+        let answered = self.net.asks[&work].answered.clone();
         let withdrawn = self
             .tokens
             .token(&answered, &subject)
@@ -3007,7 +2947,14 @@ impl Executor {
         }
         if let Some(work) = self.net.work_of_answer(transition) {
             let answer = match &occurrence {
-                OccurrenceId::Caller(id) if answer::answer_id(&value) == Some(&**id) => id.clone(),
+                OccurrenceId::Caller(id)
+                    if value
+                        .get(self.net.host.answer.keys.id)
+                        .and_then(self.net.host.as_text)
+                        == Some(&**id) =>
+                {
+                    id.clone()
+                }
                 _ => {
                     return Err(FireError::AnswerOccurrence {
                         transition: transition.to_string(),
@@ -3420,10 +3367,12 @@ impl Executor {
         {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
-        if let Some(p) = &self.net.answered_of(&t.name)
-            && !answer::work_input(&mut input, self.answered(p, s))
-        {
-            return Err(WhyNot::BindsAnswerInput);
+        if let Some(p) = &self.net.answered_of(&t.name) {
+            let key = self.net.host.answer.keys.input;
+            if input.contains_key(key) {
+                return Err(WhyNot::BindsAnswerInput);
+            }
+            input.insert(key.to_owned(), self.answered(p, s).input.clone());
         }
         Ok(input)
     }
@@ -3459,7 +3408,8 @@ impl Executor {
         if let Some(p) = &answered
             && !self.twin(Twin::OccurrenceNotInTrace)
         {
-            let (field, id) = answer::traced_id(self.answered(p, s));
+            let id = (self.net.host.text)(&self.answered(p, s).id);
+            let field = self.net.host.answer.keys.id.to_owned();
             trace.row(&self.tokens, p, s).fields.insert(field, Some(id));
         }
         let bound = (t.bind)(&mut self.reader(trace), s);

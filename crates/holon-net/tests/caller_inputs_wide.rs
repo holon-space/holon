@@ -20,6 +20,8 @@ use std::time::Duration;
 use holon_api::TypeHint;
 use holon_api::Value;
 use holon_net::exec::AskMeta;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
@@ -44,6 +46,7 @@ use holon_net::exec::TransitionDef;
 use holon_net::exec::WhyNot;
 use holon_net::exec::answer_transition;
 use holon_net::exec::answered_place;
+use holon_net::exec::ask_places;
 use holon_net::exec::asks_place;
 use holon_net::exec::expired_place;
 use holon_net::exec::hash_text;
@@ -66,6 +69,7 @@ use holon_net::uft::Generated;
 use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::ANSWER_INPUT_KEY;
@@ -1075,6 +1079,25 @@ impl NetGen {
             .collect()
     }
 
+    /// The ask side table of [`Self::net`].
+    fn metas(&self) -> AskMetas {
+        let descriptors: Vec<_> = (0..self.works.len()).map(|i| self.descriptor(i)).collect();
+        let mut metas = ask_metas(&descriptors);
+        for (i, w) in self.works.iter().enumerate() {
+            if w.hand.is_some() {
+                metas.insert(
+                    self.work_name(i),
+                    AskMeta {
+                        input: w.input.clone(),
+                        irreversible: w.irreversible,
+                        has_preview: false,
+                    },
+                );
+            }
+        }
+        metas
+    }
+
     fn descriptor(&self, i: usize) -> TransitionDescriptor {
         let w = &self.works[i];
         let names = self.stored();
@@ -1258,14 +1281,7 @@ impl NetGen {
             .place(&failed, Class::Process)
             .place(&expired_place(t), Class::Process)
             .derived(&asks_place(t), asks)
-            .ask(
-                t,
-                AskMeta {
-                    input: w.input.clone(),
-                    irreversible: w.irreversible,
-                    has_preview: false,
-                },
-            );
+            .ask(t, ask_places(t));
         let net = if self.answer_is_a_work(i) {
             net
         } else {
@@ -2173,8 +2189,8 @@ impl Machine {
                 dt,
             } => {
                 let work = work.of(&self.net.work_names());
-                let exec = &self.exec;
-                let rows = match no_panic("asks", || forms::of(exec.asks()))? {
+                let (exec, metas) = (&self.exec, self.net.metas());
+                let rows = match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => rows,
                     Answer::Refused(_) => vec![],
                 };
@@ -2264,7 +2280,8 @@ impl Machine {
                     .into_iter()
                     .filter(|w| self.net.reads_undeclared(w))
                     .collect();
-                match no_panic("asks", || forms::of(exec.asks()))? {
+                let metas = self.net.metas();
+                match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => {
                         for row in &rows {
                             prop_assert!(
