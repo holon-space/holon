@@ -156,7 +156,7 @@ fn parts() -> NativeParts {
 }
 
 fn base_net() -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .place("Refused", Class::Process)
         .place("Base", Class::Data)
         .place("OnDisk", Class::Data)

@@ -70,7 +70,7 @@ pub fn net_def(
         at: at(path, text, source.declaration()),
         source,
     })?;
-    let mut net = NetDef::default();
+    let mut net = crate::host::new_net();
     for (place, spec) in &file.places {
         net = match (spec.capacity, spec.pool) {
             (_, Some(size)) => net.pool(place, Class::Process, size),

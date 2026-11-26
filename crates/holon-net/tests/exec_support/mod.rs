@@ -8,6 +8,7 @@
 pub mod model;
 
 pub mod twin_names;
+pub mod values;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -216,35 +217,35 @@ impl Spec {
     }
 
     pub fn netdef(&self) -> NetDef {
-        let net = self
-            .places
-            .iter()
-            .fold(NetDef::default(), |net, (name, def)| match def {
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Single,
-                } => net.place(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Register,
-                } => net.register(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Fifo,
-                } => net.fifo(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: Some(c),
-                    ..
-                } => {
-                    assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
-                    net.place_with_candidate(name, c)
-                }
-                PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
-            });
+        let net =
+            self.places
+                .iter()
+                .fold(holon_net::exec::new_net(), |net, (name, def)| match def {
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Single,
+                    } => net.place(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Register,
+                    } => net.register(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Fifo,
+                    } => net.fifo(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: Some(c),
+                        ..
+                    } => {
+                        assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
+                        net.place_with_candidate(name, c)
+                    }
+                    PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
+                });
         let net = self
             .asks
             .iter()

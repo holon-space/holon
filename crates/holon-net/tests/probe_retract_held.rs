@@ -9,7 +9,6 @@ use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Executor;
-use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Read;
 use holon_net::exec::Receiver;
@@ -54,7 +53,7 @@ fn subjects(exec: &Executor) -> Vec<String> {
 #[test]
 fn a_subject_dropped_while_a_firing_holds_it_is_retracted_by_a_later_good_run() {
     let always: Read = Arc::new(|_, _| Some(Content::new()));
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .register("Process", Class::Process)
         .transition(
             TransitionDef::new(

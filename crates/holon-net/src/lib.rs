@@ -31,6 +31,7 @@ pub mod enabledness;
 pub mod exec;
 pub mod file;
 pub mod guards;
+pub mod host;
 pub mod load;
 pub mod marking;
 pub mod net;

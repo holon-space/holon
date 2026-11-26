@@ -188,7 +188,7 @@ fn logic(transition: &str) -> Logic {
 }
 
 fn built(net: &[Spec]) -> NetDef {
-    let mut def = NetDef::default();
+    let mut def = holon_net::exec::new_net();
     for p in PLACES {
         def = def.place(p, Class::Process);
     }
