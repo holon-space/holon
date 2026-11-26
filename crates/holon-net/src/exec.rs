@@ -907,17 +907,10 @@ pub struct Token<V = Value> {
     pub payload: Payload<V>,
 }
 
-/// Who counts a try on a token: the consuming transition.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContributionId(pub Arc<str>);
-
 /// The header of a token, outside its stamp: a change here moves no version
 /// (ADR 0032 §9.1, REV11-running.a).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Envelope {
-    /// Takes per consumer in its current run, a crashed or failed attempt
-    /// included.
-    pub tries: BTreeMap<ContributionId, u32>,
     pub next_try: Option<Duration>,
 }
 
@@ -1053,12 +1046,6 @@ impl Tokens {
         self.slot(place, subject).map_or(0, |s| s.version)
     }
 
-    /// A pool token serves every subject's run, so it counts no tries: the
-    /// run's attempts are the count.
-    fn counts_tries(&self, place: &str) -> bool {
-        !self.pools.contains_key(place)
-    }
-
     /// Who committed the current version: see [`Slot::writer`].
     fn writer(&self, place: &str, subject: &str) -> Option<Arc<str>> {
         self.slot(place, subject).and_then(|s| s.writer.clone())
@@ -1119,23 +1106,15 @@ impl Tokens {
         content: Content,
         by: Writer,
     ) -> Result<(), PoolFull> {
-        self.put_with(
-            place,
-            subject,
-            Envelope::default(),
-            Payload::Record(content),
-            by,
-        )
+        self.put_with(place, subject, Payload::Record(content), by)
     }
 
-    /// [`put`](Self::put) with a header. Equal content with another header
-    /// replaces the header and keeps the version: the stamp covers the
-    /// payload only.
+    /// [`put`](Self::put) of any payload. Equal content leaves the held
+    /// token as it is.
     fn put_with(
         &mut self,
         place: &Place,
         subject: &Subject,
-        envelope: Envelope,
         payload: Payload,
         by: Writer,
     ) -> Result<(), PoolFull> {
@@ -1152,16 +1131,15 @@ impl Tokens {
         if fifo {
             slot.tokens.push_back(Token {
                 id,
-                envelope,
+                envelope: Envelope::default(),
                 payload,
             });
-        } else if let Some(held) = slot.tokens.front_mut().filter(|t| t.payload == payload) {
-            held.envelope = envelope;
+        } else if slot.tokens.front().is_some_and(|t| t.payload == payload) {
             return Ok(());
         } else {
             slot.tokens = VecDeque::from([Token {
                 id,
-                envelope,
+                envelope: Envelope::default(),
                 payload,
             }]);
         }
@@ -2635,10 +2613,7 @@ impl Executor {
             } else if let Some(holder) = self.holder(&place, &subject) {
                 ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
-                match self
-                    .tokens
-                    .put_with(&place, &subject, Envelope::default(), content, None)
-                {
+                match self.tokens.put_with(&place, &subject, content, None) {
                     Ok(()) => ReversalOutcome::Restored,
                     Err(PoolFull) => ReversalOutcome::PoolFull,
                 }
@@ -2699,13 +2674,7 @@ impl Executor {
         }
         let payload = self.net.payload(place, content);
         self.tokens
-            .put_with(
-                &Place::new(place),
-                &Subject::new(subject),
-                Envelope::default(),
-                payload,
-                None,
-            )
+            .put_with(&Place::new(place), &Subject::new(subject), payload, None)
             .map_err(|PoolFull| ExecError::PoolFull {
                 place: place.to_string(),
             })?;
@@ -2915,13 +2884,9 @@ impl Executor {
                     }
                     match before {
                         Some(content) => {
-                            if let Err(PoolFull) = self.tokens.put_with(
-                                &place,
-                                &subject,
-                                Envelope::default(),
-                                content,
-                                None,
-                            ) {
+                            if let Err(PoolFull) =
+                                self.tokens.put_with(&place, &subject, content, None)
+                            {
                                 self.disclose(Condition::PoolFull {
                                     place,
                                     transition: work.clone(),
@@ -3085,22 +3050,7 @@ impl Executor {
         if let (Some(a), EffectResult::Unknown(_)) = (&live, &result)
             && let Some(probe) = self.continuation(a)
         {
-            let mut a = a.clone();
-            if !probe {
-                let contribution = ContributionId(a.transition.clone());
-                for (_, token) in a
-                    .taken
-                    .iter_mut()
-                    .filter(|(p, _)| self.tokens.counts_tries(p))
-                {
-                    *token
-                        .envelope
-                        .tries
-                        .get_mut(&contribution)
-                        .expect("the take counted it") += 1;
-                }
-            }
-            self.issue(a, probe, now);
+            self.issue(a.clone(), probe, now);
             return Completion::Recorded;
         }
         match outcome(&self.attempts[occurrence]) {
@@ -3394,7 +3344,7 @@ impl Executor {
         }
         let mark = self.marks.get(&(t.name.clone(), s.clone()));
         let same_input = bound.is_ok() && mark.is_some_and(|m| m.key == self.key(trace));
-        // ADR 0032 Q6.a: new input starts from zero tries, not after the
+        // ADR 0032 Q6.a: new input starts a new run at once, not after the
         // backoff.
         if let Some(due) = self.retry_due(&t.name, s)
             && (bound.is_err() || same_input || mark.is_none())
@@ -3509,20 +3459,13 @@ impl Executor {
         for p in consumes {
             let hidden = self.twin(Twin::HiddenReservation);
             let slot = self.tokens.slot_mut(&p, &subject);
-            let mut token = if hidden {
+            let token = if hidden {
                 slot.reserved = true;
                 slot.tokens.front().cloned()
             } else {
                 slot.tokens.pop_front()
             }
             .expect("decide checked every consumed token");
-            if self.tokens.counts_tries(&p) {
-                *token
-                    .envelope
-                    .tries
-                    .entry(ContributionId(transition.clone()))
-                    .or_default() += 1;
-            }
             self.tokens.lend(&p);
             taken.push((p, token));
         }
@@ -3532,20 +3475,6 @@ impl Executor {
             failed: None,
         });
         run.attempts += 1;
-        let attempts = run.attempts;
-        // A parked occurrence keeps the run open with its own token, so a
-        // newer token joins a run that already counts that token's tries.
-        let shared = self
-            .parked
-            .values()
-            .any(|a| &a.transition == transition && a.subject == subject);
-        for (p, token) in taken.iter().filter(|(p, _)| self.tokens.counts_tries(p)) {
-            let tries = token.envelope.tries[&ContributionId(transition.clone())];
-            assert!(
-                tries == attempts || shared && tries < attempts,
-                "the {p} token of {subject} counts {tries} tries of '{transition}', its run {attempts}"
-            );
-        }
         self.occurrences.insert(occurrence.clone(), None);
         let a = Attempt {
             occurrence,
@@ -3577,23 +3506,9 @@ impl Executor {
             .mark_slot(&Place::retry_pending(&key.0), &key.1, payload);
     }
 
-    /// The tries a returned token counts belong to the run that ends.
     fn end_run(&mut self, key: &(Arc<str>, Subject)) {
         self.runs.remove(key);
         self.set_retry_due(key, None);
-        let contribution = ContributionId(key.0.clone());
-        for p in &self.net.transition_def(&key.0).consumes {
-            if let Some(slot) = self
-                .tokens
-                .slots
-                .get_mut(p)
-                .and_then(|row| row.get_mut(&key.1))
-            {
-                for t in &mut slot.tokens {
-                    t.envelope.tries.remove(&contribution);
-                }
-            }
-        }
     }
 
     fn occupy_running(&mut self, a: &Attempt) {
@@ -3729,23 +3644,6 @@ impl Executor {
         ));
         if pure {
             // A pure firing that never committed is no try.
-            let mut a = a;
-            let by = ContributionId(a.transition.clone());
-            for (_, token) in a
-                .taken
-                .iter_mut()
-                .filter(|(p, _)| self.tokens.counts_tries(p))
-            {
-                let tries = token
-                    .envelope
-                    .tries
-                    .get_mut(&by)
-                    .expect("the take counted it");
-                *tries -= 1;
-                if *tries == 0 {
-                    token.envelope.tries.remove(&by);
-                }
-            }
             self.rollback(&a);
             if let Some(run) = self
                 .runs
@@ -3844,21 +3742,11 @@ impl Executor {
     /// discloses it once per place and transition.
     fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
         let payload = self.net.payload(place, content);
-        self.put_by_with(place, subject, Envelope::default(), payload, by);
+        self.put_by_with(place, subject, payload, by);
     }
 
-    fn put_by_with(
-        &mut self,
-        place: &Place,
-        subject: &Subject,
-        envelope: Envelope,
-        payload: Payload,
-        by: &Arc<str>,
-    ) {
-        if let Err(PoolFull) = self
-            .tokens
-            .put_with(place, subject, envelope, payload, Some(by))
-        {
+    fn put_by_with(&mut self, place: &Place, subject: &Subject, payload: Payload, by: &Arc<str>) {
+        if let Err(PoolFull) = self.tokens.put_with(place, subject, payload, Some(by)) {
             self.disclose(Condition::PoolFull {
                 place: place.clone(),
                 transition: by.clone(),
@@ -3868,13 +3756,7 @@ impl Executor {
 
     /// A failure or timeout port token: no data, the cause in its header.
     fn put_port(&mut self, port: &Place, subject: &Subject, cause: Cause, by: &Arc<str>) {
-        self.put_by_with(
-            port,
-            subject,
-            Envelope::default(),
-            Payload::Failure { cause },
-            by,
-        );
+        self.put_by_with(port, subject, Payload::Failure { cause }, by);
     }
 
     fn disclose(&mut self, c: Condition) {
@@ -3966,13 +3848,7 @@ impl Executor {
             self.commit_consumption(p, &a.subject, &a.transition);
         }
         for (place, subject, payload) in rows {
-            self.put_by_with(
-                &place,
-                &subject,
-                Envelope::default(),
-                payload,
-                &a.transition,
-            );
+            self.put_by_with(&place, &subject, payload, &a.transition);
         }
         if !before.is_empty() {
             let delta = before
@@ -4008,20 +3884,9 @@ impl Executor {
     }
 
     /// The inputs go back with no version change: see [`Tokens::restore`].
-    /// A token that returns after its run ended counts no tries of it.
     fn rollback(&mut self, a: &Attempt) {
-        let run_ended = !self
-            .runs
-            .contains_key(&(a.transition.clone(), a.subject.clone()));
         for (p, token) in &a.taken {
-            let mut token = token.clone();
-            if run_ended {
-                token
-                    .envelope
-                    .tries
-                    .remove(&ContributionId(a.transition.clone()));
-            }
-            self.tokens.restore(p, &a.subject, &token);
+            self.tokens.restore(p, &a.subject, token);
         }
         self.release_running(&a.transition, &a.subject);
     }

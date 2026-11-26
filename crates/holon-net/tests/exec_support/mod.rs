@@ -888,12 +888,6 @@ impl Driver {
                 .row(p, s)
                 .map(|t| {
                     let head = Head {
-                        tries: t
-                            .envelope
-                            .tries
-                            .iter()
-                            .map(|(c, n)| (c.0.to_string(), *n))
-                            .collect(),
                         cause: match &t.payload {
                             Payload::Failure { cause } => Some(cause.text.clone()),
                             _ => None,

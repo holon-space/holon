@@ -35,7 +35,7 @@ L1 compiles it into L0 places and L0 transitions. L0 sees only these:
 
 | L0 transition | Trigger | Consumes | Reads | Produces | Bind |
 |---|---|---|---|---|---|
-| `FetchFeed.take` | Auto | `Feed[s]` | `Settings[s]`, `Clock` | `FetchFeed.Running[s]`, `tries` raised | the author's guard; `tries < 3`; no `next_try`, or `next_try` at or before `Clock` |
+| `FetchFeed.take` | Auto | `Feed[s]` | `Settings[s]`, `Clock` | `FetchFeed.Running[s]`, `tries` (planned, not in the code) raised | the author's guard; `tries < 3` (planned, not in the code); no `next_try`, or `next_try` at or before `Clock` |
 | `FetchFeed.record` | External | `FetchFeed.Running[s]` | | `Items[s]`, or the candidate place, or nothing (stale-record rule) | caller binding: attempt, outputs |
 | `FetchFeed.fail` | External | `FetchFeed.Running[s]` | `Clock` | `Feed[s]` with the cause (planned, not in the code) and `next_try` | caller binding: attempt, cause (planned, not in the code) |
 | `Tick` | External | `Clock` | | `Clock` with the new time | caller binding: `now`; guard: `now` is not older than `Clock` |
@@ -47,7 +47,7 @@ transition or three is open, see
 What happens:
 
 1. A token arrives in `Feed[s]`. `FetchFeed.take` is enabled. It fires and
-   moves the token into `FetchFeed.Running[s]`. It raises `tries` in the
+   moves the token into `FetchFeed.Running[s]`. It raises `tries` (planned, not in the code) in the
    token's header. The payload and its stamp do not change. A crash between
    the take and the failure therefore counts as a try.
 2. `Feed[s]` is now empty, so `FetchFeed.take` is no longer enabled. The
@@ -64,7 +64,7 @@ What happens:
    `next_try` (the time on `Clock` plus the backoff) in its header. Other
    consumers of `Feed` can take it. The guard of `FetchFeed.take` is false
    until `Clock` reaches `next_try`. The driver fires `Tick` at that time.
-   When `tries` reaches 3, the guard stays false.
+   When `tries` (planned, not in the code) reaches 3, the guard stays false.
 
 L0 never reads a system clock, never sees an effect, a retry policy or a Holon name. It sees
 places, tokens, arcs, binds and atomic firings.
@@ -121,10 +121,10 @@ Constraints:
 ### L1 `petri-workflow`: workflow nets, independent of Holon
 
 - **Typed bookkeeping tokens.** `Token<V>` holds an `Envelope` header
-  (`tries` per contribution id, `cause` (planned, not in the code), `next_try`) around a `Record<V>`
+  (`tries` per contribution id (planned, not in the code), `cause` (planned, not in the code), `next_try`) around a `Record<V>`
   payload. The Running, Clock and undo tokens are typed variants, never
   encoded into `V`.
-- **The stamp covers the payload only.** A take raises `tries` in the header
+- **The stamp covers the payload only.** A take raises `tries` (planned, not in the code) in the header
   and keeps the payload stamp, so the take is a move that changes no content
   and no version (ADR 0032 REV11-running.a) and still counts the try
   (ADR 0032 §9.1).
@@ -141,7 +141,7 @@ Constraints:
   - the record with the stale-record rule, by stamp;
   - candidate places;
   - facts;
-  - retry: a definite failure returns the input to its place with `tries`,
+  - retry: a definite failure returns the input to its place with `tries` (planned, not in the code),
     `cause` (planned, not in the code) and `next_try` in the header; the retry guard compares
     `next_try` with the Clock place;
   - run timers and abandon timers, as guards over the Clock place;
@@ -168,7 +168,7 @@ Constraints:
 - Holon names: `Answer.T`, `AskRow`, the `TypeHint` table.
 - The uft lowering.
 - The mapping from header fields to holon-expr fields, so guards read
-  `tries` and `cause` (planned, not in the code).
+  `tries` (planned, not in the code) and `cause` (planned, not in the code).
 - The derived projection and its analyses, unchanged and separate from the
   executor.
 
@@ -301,21 +301,31 @@ has one explicit rule.
 
 ### `tries` per token against attempts per run
 
-The header counts `tries[T]` per token in T's current run. The count bound
-reads `Run.attempts`. The two agree at each take, except while a parked
-occurrence (outcome unknown) shares the run: then the new token has fewer
-tries than the run has attempts. The retry step moves the bound into the
-header and must pick one authority.
+Today `Run.attempts` per (transition, subject) is the only count; the count
+bound reads it. The header holds no `tries` yet: a second counter that must
+equal the first broke on every way a token is replaced or consumed while its
+run is open. The retry step picks the unit of a retry.
 
-- (a) The bound reads the header. A parked occurrence does not count for
-  the new token.
-- (b) The bound stays on the run, and the header only shows the count.
+Example: `T0` (Keyed) takes `x` from `P0[s]` and fails retryably; its run
+stays open with 1 attempt and a backoff. `T1` consumes `x`. After the
+backoff an outside write puts `y` with the same content into `P0[s]`. The
+failure mark sees the same input, so the run of (`T0`, s) is still open.
+`T0` takes `y`: attempt 2 of the run, but `y` has never been taken.
+
+- (A) The token is the unit. A run ends when the token it counts on leaves
+  the net; `y` is new input with 0 tries and fires at once, without the
+  backoff. The bound reads the header.
+- (B) The run is the unit. A token that joins an open run gets
+  `tries = attempts - 1` at the take; the header copies the run, and the
+  bound may read either.
+
+Recommendation: open, for the retry step.
 
 ### Pool tokens
 
-A pool token serves the runs of every subject, so it counts no tries.
-Open for the retry step: does a failed run over a pool token retry, and
-what is its count?
+A pool token serves the runs of every subject. Open for the retry step:
+does a failed run over a pool token retry, and with (A), does the pool
+token count the tries of one subject's run?
 
 ### `notify(rows)` for Loro-backed stores
 

@@ -86,11 +86,10 @@ fn key(a: &str, s: &str) -> Key {
     (a.to_string(), s.to_string())
 }
 
-/// A token's header as the differential check compares it: takes per
-/// consuming transition, and a port token's cause.
+/// A token's header as the differential check compares it: a port token's
+/// cause.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Head {
-    pub tries: BTreeMap<String, u32>,
     pub cause: Option<String>,
     /// The executor made it from a stale effect's output (NET-cand.a).
     pub candidate: bool,
@@ -1248,12 +1247,11 @@ impl Model {
             .consumes
             .iter()
             .map(|p| {
-                let mut c = self
+                let c = self
                     .slot_mut(p, s)
                     .content
                     .pop_front()
                     .expect("decide checked every consumed token");
-                *c.0.tries.entry(t.name.clone()).or_default() += 1;
                 (p.clone(), c)
             })
             .collect();
@@ -1331,17 +1329,8 @@ impl Model {
         self.requests.push(req);
     }
 
-    /// The tries a returned token counts belong to the run that ends.
     fn end_run(&mut self, run_key: &Key) {
         self.runs.remove(run_key);
-        let consumes = self.transition(&run_key.0).consumes.clone();
-        for p in consumes {
-            if let Some(slot) = self.slots.get_mut(&key(&p, &run_key.1)) {
-                for (head, _) in &mut slot.content {
-                    head.tries.remove(&run_key.0);
-                }
-            }
-        }
     }
 
     fn issue(&mut self, occ: &OccurrenceId, probe: bool, now: Duration) {
@@ -1452,10 +1441,6 @@ impl Model {
                     return None;
                 }
                 run.attempts += 1;
-                let name = t.name.clone();
-                for (_, (head, _)) in &mut self.occ_mut(occ).taken {
-                    *head.tries.get_mut(&name).expect("the take counted it") += 1;
-                }
                 Some(false)
             }
             Receiver::StateProbe if !live.probe => Some(true),
@@ -1526,14 +1511,6 @@ impl Model {
         ));
         if matches!(t.body, Body::Pure(_)) {
             // A pure firing that never committed is no try.
-            let name = t.name.clone();
-            for (_, (head, _)) in &mut self.occ_mut(occ).taken {
-                let tries = head.tries.get_mut(&name).expect("the take counted it");
-                *tries -= 1;
-                if *tries == 0 {
-                    head.tries.remove(&name);
-                }
-            }
             self.rollback(occ);
             let run_key = self.run_key(occ);
             if let Some(run) = self.runs.get_mut(&run_key) {
@@ -1668,12 +1645,7 @@ impl Model {
     fn rollback(&mut self, occ: &OccurrenceId) {
         let o = &self.occs[occ];
         let (taken, s) = (o.taken.clone(), o.subject.clone());
-        let run_ended = !self.runs.contains_key(&key(&o.transition, &s));
-        let name = o.transition.clone();
-        for (p, mut c) in taken {
-            if run_ended {
-                c.0.tries.remove(&name);
-            }
+        for (p, c) in taken {
             let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
             if fifo {
