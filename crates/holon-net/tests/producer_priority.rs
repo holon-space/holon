@@ -108,7 +108,7 @@ fn fired(ts: &[Drawn]) -> Vec<String> {
     let _q = exec
         .write("Go", "s", Content::new(), Duration::ZERO)
         .expect("the Go write is accepted");
-    order.lock().unwrap().clone()
+    crate::exec_support::live_half(&order.lock().unwrap())
 }
 
 fn drawn() -> impl Strategy<Value = Vec<Drawn>> {

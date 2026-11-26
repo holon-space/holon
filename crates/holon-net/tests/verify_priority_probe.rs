@@ -154,8 +154,8 @@ fn fired(ts: &[T], subjects: usize) -> BTreeMap<String, Vec<String>> {
     let mut all: BTreeMap<String, Vec<String>> = (0..subjects)
         .map(|s| (format!("s{s}"), Vec::new()))
         .collect();
-    for (s, n) in order.lock().unwrap().iter() {
-        all.get_mut(s).expect("known subject").push(n.clone());
+    for (s, n) in crate::exec_support::live_half(&order.lock().unwrap()) {
+        all.get_mut(&s).expect("known subject").push(n);
     }
     all
 }

@@ -227,6 +227,10 @@ Laws, checked as PBT invariants:
   ChangeDriven equals level semantics.
 - **Crash.** Drop the driver and every cache, rebuild from the marking: the
   observable run is the same. `Crash` is a shared PBT action.
+  Today the law covers the rebuildable caches (`watchers`, `preferred`,
+  `waiters`, `pending`, `pending_all`); the executor state outside the marking
+  (`runs`, `marks`, `in_flight`, `parked`, `attempts`, `occurrences`,
+  `answers`, `undone`, `deltas`) joins as the carve compiles it into tokens.
 - **Witness.** The witness is a digest of the read trace. The host gives
   `NetDef` an encoder function from `V` to bytes, so `V` needs no `Eq + Hash`
   bound and no trait (Holon's `Value` holds floats and is only `PartialEq`).

@@ -388,40 +388,140 @@ pub fn load(net: NetDef) -> Result<Checked, LoadError> {
     }))
 }
 
-/// An executor that panics on a break of the Level-dead law after every call
-/// that quiesces, so a PBT shrinks to a minimal net. Reads go through
-/// `Deref`; there is no `DerefMut`, so no change skips the check.
-pub struct Checked(Executor);
+/// An executor that panics on a break of the Level-dead law or the Crash law
+/// after every call, so a PBT shrinks to a minimal net. Reads go through
+/// `Deref`; there is no `DerefMut`, so no change skips the checks.
+///
+/// Crash law: a second executor on the same net drops its caches before
+/// every call and must answer and look the same. Its bodies run too, so a
+/// body with a side effect runs twice per firing.
+pub struct Checked {
+    exec: Executor,
+    crashed: Option<Executor>,
+}
 
 impl From<Executor> for Checked {
+    /// `exec` is on its initial marking: the crashed twin starts there.
     fn from(exec: Executor) -> Self {
-        Self(exec)
+        let crashed = exec.fresh();
+        assert_same("load", &observable(&exec), &observable(&crashed));
+        Self {
+            exec,
+            crashed: Some(crashed),
+        }
     }
+}
+
+/// What bodies logged during one [`Checked`] call: the live executor's
+/// entries, then the same entries again from the crashed one.
+pub fn live_half<T: Clone + Debug + PartialEq>(log: &[T]) -> Vec<T> {
+    let (live, crashed) = log.split_at(log.len() / 2);
+    assert_eq!(live, crashed, "the crashed executor's bodies ran otherwise");
+    live.to_vec()
 }
 
 impl std::ops::Deref for Checked {
     type Target = Executor;
 
     fn deref(&self) -> &Executor {
-        &self.0
+        &self.exec
     }
+}
+
+/// What a caller sees of an executor besides call answers.
+fn observable(e: &Executor) -> impl Debug + PartialEq + '_ {
+    (
+        e.tokens(),
+        e.marks().collect::<Vec<_>>(),
+        e.occurrences().collect::<Vec<_>>(),
+        e.in_flight().collect::<Vec<_>>(),
+        e.retrying().collect::<Vec<_>>(),
+        e.conditions(),
+    )
+}
+
+/// The lines of a pretty debug text, a one-line field in parens (a place or
+/// subject key) joined onto its opening line.
+fn lines(text: &str) -> Vec<String> {
+    let ls: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < ls.len() {
+        if ls[i].ends_with('(') && ls.get(i + 2).is_some_and(|l| l.trim().starts_with(')')) {
+            let field = ls[i + 1].trim().trim_end_matches(',');
+            out.push(format!("{}{field}{}", ls[i], ls[i + 2].trim()));
+            i += 3;
+        } else {
+            out.push(ls[i].to_string());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Panics with the first line where the pretty debug texts differ and the
+/// enclosing lines that name where it sits.
+fn assert_same<T: Debug + PartialEq>(op: &str, live: &T, crashed: &T) {
+    if live == crashed {
+        return;
+    }
+    let (a, b) = (
+        lines(&format!("{live:#?}")),
+        lines(&format!("{crashed:#?}")),
+    );
+    let i = (0..a.len().max(b.len()))
+        .find(|&i| a.get(i) != b.get(i))
+        .expect("unequal values print unequal");
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut path = Vec::new();
+    let mut depth = a.get(i).or(b.get(i)).map_or(0, |l| indent(l));
+    for l in a[..i.min(a.len())].iter().map(String::as_str).rev() {
+        if indent(l) < depth {
+            depth = indent(l);
+            path.push(l.trim());
+        }
+    }
+    path.reverse();
+    panic!(
+        "crash law broken after {op}: at {}\n  live:    {:?}\n  crashed: {:?}",
+        if path.is_empty() {
+            "the top".to_string()
+        } else {
+            path.join(" > ")
+        },
+        a.get(i),
+        b.get(i),
+    );
 }
 
 impl Checked {
     /// Panics with the first auto pair still enabled at quiescence.
     pub fn assert_level_dead(&self, op: &str) {
-        if let Some(v) = self.0.level_violations().first() {
+        if let Some(v) = self.exec.level_violations().first() {
             panic!("level-dead law broken after {op}: {v}");
         }
     }
 
     /// The executor with no check, for a test that counts the bind calls of
-    /// one operation: the check runs every bind again.
+    /// one operation: the checks run every bind again. Its changes reach
+    /// only this executor, so the crash check ends here.
     pub fn unchecked(&mut self) -> &mut Executor {
-        &mut self.0
+        self.crashed = None;
+        &mut self.exec
     }
 
-    fn checked<T, E>(&self, op: &str, r: Result<T, E>) -> Result<T, E> {
+    fn run<T: Debug + PartialEq, E: Debug + PartialEq>(
+        &mut self,
+        op: &str,
+        call: impl Fn(&mut Executor) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let r = call(&mut self.exec);
+        if let Some(crashed) = &mut self.crashed {
+            crashed.crash();
+            let c = call(crashed);
+            assert_same(op, &r, &c);
+            assert_same(op, &observable(&self.exec), &observable(crashed));
+        }
         if r.is_ok() {
             self.assert_level_dead(op);
         }
@@ -435,8 +535,9 @@ impl Checked {
         content: Content,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        let r = self.0.write(place, subject, content, now);
-        self.checked(&format!("write {place}/{subject} at {now:?}"), r)
+        self.run(&format!("write {place}/{subject} at {now:?}"), |e| {
+            e.write(place, subject, content.clone(), now)
+        })
     }
 
     pub fn retract(
@@ -445,13 +546,13 @@ impl Checked {
         subject: &str,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        let r = self.0.retract(place, subject, now);
-        self.checked(&format!("retract {place}/{subject} at {now:?}"), r)
+        self.run(&format!("retract {place}/{subject} at {now:?}"), |e| {
+            e.retract(place, subject, now)
+        })
     }
 
     pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
-        let r = self.0.step(now);
-        self.checked(&format!("step at {now:?}"), r)
+        self.run(&format!("step at {now:?}"), |e| e.step(now))
     }
 
     pub fn fire(
@@ -463,8 +564,9 @@ impl Checked {
         now: Duration,
     ) -> Result<Quiesced<Accepted>, FireError> {
         let op = format!("fire {transition}/{subject} as {occurrence} at {now:?}");
-        let r = self.0.fire(transition, subject, occurrence, value, now);
-        self.checked(&op, r)
+        self.run(&op, |e| {
+            e.fire(transition, subject, occurrence.clone(), value.clone(), now)
+        })
     }
 
     pub fn complete(
@@ -474,8 +576,7 @@ impl Checked {
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
         let op = format!("complete {attempt:?} with {result:?} at {now:?}");
-        let r = self.0.complete(attempt, result, now);
-        self.checked(&op, r)
+        self.run(&op, |e| e.complete(attempt, result.clone(), now))
     }
 
     pub fn resolve(
@@ -484,9 +585,9 @@ impl Checked {
         resolution: Resolution,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        let op = format!("resolve {occurrence} at {now:?}");
-        let r = self.0.resolve(occurrence, resolution, now);
-        self.checked(&op, r)
+        self.run(&format!("resolve {occurrence} at {now:?}"), |e| {
+            e.resolve(occurrence, resolution.clone(), now)
+        })
     }
 
     pub fn answer(
@@ -494,9 +595,9 @@ impl Checked {
         call: AnswerCall,
         now: Duration,
     ) -> Result<Quiesced<AnswerId>, UftError> {
-        let op = format!("answer {call:?} at {now:?}");
-        let r = self.0.answer(call, now);
-        self.checked(&op, r)
+        self.run(&format!("answer {call:?} at {now:?}"), |e| {
+            e.answer(call.clone(), now)
+        })
     }
 
     pub fn undo(
@@ -504,8 +605,9 @@ impl Checked {
         answer: &OccurrenceId,
         now: Duration,
     ) -> Result<Quiesced<Undone>, UndoError> {
-        let r = self.0.undo(answer, now);
-        self.checked(&format!("undo {answer} at {now:?}"), r)
+        self.run(&format!("undo {answer} at {now:?}"), |e| {
+            e.undo(answer, now)
+        })
     }
 }
 

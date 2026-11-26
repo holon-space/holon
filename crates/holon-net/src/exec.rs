@@ -178,6 +178,7 @@ pub struct AskMeta {
     pub has_preview: bool,
 }
 
+#[derive(Clone)]
 pub enum PlaceKind {
     /// `candidate`: the place declares an apply transition, whose input this
     /// candidate place is (NET-cand.a).
@@ -203,6 +204,7 @@ pub enum Capacity {
     Fifo,
 }
 
+#[derive(Clone)]
 pub struct PlaceDef {
     pub class: Class,
     pub kind: PlaceKind,
@@ -290,6 +292,7 @@ pub struct Retry {
     pub max_attempts: u32,
 }
 
+#[derive(Clone)]
 pub struct TransitionDef {
     pub name: Arc<str>,
     pub trigger: Trigger,
@@ -403,7 +406,7 @@ impl TransitionDef {
 }
 
 /// A runtime net, built in Rust. [`Executor::new`] checks it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NetDef {
     places: BTreeMap<Place, PlaceDef>,
     transitions: Vec<TransitionDef>,
@@ -988,7 +991,7 @@ impl<V: fmt::Debug> Token<V> {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Slot {
     /// Changes only when a record or an outside write commits a change.
     version: u64,
@@ -1015,7 +1018,7 @@ struct PoolFull;
 
 /// The owned marking: a token queue and a version per (place, subject). Only
 /// a [`Capacity::Fifo`] place ever holds more than one token.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Tokens {
     slots: BTreeMap<Place, BTreeMap<Subject, Slot>>,
     next_id: u64,
@@ -1571,6 +1574,7 @@ pub enum Completion {
     StillUnknown,
 }
 
+#[derive(Clone)]
 pub enum Resolution {
     /// The effect happened: record these outputs.
     Verify(Vec<Output>),
@@ -2021,7 +2025,7 @@ pub struct Executor {
     requests: Vec<EffectRequest>,
     /// The auto transitions whose enabledness reads each place for the
     /// subject it decides (its inputs, inhibitors and run state).
-    watchers: BTreeMap<Place, Vec<Arc<str>>>,
+    watchers: Watchers,
     /// Who declined on a read of a row: decided again when the row changes.
     waiters: BTreeMap<(Place, Subject), BTreeSet<Decision>>,
     /// Per transition, the auto producers of a place it produces that come
@@ -2039,6 +2043,8 @@ pub struct Executor {
     #[cfg(feature = "naive-twins")]
     twin: Option<Twin>,
 }
+
+type Watchers = BTreeMap<Place, Vec<Arc<str>>>;
 
 /// A (transition, subject) pair: one enabledness decision.
 type Decision = (Arc<str>, Subject);
@@ -2076,9 +2082,58 @@ pub fn hash_from_text(text: &str) -> Result<AskHash, blake3::HexError> {
     Ok(AskHash(*blake3::Hash::from_hex(text)?.as_bytes()))
 }
 
+/// Per place, the auto transitions that watch it; per transition, its
+/// preferred producers.
+fn caches(net: &NetDef) -> (Watchers, Vec<Vec<usize>>) {
+    let mut watchers = Watchers::new();
+    for t in net
+        .transitions
+        .iter()
+        .filter(|t| t.trigger == Trigger::Auto)
+    {
+        let run_state = [t.running(), Place::retry_pending(&t.name)];
+        for p in (t
+            .consumes
+            .iter()
+            .chain(&t.reads)
+            .chain(&t.inhibits)
+            .cloned())
+        .chain(run_state)
+        .chain(net.answered_of(&t.name))
+        {
+            watchers.entry(p).or_default().push(t.name.clone());
+        }
+    }
+    let preferred = net
+        .transitions
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            net.transitions
+                .iter()
+                .enumerate()
+                .filter(|&(j, u)| {
+                    u.trigger == Trigger::Auto
+                        && u.produces.iter().any(|p| t.produces.contains(p))
+                        && (u.priority, Reverse(j)) > (t.priority, Reverse(i))
+                })
+                .map(|(j, _)| j)
+                .collect()
+        })
+        .collect();
+    (watchers, preferred)
+}
+
 impl Executor {
     pub fn new(mut net: NetDef) -> Result<Self, LoadError> {
         net.check()?;
+        let exec = Self::on(net);
+        exec.refuse_derived_cycles()?;
+        Ok(exec)
+    }
+
+    /// The executor of a checked net, on its initial marking.
+    fn on(net: NetDef) -> Self {
         let fifo = net
             .places
             .iter()
@@ -2102,43 +2157,8 @@ impl Executor {
                     .expect("an empty pool takes its size");
             }
         }
-        let mut watchers: BTreeMap<Place, Vec<Arc<str>>> = BTreeMap::new();
-        for t in net
-            .transitions
-            .iter()
-            .filter(|t| t.trigger == Trigger::Auto)
-        {
-            let run_state = [t.running(), Place::retry_pending(&t.name)];
-            for p in (t
-                .consumes
-                .iter()
-                .chain(&t.reads)
-                .chain(&t.inhibits)
-                .cloned())
-            .chain(run_state)
-            .chain(net.answered_of(&t.name))
-            {
-                watchers.entry(p).or_default().push(t.name.clone());
-            }
-        }
-        let preferred = net
-            .transitions
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                net.transitions
-                    .iter()
-                    .enumerate()
-                    .filter(|&(j, u)| {
-                        u.trigger == Trigger::Auto
-                            && u.produces.iter().any(|p| t.produces.contains(p))
-                            && (u.priority, Reverse(j)) > (t.priority, Reverse(i))
-                    })
-                    .map(|(j, _)| j)
-                    .collect()
-            })
-            .collect();
-        let exec = Self {
+        let (watchers, preferred) = caches(&net);
+        Self {
             net,
             tokens,
             marks: BTreeMap::new(),
@@ -2162,9 +2182,32 @@ impl Executor {
             next_minted: 0,
             #[cfg(feature = "naive-twins")]
             twin: None,
-        };
-        exec.refuse_derived_cycles()?;
-        Ok(exec)
+        }
+    }
+
+    /// A second executor on this net and twin, on the initial marking.
+    pub fn fresh(&self) -> Self {
+        Self {
+            #[cfg(feature = "naive-twins")]
+            twin: self.twin,
+            ..Self::on(self.net.clone())
+        }
+    }
+
+    /// Drops every cache the executor rebuilds from its net and marking, as
+    /// a restart does (Crash law): the next quiescence decides every auto
+    /// pair again.
+    pub fn crash(&mut self) {
+        (self.watchers, self.preferred) = caches(&self.net);
+        self.waiters.clear();
+        self.pending.clear();
+        self.pending_all = self
+            .net
+            .transitions
+            .iter()
+            .filter(|t| t.trigger == Trigger::Auto)
+            .map(|t| t.name.clone())
+            .collect();
     }
 
     /// Evaluates every derived place once on the initial marking: a cycle it
