@@ -670,11 +670,13 @@ struct RetryInput {
 
 fn retry_input() -> impl Strategy<Value = RetryInput> {
     let index = any::<prop::sample::Index>;
-    (index(), index(), prop::option::of((index(), any::<bool>()))).prop_map(|(input, first, second)| RetryInput {
-        input,
-        first,
-        second,
-    })
+    (index(), index(), prop::option::of((index(), any::<bool>()))).prop_map(
+        |(input, first, second)| RetryInput {
+            input,
+            first,
+            second,
+        },
+    )
 }
 
 impl RetryInput {
@@ -682,7 +684,10 @@ impl RetryInput {
         let q = self.input.index(net.places.len());
         net.places[q].pool = None;
         let n = net.transitions.len();
-        for (t, keyed) in [Some((self.first, true)), self.second].into_iter().flatten() {
+        for (t, keyed) in [Some((self.first, true)), self.second]
+            .into_iter()
+            .flatten()
+        {
             let t = &mut net.transitions[t.index(n)];
             plain(t, q, None, BodyProg::Outputs(vec![]));
             t.effect = keyed.then_some(Receiver::Keyed);
