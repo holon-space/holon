@@ -37,5 +37,6 @@ mod refinement_agreement;
 mod transition_key;
 mod uft_lower;
 mod uft_lower_support;
+mod value_encoding;
 mod verify_priority_probe;
 mod work_runtime_replay;

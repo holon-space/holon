@@ -19,7 +19,6 @@ use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::Executor;
 use holon_net::exec::FireError;
-use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::PureBody;
@@ -553,7 +552,7 @@ proptest! {
         let d = (case.descriptor)();
         let net = PLACES
             .iter()
-            .fold(NetDef::default(), |net, p| net.place(p, Class::Process))
+            .fold(holon_net::exec::new_net(), |net, p| net.place(p, Class::Process))
             .transition(lower_today(&d, case.bind.clone(), case.body.clone()));
         let mut exec = Executor::new(net).expect("the catalog net loads");
         let now = Duration::ZERO;

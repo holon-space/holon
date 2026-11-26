@@ -77,6 +77,7 @@ mod forms;
 use forms::Answer;
 
 use crate::exec_support::Checked;
+use crate::exec_support::values::value;
 
 const PLACES: [&str; 4] = ["P0", "P1", "P2", "P3"];
 const DERIVED: [&str; 2] = ["D0", "D1"];
@@ -86,24 +87,6 @@ const WORKS: [&str; 2] = ["W0", "W1"];
 const BY: &str = "by";
 
 // ------------------------------------------------------------ generators
-
-fn value() -> impl Strategy<Value = Value> {
-    let leaf = prop_oneof![
-        Just(Value::Null),
-        any::<bool>().prop_map(Value::Boolean),
-        any::<i64>().prop_map(Value::Integer),
-        any::<f64>().prop_map(Value::Float),
-        ".{0,6}".prop_map(Value::String),
-        ".{0,6}".prop_map(Value::DateTime),
-        ".{0,6}".prop_map(Value::Json),
-    ];
-    leaf.prop_recursive(2, 6, 3, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Array),
-            prop::collection::hash_map(".{0,3}", inner, 0..3).prop_map(Value::Object),
-        ]
-    })
-}
 
 /// Field names: a small alphabet, so a caller value and a bind overlap often,
 /// the answer keys, and any other text.
@@ -3030,7 +3013,7 @@ fn output_net(into: &str) -> Result<Checked, TestCaseError> {
         Body::pure(move |s: &Subject, _: &Content| Ok(vec![Output::new(&into, s, Content::new())])),
     )
     .consumes("In");
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .place("In", Class::Process)
         .derived("D", Arc::new(|_: &mut Reader<'_>, _: &Subject| None))
         .transition(t);
@@ -3109,7 +3092,7 @@ fn a_derived_place_that_reads_itself_does_not_overflow() {
         Body::pure(|_: &Subject, _: &Content| Ok(vec![])),
     )
     .consumes("In");
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .place("In", Class::Process)
         .derived(
             "D",

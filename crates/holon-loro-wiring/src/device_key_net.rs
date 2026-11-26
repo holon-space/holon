@@ -71,7 +71,7 @@ fn present(place: &'static str) -> holon_net::exec::Read {
 }
 
 pub fn net() -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .place(KEY_TO_LOAD, Class::Process)
         .place(DEVICE_IDENTITY, Class::Process)
         .place(KEY_CORRUPT, Class::Process)

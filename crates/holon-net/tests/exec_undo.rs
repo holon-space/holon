@@ -21,7 +21,6 @@ use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Executor;
 use holon_net::exec::Holder;
-use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
@@ -249,17 +248,19 @@ fn a_second_answer_while_one_waits_is_refused() {
 /// A derived place that hashes what its read of `Item.n` traced, for the
 /// transitions `Accept` and `Other`.
 fn hashing_executor() -> exec_support::Checked {
-    let net = NetDef::default().place("Item", Class::Process).derived(
-        "H",
-        Arc::new(|r, s| {
-            let (n, trace) = r.traced(|r| r.field("Item", s, "n"));
-            n?;
-            Some(content(&[
-                ("accept", text(&hash_text(&ask_hash("Accept", s, &trace)))),
-                ("other", text(&hash_text(&ask_hash("Other", s, &trace)))),
-            ]))
-        }),
-    );
+    let net = holon_net::exec::new_net()
+        .place("Item", Class::Process)
+        .derived(
+            "H",
+            Arc::new(|r, s| {
+                let (n, trace) = r.traced(|r| r.field("Item", s, "n"));
+                n?;
+                Some(content(&[
+                    ("accept", text(&hash_text(&ask_hash("Accept", s, &trace)))),
+                    ("other", text(&hash_text(&ask_hash("Other", s, &trace)))),
+                ]))
+            }),
+        );
     exec_support::executor(net)
 }
 

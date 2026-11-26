@@ -284,7 +284,7 @@ fn seq_content(seq: i64) -> Content {
 /// write can fall between two stores. The body is trivial on purpose — what is
 /// timed is the executor's own cost of such a firing.
 fn holder_net() -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .place("Storage", Class::Process)
         .place("WriteQueue", Class::Process)
         .place("WriteDone", Class::Data)

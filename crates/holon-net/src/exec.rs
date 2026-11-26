@@ -41,6 +41,9 @@ use holon_transition_contract::SubjectName;
 use holon_transition_contract::TransitionName;
 use holon_transition_contract::UftError;
 
+pub use crate::host::HOST;
+pub use crate::host::encode_value;
+pub use crate::host::new_net;
 use crate::uft::answer;
 
 /// A round fires every transition its marking enables. A net still enabled
@@ -405,9 +408,26 @@ impl TransitionDef {
     }
 }
 
+/// How the executor meets the token value `V`: plain functions the host
+/// passes, so `V` needs no trait.
+pub struct Host<V> {
+    /// The bytes of a value in a mark key and an ask hash. Law: two values
+    /// that are `==` encode to the same bytes.
+    pub encode: fn(&V) -> Vec<u8>,
+}
+
+impl<V> Clone for Host<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V> Copy for Host<V> {}
+
 /// A runtime net, built in Rust. [`Executor::new`] checks it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct NetDef {
+    host: Host<Value>,
     places: BTreeMap<Place, PlaceDef>,
     transitions: Vec<TransitionDef>,
     /// Keyed by the work transition.
@@ -420,6 +440,17 @@ pub struct NetDef {
 }
 
 impl NetDef {
+    pub fn new(host: Host<Value>) -> Self {
+        Self {
+            host,
+            places: BTreeMap::new(),
+            transitions: Vec::new(),
+            asks: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            last_now: Duration::ZERO,
+        }
+    }
+
     pub fn place(mut self, name: &str, class: Class) -> Self {
         self.places.insert(
             Place::new(name),
@@ -2047,10 +2078,20 @@ pub fn work_occurrence(work: &str, answer: &str) -> OccurrenceId {
 /// content of `trace` (never its versions), with the encoding of the
 /// failure mark keys (EXEC-inc0 D.a).
 pub fn ask_hash(transition: &str, subject: &Subject, trace: &Trace) -> AskHash {
+    ask_hash_with(crate::host::HOST.encode, transition, subject, trace)
+}
+
+/// [`ask_hash`] with the host's value encoder.
+pub fn ask_hash_with(
+    encode: fn(&Value) -> Vec<u8>,
+    transition: &str,
+    subject: &Subject,
+    trace: &Trace,
+) -> AskHash {
     let mut h = blake3::Hasher::new();
     encode_str(&mut h, transition);
     encode_str(&mut h, subject);
-    encode_rows(&mut h, trace, false);
+    encode_rows(&mut h, trace, false, encode);
     AskHash(*h.finalize().as_bytes())
 }
 
@@ -3444,7 +3485,12 @@ impl Executor {
     /// what was read, never of versions.
     fn key(&self, trace: &Trace) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
-        encode_rows(&mut h, trace, self.twin(Twin::MarkByVersion));
+        encode_rows(
+            &mut h,
+            trace,
+            self.twin(Twin::MarkByVersion),
+            self.net.host.encode,
+        );
         h.finalize()
     }
 
@@ -4042,7 +4088,12 @@ impl Executor {
     }
 }
 
-fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
+fn encode_rows(
+    h: &mut blake3::Hasher,
+    trace: &Trace,
+    with_version: bool,
+    encode: fn(&Value) -> Vec<u8>,
+) {
     for ((p, s), row) in &trace.rows {
         encode_str(h, p.as_str());
         encode_str(h, s.as_str());
@@ -4058,7 +4109,7 @@ fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
                 }
                 Some(v) => {
                     h.update(&[1]);
-                    encode_value(h, v);
+                    h.update(&encode(v));
                 }
             }
         }
@@ -4084,7 +4135,7 @@ fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
                     h.update(&[1]);
                     for (field, value) in o {
                         encode_str(h, field);
-                        encode_value(h, value);
+                        h.update(&encode(value));
                     }
                 }
             }
@@ -4095,86 +4146,4 @@ fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
 fn encode_str(h: &mut blake3::Hasher, s: &str) {
     h.update(&(s.len() as u64).to_le_bytes());
     h.update(s.as_bytes());
-}
-
-fn encode_value(h: &mut blake3::Hasher, v: &Value) {
-    match v {
-        Value::Removed(_) => panic!("a token holds a removal write intent"),
-        Value::String(s) => {
-            h.update(&[1]);
-            encode_str(h, s);
-        }
-        Value::Integer(i) => {
-            h.update(&[2]);
-            h.update(&i.to_le_bytes());
-        }
-        Value::Float(f) => {
-            h.update(&[3]);
-            h.update(&f.to_bits().to_le_bytes());
-        }
-        Value::Boolean(b) => {
-            h.update(&[4, u8::from(*b)]);
-        }
-        Value::DateTime(s) => {
-            h.update(&[5]);
-            encode_str(h, s);
-        }
-        Value::Json(s) => {
-            h.update(&[6]);
-            encode_str(h, s);
-        }
-        Value::Array(items) => {
-            h.update(&[7]);
-            h.update(&(items.len() as u64).to_le_bytes());
-            for item in items {
-                encode_value(h, item);
-            }
-        }
-        Value::Object(map) => {
-            h.update(&[8]);
-            h.update(&(map.len() as u64).to_le_bytes());
-            let sorted: BTreeMap<_, _> = map.iter().collect();
-            for (k, item) in sorted {
-                encode_str(h, k);
-                encode_value(h, item);
-            }
-        }
-        Value::Null => {
-            h.update(&[9]);
-        }
-        Value::Quantity(cell) => {
-            h.update(&[10]);
-            encode_str(h, cell.format().format().name());
-            encode_str(h, cell.original());
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use holon_api::FieldFormat;
-    use holon_api::QuantityCell;
-
-    use super::*;
-
-    fn hash_of(v: &Value) -> blake3::Hash {
-        let mut h = blake3::Hasher::new();
-        encode_value(&mut h, v);
-        h.finalize()
-    }
-
-    fn count(original: &str) -> Value {
-        let format = FieldFormat::named("tsl_count").unwrap();
-        Value::Quantity(QuantityCell::parse(format, original.to_string()).unwrap())
-    }
-
-    #[test]
-    fn quantities_with_different_text_hash_differently() {
-        assert_eq!(hash_of(&count("2kg")), hash_of(&count("2kg")));
-        assert_ne!(hash_of(&count("2kg")), hash_of(&count("2 kg")));
-        assert_ne!(
-            hash_of(&count("2kg")),
-            hash_of(&Value::String("2kg".into()))
-        );
-    }
 }
