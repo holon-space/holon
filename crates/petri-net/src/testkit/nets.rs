@@ -12,6 +12,7 @@ use super::KEYS;
 use super::TestKinds;
 use super::arb_places;
 use crate::ArcSpec;
+use crate::At;
 use crate::Discipline;
 use crate::Fire;
 use crate::KeySel;
@@ -37,7 +38,7 @@ pub enum Guard {
 pub enum OutS {
     /// The token is the sum of what the bind read plus this offset.
     New(u32),
-    Moved(usize),
+    Moved(usize, At),
     Unit,
 }
 
@@ -91,10 +92,19 @@ fn arb_tspec(places: Vec<(u8, Discipline)>) -> impl Strategy<Value = TSpec> {
     let place_set = |max| prop::collection::vec(0..n, 0..=max);
     let out_kind = prop_oneof![
         (0u32..4).prop_map(OutS::New),
-        (0usize..3).prop_map(OutS::Moved),
+        (0usize..3, prop_oneof![Just(At::Front), Just(At::Back)])
+            .prop_map(|(i, at)| OutS::Moved(i, at)),
         Just(OutS::Unit)
     ];
-    let outputs = prop::collection::vec((arb_arc(n), out_kind, prop::bool::weighted(0.85)), 0..=3);
+    let outputs = prop::collection::vec(
+        (
+            arb_arc(n),
+            out_kind,
+            prop::bool::weighted(0.85),
+            prop::bool::weighted(0.5),
+        ),
+        0..=3,
+    );
     let bind = (
         arcs(2),
         prop::option::weighted(0.2, 0..n),
@@ -117,13 +127,22 @@ fn arb_tspec(places: Vec<(u8, Discipline)>) -> impl Strategy<Value = TSpec> {
             let mut moved = BTreeSet::new();
             let outputs: Vec<(ArcS, OutS)> = outputs
                 .into_iter()
-                .map(|(arc, kind, right)| {
-                    let counted = places[arc.0 as usize].1.is_counted();
+                .map(|(arc, kind, right, requeue)| {
+                    // A move back into the consumed row: the requeue of a
+                    // failed take.
+                    let arc = match kind {
+                        OutS::Moved(i, _) if requeue && i < consumes.len() => consumes[i],
+                        _ => arc,
+                    };
+                    let discipline = places[arc.0 as usize].1;
                     let kind = match kind {
-                        _ if right && counted => OutS::Unit,
+                        _ if right && discipline.is_counted() => OutS::Unit,
                         OutS::Unit if right => OutS::New(0),
-                        OutS::Moved(i) if i < consumes.len() && moved.insert(i) => OutS::Moved(i),
-                        OutS::Moved(_) => OutS::New(1),
+                        OutS::Moved(i, at) if i < consumes.len() && moved.insert(i) => {
+                            let fifo = discipline == Discipline::Fifo;
+                            OutS::Moved(i, if right && !fifo { At::Back } else { at })
+                        }
+                        OutS::Moved(..) => OutS::New(1),
                         kind => kind,
                     };
                     (arc, kind)
@@ -256,7 +275,7 @@ impl NetSpec {
                         let (p, k) = row(a);
                         let out = match o {
                             OutS::New(off) => Out::New((sum as u32).wrapping_add(*off)),
-                            OutS::Moved(i) => Out::Moved(*i),
+                            OutS::Moved(i, at) => Out::Moved { from: *i, at: *at },
                             OutS::Unit => Out::Unit,
                         };
                         (p, k, out)

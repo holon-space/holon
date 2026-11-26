@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::Applied;
+use crate::At;
 use crate::Discipline;
 use crate::Kinds;
 use crate::Out;
@@ -64,8 +65,12 @@ impl<K: Kinds> MemStore<K> {
         MemStamp(z ^ (z >> 31))
     }
 
-    fn put(&mut self, place: K::Place, key: K::Key, entry: (K::Token, MemStamp)) {
+    fn put(&mut self, place: K::Place, key: K::Key, entry: (K::Token, MemStamp), at: At) {
         let discipline = self.discipline(&place);
+        assert!(
+            at == At::Back || discipline == Discipline::Fifo,
+            "a move to the front of the non-Fifo place {place:?}"
+        );
         let row = self.tokens.entry((place, key)).or_default();
         match discipline {
             Discipline::Single => {
@@ -76,6 +81,7 @@ impl<K: Kinds> MemStore<K> {
                 row.clear();
                 row.push_back(entry);
             }
+            Discipline::Fifo if at == At::Front => row.push_front(entry),
             Discipline::Fifo => row.push_back(entry),
             Discipline::Counted { .. } => panic!("a token output into a Counted place"),
         }
@@ -186,13 +192,13 @@ impl<K: Kinds> Store<K> for MemStore<K> {
                 Out::New(token) => {
                     let stamp = self.fresh_stamp();
                     stamps.push(stamp);
-                    self.put(place, key, (token, stamp));
+                    self.put(place, key, (token, stamp), At::Back);
                 }
-                Out::Moved(i) => {
-                    let entry = consumed[i]
+                Out::Moved { from, at } => {
+                    let entry = consumed[from]
                         .take()
                         .expect("a token moved twice, or a unit moved out of a Counted row");
-                    self.put(place, key, entry);
+                    self.put(place, key, entry, at);
                 }
             }
         }

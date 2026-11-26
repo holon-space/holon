@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::Applied;
+use crate::At;
 use crate::Discipline;
 use crate::Fire;
 use crate::Kinds;
@@ -34,6 +35,8 @@ pub enum WhyNot<P, Key> {
         arc: usize,
     },
     OutputFull(P, Key),
+    /// A move to the front of a row whose place is not Fifo.
+    FrontNotFifo(P),
 }
 
 /// What an evaluation looked at, so a cache knows when to look again.
@@ -194,13 +197,16 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
                 Out::Unit if !discipline.is_counted() => {
                     return (Err(WhyNot::OutputKind(p.clone())), fp);
                 }
-                Out::New(_) | Out::Moved(_) if discipline.is_counted() => {
+                Out::New(_) | Out::Moved { .. } if discipline.is_counted() => {
                     return (Err(WhyNot::OutputKind(p.clone())), fp);
                 }
-                Out::Moved(i) => {
+                Out::Moved { at: At::Front, .. } if discipline != Discipline::Fifo => {
+                    return (Err(WhyNot::FrontNotFifo(p.clone())), fp);
+                }
+                Out::Moved { from: i, .. } => {
                     assert!(
                         *i < consumes.len(),
-                        "{}: Moved({i}) with {} consumes",
+                        "{}: Moved from {i} with {} consumes",
                         tr.name,
                         consumes.len()
                     );

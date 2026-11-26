@@ -77,14 +77,23 @@ impl Discipline {
     }
 }
 
+/// Where a moved token lands in its row. Stamps have no order, so a token
+/// that must go back before newer ones says so here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum At {
+    /// Before every token of the row; legal only on Fifo places.
+    Front,
+    Back,
+}
+
 /// One output of a firing.
 #[derive(Clone, Debug)]
 pub enum Out<K: Kinds> {
     /// A new token; it gets a fresh stamp.
     New(K::Token),
-    /// The i-th consumed token, unchanged, with its stamp. At most once per
-    /// consumed token; a consumed token that no output moves is gone.
-    Moved(usize),
+    /// The `from`-th consumed token, unchanged, with its stamp. At most once
+    /// per consumed token; a consumed token that no output moves is gone.
+    Moved { from: usize, at: At },
     /// One unit into a Counted row.
     Unit,
 }

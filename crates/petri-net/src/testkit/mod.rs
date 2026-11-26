@@ -9,6 +9,7 @@ pub use laws::Recording;
 pub use laws::check_atomicity;
 pub use laws::check_footprint;
 pub use laws::check_settle_laws;
+pub use laws::take_fifo_moves_into_non_empty;
 pub use nets::ArcS;
 pub use nets::BindSpec;
 pub use nets::Call;

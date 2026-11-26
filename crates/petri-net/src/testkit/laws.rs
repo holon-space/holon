@@ -1,6 +1,7 @@
 //! Laws of a net bound to a store, over drawn `NetCase`s. Each takes a store
 //! factory so stores of other crates can run them too.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -16,6 +17,7 @@ use super::SETTLE_BOUND;
 use super::TestKinds;
 use super::content;
 use crate::Applied;
+use crate::At;
 use crate::Bound;
 use crate::Discipline;
 use crate::Net;
@@ -80,6 +82,16 @@ fn marking<S: Store<TestKinds>>(store: &S) -> BTreeMap<Row, (Content, S::RowStam
         .collect()
 }
 
+thread_local! {
+    static FIFO_MOVES_INTO_NON_EMPTY: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// How many predicted moves (Front, Back) landed in a non-empty Fifo row on
+/// this thread since the last call; resets the count.
+pub fn take_fifo_moves_into_non_empty() -> (usize, usize) {
+    FIFO_MOVES_INTO_NON_EMPTY.with(|c| c.replace((0, 0)))
+}
+
 /// The marking a firing must leave, computed on contents alone.
 fn predict(
     places: &Places,
@@ -107,16 +119,25 @@ fn predict(
                 *n += 1;
                 continue;
             }
-            Out::New(t) => *t,
-            Out::Moved(i) => taken[*i].unwrap(),
+            Out::New(t) => (*t, At::Back),
+            Out::Moved { from, at } => (taken[*from].unwrap(), *at),
         };
         let Content::Tokens(v) = m.get_mut(&(*p, *k)).unwrap() else {
             unreachable!()
         };
+        if places[p] == Discipline::Fifo && !v.is_empty() {
+            FIFO_MOVES_INTO_NON_EMPTY.with(|c| match token.1 {
+                At::Front => c.set((c.get().0 + 1, c.get().1)),
+                At::Back => c.set((c.get().0, c.get().1 + 1)),
+            });
+        }
         if places[p] == Discipline::Register {
             v.clear();
         }
-        v.push(token);
+        match token.1 {
+            At::Front => v.insert(0, token.0),
+            At::Back => v.push(token.0),
+        }
     }
     m
 }
@@ -178,14 +199,14 @@ pub fn check_atomicity<S: Store<TestKinds>>(
     for &(i, k, b) in &case.calls {
         let t = externals[i % externals.len()];
         let before = marking(bound.store());
-        let expected = bound.enabled(t, &k, Some(&b)).0.ok().map(|fire| {
+        let expected = bound.enabled(t, &k, Some(&b)).0.map(|fire| {
             let before = before.iter().map(|(r, (c, _))| (*r, c.clone())).collect();
             predict(&places, before, &consumes(&net, t, k), &fire.outputs)
         });
         match bound.fire_external(t, k, b) {
-            Ok(_) => prop_assert_eq!(Some(contents(bound.store())), expected),
+            Ok(_) => prop_assert_eq!(Ok(contents(bound.store())), expected),
             Err(why) => {
-                prop_assert!(expected.is_none());
+                prop_assert!(expected.is_err());
                 prop_assert_eq!(
                     marking(bound.store()),
                     before,

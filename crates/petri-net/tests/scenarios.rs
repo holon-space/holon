@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use petri_net::ArcSpec;
+use petri_net::At;
 use petri_net::BuildError;
 use petri_net::Discipline;
 use petri_net::Fire;
@@ -60,6 +61,10 @@ fn out(place: &'static str, key: &'static str, o: Out<K>) -> Fire<K> {
     }
 }
 
+fn back(from: usize) -> Out<K> {
+    Out::Moved { from, at: At::Back }
+}
+
 /// An external writer: the binding becomes a new token in `place[key]`.
 fn writer(place: &'static str) -> Transition<K> {
     let mut w = t("write", Trigger::External, |_, _, _| unreachable!());
@@ -99,12 +104,8 @@ fn two_producers_with_an_inhibitor_on_a_shared_empty_output() {
         p.produces = vec!["Out"];
         p
     };
-    let p1 = b.transition(producer("p1", "A", |_, k, _| {
-        Some(out("Out", k, Out::Moved(0)))
-    }));
-    let p2 = b.transition(producer("p2", "B", |_, k, _| {
-        Some(out("Out", k, Out::Moved(0)))
-    }));
+    let p1 = b.transition(producer("p1", "A", |_, k, _| Some(out("Out", k, back(0)))));
+    let p2 = b.transition(producer("p2", "B", |_, k, _| Some(out("Out", k, back(0)))));
     let net = b.build().unwrap();
     let mut s = store(&net);
     let mut bound = net.bind(&mut s).unwrap();
@@ -165,13 +166,13 @@ fn fetch_feed_take_and_fail_keep_the_row_stamp() {
         .place("Running", Discipline::Single);
     let w = b.transition(writer("Feed"));
     let mut take = t("take", Trigger::Auto, |_, k, _| {
-        Some(out("Running", k, Out::Moved(0)))
+        Some(out("Running", k, back(0)))
     });
     take.consumes = vec![own("Feed")];
     take.produces = vec!["Running"];
     let take = b.transition(take);
     let mut fail = t("fail", Trigger::External, |_, k, _| {
-        Some(out("Feed", k, Out::Moved(0)))
+        Some(out("Feed", k, back(0)))
     });
     fail.consumes = vec![own("Running")];
     fail.produces = vec!["Feed"];
@@ -225,7 +226,7 @@ fn a_pool_unit_is_taken_and_returned() {
     seed.produces = vec!["Feed"];
     let seed = b.transition(seed);
     let mut take = t("take", Trigger::Auto, |_, k, _| {
-        Some(out("Running", k, Out::Moved(0)))
+        Some(out("Running", k, back(0)))
     });
     take.consumes = vec![
         own("Feed"),
@@ -238,7 +239,7 @@ fn a_pool_unit_is_taken_and_returned() {
     let take = b.transition(take);
     let mut fail = t("fail", Trigger::External, |_, k, _| {
         Some(Fire {
-            outputs: vec![("Feed", k, Out::Moved(0)), ("Pool", "pool", Out::Unit)],
+            outputs: vec![("Feed", k, back(0)), ("Pool", "pool", Out::Unit)],
         })
     });
     fail.consumes = vec![own("Running")];
@@ -294,7 +295,7 @@ fn fifo_consume_takes_the_head_and_the_next_keeps_its_stamp() {
         .place("Done", Discipline::Fifo);
     let w = b.transition(writer("Q"));
     let mut take = t("take", Trigger::External, |_, k, _| {
-        Some(out("Done", k, Out::Moved(0)))
+        Some(out("Done", k, back(0)))
     });
     take.consumes = vec![own("Q")];
     take.produces = vec!["Done"];
@@ -416,13 +417,13 @@ fn moves_into_or_out_of_a_counted_place_are_refused() {
     let fill = b.transition(fill);
     let wa = b.transition(writer("A"));
     let mut out_of = t("out_of", Trigger::External, |_, k, _| {
-        Some(out("A", k, Out::Moved(0)))
+        Some(out("A", k, back(0)))
     });
     out_of.consumes = vec![own("Pool")];
     out_of.produces = vec!["A"];
     let out_of = b.transition(out_of);
     let mut into = t("into", Trigger::External, |_, k, _| {
-        Some(out("Pool", k, Out::Moved(0)))
+        Some(out("Pool", k, back(0)))
     });
     into.consumes = vec![own("A")];
     into.produces = vec!["Pool"];
@@ -453,7 +454,7 @@ fn a_consumed_token_moved_twice_is_an_assert() {
     let w = b.transition(writer("A"));
     let mut dup = t("dup", Trigger::External, |_, k, _| {
         Some(Fire {
-            outputs: vec![("A", k, Out::Moved(0)), ("A", k, Out::Moved(0))],
+            outputs: vec![("A", k, back(0)), ("A", k, back(0))],
         })
     });
     dup.consumes = vec![own("A")];
@@ -529,4 +530,84 @@ fn a_store_whose_places_differ_from_the_net_is_refused_at_bind() {
         net.bind(&mut s),
         Err(petri_net::StoreMismatch::Places { .. })
     ));
+}
+
+/// A take from Fifo `Feed[s]`; an outside write appends k2 while the take
+/// runs; the fail moves k back to the front, so a read of the head finds k.
+#[test]
+fn a_failed_take_puts_its_token_before_a_newer_write() {
+    let mut b = NetBuilder::default();
+    b.place("Feed", Discipline::Fifo)
+        .place("Running", Discipline::Single);
+    let w = b.transition(writer("Feed"));
+    let mut take = t("take", Trigger::External, |_, k, _| {
+        Some(out("Running", k, back(0)))
+    });
+    take.consumes = vec![own("Feed")];
+    take.produces = vec!["Running"];
+    let take = b.transition(take);
+    let mut fail = t("fail", Trigger::External, |_, k, _| {
+        Some(out(
+            "Feed",
+            k,
+            Out::Moved {
+                from: 0,
+                at: At::Front,
+            },
+        ))
+    });
+    fail.consumes = vec![own("Running")];
+    fail.produces = vec!["Feed"];
+    let fail = b.transition(fail);
+    let net = b.build().unwrap();
+    let mut s = store(&net);
+    let mut bound = net.bind(&mut s).unwrap();
+    bound.settle(10).unwrap();
+    bound.fire_external(w, "s", 1).unwrap();
+    let k = bound.store().row_stamp(&"Feed", &"s");
+    for (tr, b) in [(take, 0), (w, 2), (fail, 0)] {
+        bound.settle(10).unwrap();
+        bound.fire_external(tr, "s", b).unwrap();
+    }
+    assert_eq!(tokens(bound.store(), "Feed", "s"), vec![1, 2]);
+    let MemRowStamp::Tokens(stamps) = bound.store().row_stamp(&"Feed", &"s") else {
+        unreachable!()
+    };
+    assert_eq!(
+        MemRowStamp::Tokens(stamps[..1].to_vec()),
+        k,
+        "the head is k with its own stamp"
+    );
+}
+
+#[test]
+fn a_move_to_the_front_of_a_non_fifo_row_is_refused() {
+    let mut b = NetBuilder::default();
+    b.place("A", Discipline::Fifo)
+        .place("Reg", Discipline::Register);
+    let w = b.transition(writer("A"));
+    let mut front = t("front", Trigger::External, |_, k, _| {
+        Some(out(
+            "Reg",
+            k,
+            Out::Moved {
+                from: 0,
+                at: At::Front,
+            },
+        ))
+    });
+    front.consumes = vec![own("A")];
+    front.produces = vec!["Reg"];
+    let front = b.transition(front);
+    let net = b.build().unwrap();
+    let mut s = store(&net);
+    let mut bound = net.bind(&mut s).unwrap();
+    bound.settle(10).unwrap();
+    bound.fire_external(w, "s", 1).unwrap();
+    bound.settle(10).unwrap();
+    assert_eq!(
+        bound.fire_external(front, "s", 0).unwrap_err(),
+        WhyNot::FrontNotFifo("Reg")
+    );
+    assert_eq!(tokens(bound.store(), "A", "s"), vec![1]);
 }
