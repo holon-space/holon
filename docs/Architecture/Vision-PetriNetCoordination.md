@@ -26,7 +26,7 @@ decide.*
 
 ## 1. The coordination-layer idea
 
-Holon has one logical net (ADR 0032 §1, `docs/adr/0032-petri-net-execution-semantics.md:47-102`).
+Holon has one logical net (ADR 0032 §1, `docs/adr/0032-petri-net-execution-semantics.md:51-110`).
 Today the net covers operations and rules. In the target, the net also
 covers how services, data and documents become available.
 
@@ -263,7 +263,7 @@ output. Fast path:
 - Allowed on the render path.
 
 **Effectful** — asynchronous, or it changes the world. It takes the full
-path: dispatcher gates (`docs/adr/0032-petri-net-execution-semantics.md:183-194`),
+path: dispatcher gates (`docs/adr/0032-petri-net-execution-semantics.md:192-206`),
 occurrence journal, admission, cancellation, generations.
 
 Do not give a pure transition the effectful path "to be safe". Do not put an
@@ -298,7 +298,7 @@ cell is not durable state.
 **Input-arc rule.** A transition's input arcs are exactly the places it reads when it fires; nothing else. A DI provider is a transition, and its dependencies are its input arcs. A provider that uses only part of a dependency is split, so that each provider reads only what it uses and no arc is wider than the read.
 
 Text edits stay inside Loro and bypass the dispatcher
-(`docs/adr/0032-petri-net-execution-semantics.md:219-224`). The net observes
+(`docs/adr/0032-petri-net-execution-semantics.md:229-234`). The net observes
 their results as marking.
 
 **Companion rules.** These bind the places, tokens and guards of every net
@@ -317,7 +317,7 @@ that wraps an engine. The effect-body, read-modify-write and time rules are in
 - Guards compare typed token fields. Rust functions compute domain values.
 - A panic in a pure transition becomes `Poisoned[subject]`, with no retry.
 - Keystrokes stay off the net: text edits bypass the dispatcher
-  (`docs/adr/0032-petri-net-execution-semantics.md:219-224`, see above).
+  (`docs/adr/0032-petri-net-execution-semantics.md:229-234`, see above).
 
 **First contract, designed:** mirror the fluxdi live-cell states into the
 marking as read-only environment places (`source(vault)`,
@@ -336,7 +336,7 @@ Tools calls these page instances. Examples that exist today in other forms:
 - one matview per (query, context params).
 
 Colors are unbounded domains. Do not promise model checking
-(`docs/adr/0032-petri-net-execution-semantics.md:144-147`).
+(`docs/adr/0032-petri-net-execution-semantics.md:150-153`).
 
 ## 7. The kernel net and self-extension
 
@@ -373,7 +373,7 @@ supersedes it.
 | ADR 0017 `Engine::rank` (`crates/holon-engine/src/engine.rs`) | ranking of alternative producers; core of plan checking |
 | ADR 0032 §1 read-only places (`:70-82`) | interface places of engines |
 | ADR 0032 §2 derived projection, meta-transitions (`:104-171`) | the net as artifact; self-extension |
-| ADR 0032 §3 dispatcher gates (`:183-194`) | the effectful path |
+| ADR 0032 §3 dispatcher gates (`:192-206`) | the effectful path |
 | ADR 0032 deferred item 6: relational hop, inhibitor (`:496-504`) | also needed by the planner to read guards |
 | `holon_net::evaluate` and `Offer` (`crates/holon-net/src/enabledness.rs`) | forward enabledness; pull is its backward dual |
 | `holon_net::Marking` (`crates/holon-net/src/marking.rs:16`) | read side of the planner's marking |
