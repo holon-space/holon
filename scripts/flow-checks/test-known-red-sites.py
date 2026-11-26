@@ -9,7 +9,6 @@ Generators: none — the input is the registry itself, and the check reads every
 """
 import importlib.util
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -21,9 +20,8 @@ spec.loader.exec_module(evidence)
 
 # A macro invocation line is the site of the tests it expands to.
 PANICS = re.compile(r"assert|panic!|unwrap\(|expect\(|unreachable!|todo!|unimplemented!|^\s*[a-z_:]+!\s*\{\s*$")
-FILES = subprocess.run(["git", "ls-files", "*.rs"], cwd=REPO, check=True, capture_output=True,
-                       text=True).stdout.split()
-assert FILES, "git ls-files lists no Rust file"
+FILES = sorted(f for f in evidence.landing_paths() if f.endswith(".rs"))
+assert FILES, "the landing tree carries no Rust file"
 
 
 def sites():
