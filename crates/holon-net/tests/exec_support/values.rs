@@ -22,6 +22,7 @@ pub fn value() -> impl Strategy<Value = Value> {
         any::<bool>().prop_map(Value::Boolean),
         any::<i64>().prop_map(Value::Integer),
         any::<f64>().prop_map(Value::Float),
+        select(vec![0.0, -0.0]).prop_map(Value::Float),
         ".{0,6}".prop_map(Value::String),
         ".{0,6}".prop_map(Value::DateTime),
         ".{0,6}".prop_map(Value::Json),
@@ -36,7 +37,8 @@ pub fn value() -> impl Strategy<Value = Value> {
 }
 
 /// A value `==` to `v` that is built another way: every object map is
-/// rebuilt in reverse insertion order.
+/// rebuilt in reverse insertion order, and every zero float has the other
+/// sign.
 pub fn equal_twin(v: &Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(items.iter().map(equal_twin).collect()),
@@ -49,6 +51,7 @@ pub fn equal_twin(v: &Value) -> Value {
             }
             Value::Object(twin)
         }
+        Value::Float(f) if *f == 0.0 => Value::Float(-f),
         other => other.clone(),
     }
 }

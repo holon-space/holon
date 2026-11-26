@@ -50,13 +50,30 @@ fn near(a: Vec<Value>) -> impl Strategy<Value = Vec<Value>> {
     prop_oneof![replaced, folded, prop::collection::vec(value(), 0..4)]
 }
 
+fn encodes_like_its_equal_twin(a: &Value) -> Result<(), TestCaseError> {
+    let b = equal_twin(a);
+    prop_assert_eq!(a, &b);
+    prop_assert_eq!(encode_value(a), encode_value(&b));
+    Ok(())
+}
+
+/// Cases kept from earlier failures, run before the random ones.
+fn equal_twin_examples() -> Vec<Value> {
+    vec![Value::Float(-0.0), Value::Array(vec![Value::Float(0.0)])]
+}
+
+#[test]
+fn equal_values_encode_equal_examples() {
+    for a in equal_twin_examples() {
+        encodes_like_its_equal_twin(&a).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+    }
+}
+
 proptest! {
     /// Two equal values give the same mark key: the encoder law.
     #[test]
     fn equal_values_encode_equal(a in value()) {
-        let b = equal_twin(&a);
-        prop_assert_eq!(&a, &b);
-        prop_assert_eq!(encode_value(&a), encode_value(&b));
+        encodes_like_its_equal_twin(&a)?;
     }
 
     /// Fields are encoded back to back, so a value's bytes must say where it
