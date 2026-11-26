@@ -3,12 +3,29 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
-use super::{Content, KEYS, NetCase, SETTLE_BOUND, TestKinds, content};
-use crate::{Applied, Bound, Discipline, Net, Out, RowView, Store, TransitionId, Trigger, Unsettled, WhyNot};
+use super::Content;
+use super::KEYS;
+use super::NetCase;
+use super::NetSpec;
+use super::SETTLE_BOUND;
+use super::TestKinds;
+use super::content;
+use crate::Applied;
+use crate::Bound;
+use crate::Discipline;
+use crate::Net;
+use crate::Out;
+use crate::RowView;
+use crate::Store;
+use crate::TransitionId;
+use crate::Trigger;
+use crate::Unsettled;
+use crate::WhyNot;
 
 type Row = (u8, u8);
 type Places = BTreeMap<u8, Discipline>;
@@ -49,16 +66,27 @@ impl<S: Store<TestKinds>> Store<TestKinds> for Recording<S> {
 }
 
 fn contents<S: Store<TestKinds>>(store: &S) -> BTreeMap<Row, Content> {
-    let rows = store.places().into_iter().flat_map(|(p, _)| (0..KEYS).map(move |k| (p, k)));
+    let rows = store
+        .places()
+        .into_iter()
+        .flat_map(|(p, _)| (0..KEYS).map(move |k| (p, k)));
     rows.map(|r| (r, content(store, r))).collect()
 }
 
 fn marking<S: Store<TestKinds>>(store: &S) -> BTreeMap<Row, (Content, S::RowStamp)> {
-    contents(store).into_iter().map(|(r, c)| (r, (c, store.row_stamp(&r.0, &r.1)))).collect()
+    contents(store)
+        .into_iter()
+        .map(|(r, c)| (r, (c, store.row_stamp(&r.0, &r.1))))
+        .collect()
 }
 
 /// The marking a firing must leave, computed on contents alone.
-fn predict(places: &Places, before: BTreeMap<Row, Content>, consumes: &[Row], outputs: &[(u8, u8, Out<TestKinds>)]) -> BTreeMap<Row, Content> {
+fn predict(
+    places: &Places,
+    before: BTreeMap<Row, Content>,
+    consumes: &[Row],
+    outputs: &[(u8, u8, Out<TestKinds>)],
+) -> BTreeMap<Row, Content> {
     let mut m = before;
     let mut taken = Vec::new();
     for row in consumes {
@@ -73,14 +101,18 @@ fn predict(places: &Places, before: BTreeMap<Row, Content>, consumes: &[Row], ou
     for (p, k, out) in outputs {
         let token = match out {
             Out::Unit => {
-                let Content::Count(n) = m.get_mut(&(*p, *k)).unwrap() else { unreachable!() };
+                let Content::Count(n) = m.get_mut(&(*p, *k)).unwrap() else {
+                    unreachable!()
+                };
                 *n += 1;
                 continue;
             }
             Out::New(t) => *t,
             Out::Moved(i) => taken[*i].unwrap(),
         };
-        let Content::Tokens(v) = m.get_mut(&(*p, *k)).unwrap() else { unreachable!() };
+        let Content::Tokens(v) = m.get_mut(&(*p, *k)).unwrap() else {
+            unreachable!()
+        };
         if places[p] == Discipline::Register {
             v.clear();
         }
@@ -90,28 +122,51 @@ fn predict(places: &Places, before: BTreeMap<Row, Content>, consumes: &[Row], ou
 }
 
 fn consumes(net: &Net<TestKinds>, t: TransitionId, key: u8) -> Vec<Row> {
-    net.transition(t).consumes.iter().map(|a| a.row(&key)).collect()
+    net.transition(t)
+        .consumes
+        .iter()
+        .map(|a| a.row(&key))
+        .collect()
 }
 
 /// Settles one firing at a time, checking each against `predict`. False when
 /// the bound is hit.
-fn settle_stepwise<S: Store<TestKinds>>(net: &Net<TestKinds>, places: &Places, bound: &mut Bound<'_, TestKinds, S>) -> Result<bool, TestCaseError> {
+fn settle_stepwise<S: Store<TestKinds>>(
+    net: &Net<TestKinds>,
+    places: &Places,
+    bound: &mut Bound<'_, TestKinds, S>,
+) -> Result<bool, TestCaseError> {
     for _ in 0..SETTLE_BOUND {
         let Some((t, k)) = bound.next_enabled() else {
             prop_assert_eq!(bound.settle(0).unwrap(), vec![]);
             return Ok(true);
         };
         let fire = bound.enabled(t, &k, None).0.unwrap();
-        let expected = predict(places, contents(bound.store()), &consumes(net, t, k), &fire.outputs);
+        let expected = predict(
+            places,
+            contents(bound.store()),
+            &consumes(net, t, k),
+            &fire.outputs,
+        );
         let (Ok(fired) | Err(Unsettled { fired })) = bound.settle(1);
         prop_assert_eq!((fired.len(), fired[0].transition, fired[0].key), (1, t, k));
-        prop_assert_eq!(contents(bound.store()), expected, "auto firing {:?} for key {}", t, k);
+        prop_assert_eq!(
+            contents(bound.store()),
+            expected,
+            "auto firing {:?} for key {}",
+            t,
+            k
+        );
     }
     Ok(false)
 }
 
-/// A firing applies all its outputs (as `predict` says) or, refused, changes nothing.
-pub fn check_atomicity<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]) -> S, case: &NetCase) -> Result<(), TestCaseError> {
+/// A firing applies all its outputs (as `predict` says) or, refused, changes
+/// nothing.
+pub fn check_atomicity<S: Store<TestKinds>>(
+    factory: impl Fn(&[(u8, Discipline)]) -> S,
+    case: &NetCase,
+) -> Result<(), TestCaseError> {
     let net = case.net.build();
     let places: Places = net.places().collect();
     let mut store = factory(&net.places().collect::<Vec<_>>());
@@ -131,7 +186,12 @@ pub fn check_atomicity<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]
             Ok(_) => prop_assert_eq!(Some(contents(bound.store())), expected),
             Err(why) => {
                 prop_assert!(expected.is_none());
-                prop_assert_eq!(marking(bound.store()), before, "refused firing ({:?}) changed the store", why);
+                prop_assert_eq!(
+                    marking(bound.store()),
+                    before,
+                    "refused firing ({:?}) changed the store",
+                    why
+                );
             }
         }
         if !settle_stepwise(&net, &places, &mut bound)? {
@@ -141,7 +201,11 @@ pub fn check_atomicity<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]
     Ok(())
 }
 
-fn probe<S: Store<TestKinds>>(net: &Net<TestKinds>, bound: &Bound<'_, TestKinds, Recording<S>>, binding: u32) -> Result<(), TestCaseError> {
+fn probe<S: Store<TestKinds>>(
+    net: &Net<TestKinds>,
+    bound: &Bound<'_, TestKinds, Recording<S>>,
+    binding: u32,
+) -> Result<(), TestCaseError> {
     for t in net.transition_ids() {
         let b = (net.transition(t).trigger == Trigger::External).then_some(binding);
         for k in 0..KEYS {
@@ -158,7 +222,12 @@ fn probe<S: Store<TestKinds>>(net: &Net<TestKinds>, bound: &Bound<'_, TestKinds,
                         k,
                         eval
                     ),
-                    Access::Keys(p) => prop_assert!(fp.scans.contains(&p), "{:?}: scan of {} not in the footprint", t, p),
+                    Access::Keys(p) => prop_assert!(
+                        fp.scans.contains(&p),
+                        "{:?}: scan of {} not in the footprint",
+                        t,
+                        p
+                    ),
                 }
             }
             let outputs = match &eval {
@@ -167,8 +236,17 @@ fn probe<S: Store<TestKinds>>(net: &Net<TestKinds>, bound: &Bound<'_, TestKinds,
                 Err(_) => vec![],
             };
             for (p, k) in outputs {
-                if matches!(net.places().nth(p as usize).unwrap().1, Discipline::Single | Discipline::Counted { .. }) {
-                    prop_assert!(fp.outputs.contains_key(&(p, k)), "{:?}: output row ({}, {}) can refuse but is not in the footprint", t, p, k);
+                if matches!(
+                    net.places().nth(p as usize).unwrap().1,
+                    Discipline::Single | Discipline::Counted { .. }
+                ) {
+                    prop_assert!(
+                        fp.outputs.contains_key(&(p, k)),
+                        "{:?}: output row ({}, {}) can refuse but is not in the footprint",
+                        t,
+                        p,
+                        k
+                    );
                 }
             }
         }
@@ -178,9 +256,15 @@ fn probe<S: Store<TestKinds>>(net: &Net<TestKinds>, bound: &Bound<'_, TestKinds,
 
 /// Every row and scan an evaluation touched is in its footprint, refusals
 /// included, and so is every output row whose discipline can refuse.
-pub fn check_footprint<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]) -> S, case: &NetCase) -> Result<(), TestCaseError> {
+pub fn check_footprint<S: Store<TestKinds>>(
+    factory: impl Fn(&[(u8, Discipline)]) -> S,
+    case: &NetCase,
+) -> Result<(), TestCaseError> {
     let net = case.net.build();
-    let mut store = Recording { inner: factory(&net.places().collect::<Vec<_>>()), log: RefCell::new(vec![]) };
+    let mut store = Recording {
+        inner: factory(&net.places().collect::<Vec<_>>()),
+        log: RefCell::new(vec![]),
+    };
     let mut bound = net.bind(&mut store).unwrap();
     let externals = case.net.externals();
     if bound.settle(SETTLE_BOUND).is_err() {
@@ -195,4 +279,136 @@ pub fn check_footprint<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]
         probe(&net, &bound, b)?;
     }
     Ok(())
+}
+
+fn level_dead<S: Store<TestKinds> + Clone>(
+    net: &Net<TestKinds>,
+    settled: &S,
+) -> Result<(), TestCaseError> {
+    let mut store = settled.clone();
+    let bound = net.bind(&mut store).unwrap();
+    for t in net.transition_ids() {
+        let tr = net.transition(t);
+        if tr.trigger != Trigger::Auto {
+            continue;
+        }
+        let own = tr
+            .consumes
+            .iter()
+            .filter(|a| matches!(a.key, crate::KeySel::Own))
+            .map(|a| a.place);
+        let keys: BTreeSet<u8> = own
+            .chain(tr.same_key_reads.iter().copied())
+            .flat_map(|p| settled.keys(&p))
+            .collect();
+        for k in keys {
+            prop_assert!(
+                bound.enabled(t, &k, None).0.is_err(),
+                "Level-dead: {:?} key {} enabled after settle",
+                t,
+                k
+            );
+        }
+    }
+    Ok(())
+}
+
+type Settled<S> = crate::Settled<TestKinds, S>;
+
+/// From the marking `start`, settles on a freshly built net and store copy.
+fn settle_from<S: Store<TestKinds> + Clone>(
+    spec: &NetSpec,
+    start: &S,
+    bound: usize,
+) -> (Settled<S>, S) {
+    let net = spec.build();
+    let mut store = start.clone();
+    let fired = net.bind(&mut store).unwrap().settle(bound);
+    (fired, store)
+}
+
+/// The settle laws at one marking; returns the full run and the store after it.
+fn settle_laws_at<S: Store<TestKinds> + Clone>(
+    spec: &NetSpec,
+    start: &S,
+) -> Result<(Settled<S>, S), TestCaseError> {
+    let (full, end) = settle_from(spec, start, SETTLE_BOUND);
+    let (again, end_again) = settle_from(spec, start, SETTLE_BOUND);
+    prop_assert_eq!(
+        &again,
+        &full,
+        "determinism: two settles from one marking fired differently"
+    );
+    prop_assert_eq!(
+        marking(&end_again),
+        marking(&end),
+        "determinism: two settles from one marking left different stores"
+    );
+    let sequence = match &full {
+        Ok(fired) => {
+            level_dead(&spec.build(), &end)?;
+            fired.clone()
+        }
+        Err(Unsettled { fired }) => {
+            prop_assert_eq!(fired.len(), SETTLE_BOUND);
+            fired.clone()
+        }
+    };
+    for n in 0..sequence.len() {
+        let (cut, crashed) = settle_from(spec, start, n);
+        let Err(Unsettled { fired: prefix }) = cut else {
+            return Err(TestCaseError::fail(format!(
+                "settle({n}) settled, the full run fired {}",
+                sequence.len()
+            )));
+        };
+        prop_assert_eq!(
+            &prefix[..],
+            &sequence[..n],
+            "Unsettled carries a different prefix"
+        );
+        let (rest, resumed) = settle_from(spec, &crashed, SETTLE_BOUND - n);
+        let rest_fired = match &rest {
+            Ok(f) | Err(Unsettled { fired: f }) => f,
+        };
+        let joined: Vec<_> = prefix.iter().chain(rest_fired).cloned().collect();
+        prop_assert_eq!(
+            &joined,
+            &sequence,
+            "Crash: a fresh settle after {} firings continued differently",
+            n
+        );
+        prop_assert_eq!(rest.is_ok(), full.is_ok());
+        prop_assert_eq!(
+            marking(&resumed),
+            marking(&end),
+            "Crash: a fresh settle after {} firings left a different store",
+            n
+        );
+    }
+    Ok((full, end))
+}
+
+/// Level-dead after every settle; `Unsettled` carries exactly the applied
+/// prefix; Crash: after any prefix, a fresh net settling from the store alone
+/// fires the same remaining sequence; determinism: equal runs from equal
+/// markings.
+pub fn check_settle_laws<S: Store<TestKinds> + Clone>(
+    factory: impl Fn(&[(u8, Discipline)]) -> S,
+    case: &NetCase,
+) -> Result<(), TestCaseError> {
+    let net = case.net.build();
+    let mut store = factory(&net.places().collect::<Vec<_>>());
+    let externals = case.net.externals();
+    let mut calls = case.calls.iter();
+    loop {
+        let (full, end) = settle_laws_at(&case.net, &store)?;
+        store = end;
+        let (Ok(_), Some(&(i, k, b))) = (full, calls.next()) else {
+            return Ok(());
+        };
+        let mut bound = net.bind(&mut store).unwrap();
+        prop_assert_eq!(bound.settle(0).unwrap(), vec![]);
+        let _ = bound.fire_external(externals[i % externals.len()], k, b);
+    }
 }
