@@ -37,7 +37,7 @@ L1 compiles it into L0 places and L0 transitions. L0 sees only these:
 |---|---|---|---|---|---|
 | `FetchFeed.take` | Auto | `Feed[s]` | `Settings[s]`, `Clock` | `FetchFeed.Running[s]`, `tries` raised | the author's guard; `tries < 3`; no `next_try`, or `next_try` at or before `Clock` |
 | `FetchFeed.record` | External | `FetchFeed.Running[s]` | | `Items[s]`, or the candidate place, or nothing (stale-record rule) | caller binding: attempt, outputs |
-| `FetchFeed.fail` | External | `FetchFeed.Running[s]` | `Clock` | `Feed[s]` with the cause and `next_try` | caller binding: attempt, cause |
+| `FetchFeed.fail` | External | `FetchFeed.Running[s]` | `Clock` | `Feed[s]` with the cause (planned, not in the code) and `next_try` | caller binding: attempt, cause (planned, not in the code) |
 | `Tick` | External | `Clock` | | `Clock` with the new time | caller binding: `now`; guard: `now` is not older than `Clock` |
 
 `FetchFeed.record` is an illustration. Whether the record is one L0
@@ -60,7 +60,7 @@ What happens:
 5. `FetchFeed.record` compares the stamps in the read trace with the current
    stamps of the authority rows. All equal: it produces `Items[s]`. Else the
    stale-record rule decides (ADR 0032 §9.2).
-6. `FetchFeed.fail` returns the token to `Feed[s]` with the cause and
+6. `FetchFeed.fail` returns the token to `Feed[s]` with the cause (planned, not in the code) and
    `next_try` (the time on `Clock` plus the backoff) in its header. Other
    consumers of `Feed` can take it. The guard of `FetchFeed.take` is false
    until `Clock` reaches `next_try`. The driver fires `Tick` at that time.
@@ -121,7 +121,7 @@ Constraints:
 ### L1 `petri-workflow`: workflow nets, independent of Holon
 
 - **Typed bookkeeping tokens.** `Token<V>` holds an `Envelope` header
-  (`tries` per contribution id, `cause`, `next_try`) around a `Record<V>`
+  (`tries` per contribution id, `cause` (planned, not in the code), `next_try`) around a `Record<V>`
   payload. The Running, Clock and undo tokens are typed variants, never
   encoded into `V`.
 - **The stamp covers the payload only.** A take raises `tries` in the header
@@ -142,7 +142,7 @@ Constraints:
   - candidate places;
   - facts;
   - retry: a definite failure returns the input to its place with `tries`,
-    `cause` and `next_try` in the header; the retry guard compares
+    `cause` (planned, not in the code) and `next_try` in the header; the retry guard compares
     `next_try` with the Clock place;
   - run timers and abandon timers, as guards over the Clock place;
   - failure and timeout ports;
@@ -168,7 +168,7 @@ Constraints:
 - Holon names: `Answer.T`, `AskRow`, the `TypeHint` table.
 - The uft lowering.
 - The mapping from header fields to holon-expr fields, so guards read
-  `tries` and `cause`.
+  `tries` and `cause` (planned, not in the code).
 - The derived projection and its analyses, unchanged and separate from the
   executor.
 
