@@ -1013,6 +1013,7 @@ fn as_content(payload: &Payload) -> Content {
     };
     match payload {
         Payload::Record(r) => r.clone(),
+        Payload::Answered(a) => holon_net::uft::answer::answered_content(a),
         Payload::Candidate(c) => {
             let trace = c
                 .trace

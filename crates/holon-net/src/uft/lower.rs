@@ -41,9 +41,7 @@ use crate::exec::HASH_FIELD;
 use crate::exec::NetDef;
 use crate::exec::Output;
 use crate::exec::Place;
-use crate::exec::REASON_FIELD;
 use crate::exec::Reader;
-use crate::exec::SEEN_FIELD;
 use crate::exec::Subject;
 use crate::exec::TransitionDef;
 use crate::exec::Trigger;
@@ -51,9 +49,11 @@ use crate::exec::answer_transition;
 use crate::exec::answered_place;
 use crate::exec::ask_hash;
 use crate::exec::asks_place;
-use crate::exec::expire_reason_text;
 use crate::exec::expired_place;
 use crate::exec::hash_text;
+use crate::uft::answer::REASON_FIELD;
+use crate::uft::answer::SEEN_FIELD;
+use crate::uft::answer::expire_reason_text;
 
 /// A descriptor the lowering cannot express. Names the transition.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

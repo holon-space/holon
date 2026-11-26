@@ -31,18 +31,17 @@ use std::time::Duration;
 
 use holon_api::TypeHint;
 use holon_pattern::Value;
-use holon_transition_contract::ANSWER_ID_KEY;
-use holon_transition_contract::ANSWER_INPUT_KEY;
 use holon_transition_contract::AnswerCall;
 use holon_transition_contract::AnswerId;
 use holon_transition_contract::AnswerSettlement;
 use holon_transition_contract::AskHash;
 use holon_transition_contract::AskRow;
-use holon_transition_contract::ExpireReason;
 pub use holon_transition_contract::OccurrenceId;
 use holon_transition_contract::SubjectName;
 use holon_transition_contract::TransitionName;
 use holon_transition_contract::UftError;
+
+use crate::uft::answer;
 
 /// A round fires every transition its marking enables. A net still enabled
 /// after this many rounds of one call does not terminate.
@@ -166,32 +165,8 @@ pub fn expired_place(work: &str) -> String {
     format!("Expired.{work}")
 }
 
-/// `Answered.T`: the [`hash_text`] of the ask the user saw. The token also
-/// holds [`ANSWER_ID_KEY`], which keys the failure mark of `T` so a new
-/// answer is a new mark key, and [`ANSWER_INPUT_KEY`], which no reader sees:
-/// the executor adds it to the bound input of `T`.
-pub const SEEN_FIELD: &str = "seen";
-/// `Expired.T`: the [`expire_reason_text`].
-pub const REASON_FIELD: &str = "reason";
 /// `Asks.T`: the [`hash_text`] of the ask.
 pub const HASH_FIELD: &str = "hash";
-
-pub fn expire_reason_text(reason: ExpireReason) -> &'static str {
-    match reason {
-        ExpireReason::AskGone => "ask_gone",
-        ExpireReason::SituationChanged => "situation_changed",
-    }
-}
-
-fn expire_reason(text: &str) -> ExpireReason {
-    parse_expire_reason(text).unwrap_or_else(|| panic!("'{text}' is no expire reason"))
-}
-
-fn parse_expire_reason(text: &str) -> Option<ExpireReason> {
-    [ExpireReason::AskGone, ExpireReason::SituationChanged]
-        .into_iter()
-        .find(|r| expire_reason_text(*r) == text)
-}
 
 /// What the `Asks` row of an ask shows besides its hash.
 #[derive(Clone, Debug, PartialEq)]
@@ -586,25 +561,23 @@ impl NetDef {
     /// the work's firing reads the answer id and the value, the lowering the
     /// seen hash, and the answer's settlement the expiry reason.
     fn missing_answer_field(&self, place: &str, content: &Content) -> Option<&'static str> {
-        let text = |f: &str| matches!(content.get(f), Some(Value::String(_)));
-        let needs = if self.is_answered(place) {
-            vec![
-                (ANSWER_ID_KEY, text(ANSWER_ID_KEY)),
-                (SEEN_FIELD, text(SEEN_FIELD)),
-                (ANSWER_INPUT_KEY, content.contains_key(ANSWER_INPUT_KEY)),
-            ]
+        if self.is_answered(place) {
+            answer::parse_answered(content.clone()).err()
         } else if self.asks.keys().any(|w| expired_place(w) == place) {
-            let reason = matches!(
-                content.get(REASON_FIELD),
-                Some(Value::String(r)) if parse_expire_reason(r).is_some()
-            );
-            vec![(REASON_FIELD, reason)]
+            answer::parse_expired(content).err()
         } else {
-            return None;
-        };
-        needs
-            .into_iter()
-            .find_map(|(field, ok)| (!ok).then_some(field))
+            None
+        }
+    }
+
+    /// A token for net data in `place`; an answer must have passed
+    /// [`Self::missing_answer_field`].
+    fn payload(&self, place: &str, content: Content) -> Payload {
+        if self.is_answered(place) {
+            Payload::Answered(answer::parse_answered(content).expect("checked at the write"))
+        } else {
+            Payload::Record(content)
+        }
     }
 
     /// Why a firing may not put `outputs`: a place an outside write may not
@@ -951,6 +924,8 @@ pub enum Payload<V = Value> {
     Record(Record<V>),
     /// A late or upgrading result in a candidate place (NET-cand.a).
     Candidate(Box<Candidate<V>>),
+    /// An `Answered.T` token: the user answer the work of `T` consumes.
+    Answered(Answered<V>),
     /// `<T>.Running`: names one occurrence with an attempt running.
     Running {
         occurrence: OccurrenceId,
@@ -975,6 +950,15 @@ pub enum Payload<V = Value> {
         answer: Arc<str>,
         held: Vec<(Place, Subject, Holder)>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answered<V = Value> {
+    pub id: Arc<str>,
+    /// The user value; only the work's bound input holds it.
+    pub input: V,
+    /// The other fields, which readers see.
+    pub record: Record<V>,
 }
 
 /// What a stale effect would have written to a place with a candidate: the
@@ -1290,7 +1274,7 @@ pub struct Reader<'a> {
     net: &'a NetDef,
     tokens: &'a Tokens,
     trace: &'a mut Trace,
-    /// The [`ANSWER_INPUT_KEY`] of an `Answered` token reads as absent.
+    /// The value of an `Answered` token reads as absent.
     hide_value: bool,
 }
 
@@ -1302,11 +1286,6 @@ impl Reader<'_> {
         }
         match &net.place_def(place).kind {
             PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject))?.remove(field),
-            PlaceKind::Stored { .. }
-                if self.hide_value && field == ANSWER_INPUT_KEY && net.is_answered(place) =>
-            {
-                None
-            }
             // An executor place or a candidate holds no fields: a read of one
             // refuses the firing like a read of an undeclared place.
             PlaceKind::Stored { .. }
@@ -1325,7 +1304,10 @@ impl Reader<'_> {
                 let value = self
                     .tokens
                     .token(place, subject)
-                    .and_then(|t| t.record().get(field).cloned());
+                    .and_then(|t| match &t.payload {
+                        Payload::Answered(a) => answer::answered_field(a, field, !self.hide_value),
+                        _ => t.record().get(field).cloned(),
+                    });
                 self.trace
                     .row(self.tokens, place, subject)
                     .fields
@@ -2348,14 +2330,7 @@ impl Executor {
             return Err(UftError::UnknownTransition(call.transition));
         }
         let id = call.answer.0.as_str();
-        let value = Content::from([
-            (ANSWER_ID_KEY.to_string(), Value::String(id.to_string())),
-            (SEEN_FIELD.to_string(), Value::String(hash_text(&call.seen))),
-            (
-                ANSWER_INPUT_KEY.to_string(),
-                call.value.unwrap_or(Value::Null),
-            ),
-        ]);
+        let value = answer::answer_value(id, hash_text(&call.seen), call.value);
         match self.fire(
             &answer_transition(work),
             &call.subject.0,
@@ -2457,14 +2432,14 @@ impl Executor {
                 }
             }
             None => match self.tokens.token(&expired_place(work), id) {
-                Some(t) => {
-                    let Some(Value::String(reason)) = t.record().get(REASON_FIELD) else {
-                        panic!("the {} token of '{id}' has no reason", expired_place(work));
-                    };
-                    AnswerSettlement::Expired {
-                        reason: expire_reason(reason),
-                    }
-                }
+                Some(t) => AnswerSettlement::Expired {
+                    reason: answer::parse_expired(t.record()).unwrap_or_else(|field| {
+                        panic!(
+                            "the {} token of '{id}' lacks '{field}'",
+                            expired_place(work)
+                        )
+                    }),
+                },
                 None => AnswerSettlement::Waiting,
             },
         })
@@ -2575,7 +2550,7 @@ impl Executor {
         let withdrawn = self
             .tokens
             .token(&answered, &subject)
-            .is_some_and(|t| t.record().get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
+            .is_some_and(|t| matches!(&t.payload, Payload::Answered(a) if *a.id == **id));
         if withdrawn {
             self.tokens.remove(&answered, &subject, None);
         }
@@ -2652,8 +2627,15 @@ impl Executor {
                 field,
             });
         }
+        let payload = self.net.payload(place, content);
         self.tokens
-            .put(&Place::new(place), &Subject::new(subject), content, None)
+            .put_with(
+                &Place::new(place),
+                &Subject::new(subject),
+                Envelope::default(),
+                payload,
+                None,
+            )
             .map_err(|PoolFull| ExecError::PoolFull {
                 place: place.to_string(),
             })?;
@@ -2742,10 +2724,7 @@ impl Executor {
                             }
                             fired.insert((i, s.clone()));
                             let occurrence = match self.net.answered_of(&name) {
-                                Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
-                                    Value::String(answer) => work_occurrence(&name, &answer),
-                                    other => panic!("the {p} answer id of {s} is {other:?}"),
-                                },
+                                Some(p) => work_occurrence(&name, &self.answered(&p, &s).id),
                                 None => self.mint(&name),
                             };
                             started.push(self.start(&name, s, occurrence, trace, input, now));
@@ -2895,7 +2874,7 @@ impl Executor {
     /// `value` is the user input (UFT-adopt.a; empty for none). It joins the
     /// bound input after the bind, so no guard reads it; a field the bind
     /// also produces is an impossible state and panics. A fire of `Answer.T`
-    /// takes a [`OccurrenceId::Caller`] id equal to its [`ANSWER_ID_KEY`].
+    /// takes a [`OccurrenceId::Caller`] id equal to its [`answer::answer_id`].
     pub fn fire(
         &mut self,
         transition: &str,
@@ -2929,11 +2908,7 @@ impl Executor {
         }
         if let Some(work) = self.net.work_of_answer(transition) {
             let answer = match &occurrence {
-                OccurrenceId::Caller(id)
-                    if value.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())) =>
-                {
-                    id.clone()
-                }
+                OccurrenceId::Caller(id) if answer::answer_id(&value) == Some(&**id) => id.clone(),
                 _ => {
                     return Err(FireError::AnswerOccurrence {
                         transition: transition.to_string(),
@@ -3347,11 +3322,9 @@ impl Executor {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
         if let Some(p) = &self.net.answered_of(&t.name) {
-            if input.contains_key(ANSWER_INPUT_KEY) {
+            if !answer::work_input(&mut input, self.answered(p, s)) {
                 return Err(WhyNot::BindsAnswerInput);
             }
-            let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
-            input.insert(ANSWER_INPUT_KEY.to_string(), value);
         }
         Ok(input)
     }
@@ -3387,11 +3360,8 @@ impl Executor {
         if let Some(p) = &answered
             && !self.twin(Twin::OccurrenceNotInTrace)
         {
-            let answer = self.answered_field(p, s, ANSWER_ID_KEY);
-            trace
-                .row(&self.tokens, p, s)
-                .fields
-                .insert(ANSWER_ID_KEY.to_string(), Some(answer));
+            let (field, id) = answer::traced_id(self.answered(p, s));
+            trace.row(&self.tokens, p, s).fields.insert(field, Some(id));
         }
         let bound = (t.bind)(&mut self.reader(trace), s);
         if let Some(place) = &trace.undeclared {
@@ -3403,15 +3373,16 @@ impl Executor {
         bound.ok_or(WhyNot::Guard)
     }
 
-    /// A field of the `Answered` token a work firing consumes.
-    fn answered_field(&self, place: &Place, subject: &Subject, field: &str) -> Value {
-        self.tokens
+    /// The `Answered` token a work firing consumes.
+    fn answered(&self, place: &Place, subject: &Subject) -> &Answered {
+        let token = self
+            .tokens
             .token(place, subject)
-            .expect("decide checked every consumed token")
-            .record()
-            .get(field)
-            .cloned()
-            .unwrap_or_else(|| panic!("the {place} token of {subject} has no '{field}'"))
+            .expect("decide checked every consumed token");
+        match &token.payload {
+            Payload::Answered(a) => a,
+            other => panic!("the {place} token of {subject} holds {other:?}"),
+        }
     }
 
     fn reader<'a>(&'a self, trace: &'a mut Trace) -> Reader<'a> {
@@ -3630,7 +3601,10 @@ impl Executor {
                 .remove(&(a.transition.clone(), a.subject.clone()));
             let rows = rows
                 .into_iter()
-                .map(|o| (o.place, o.subject, Payload::Record(o.content)))
+                .map(|o| {
+                    let payload = self.net.payload(&o.place, o.content);
+                    (o.place, o.subject, payload)
+                })
                 .collect();
             return self.commit(a, rows);
         };
@@ -3750,13 +3724,8 @@ impl Executor {
     /// A firing's put; a token into a full pool is not put, and the net
     /// discloses it once per place and transition.
     fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
-        self.put_by_with(
-            place,
-            subject,
-            Envelope::default(),
-            Payload::Record(content),
-            by,
-        );
+        let payload = self.net.payload(place, content);
+        self.put_by_with(place, subject, Envelope::default(), payload, by);
     }
 
     fn put_by_with(
