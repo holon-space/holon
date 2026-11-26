@@ -6,7 +6,8 @@ Each case builds a scratch jj repo holding the selector's fixture workspace, for
 second being a fix round) off `main`, and then lands drawn files on `main`. The selection of the lane must not move:
 - `fork_point("main")` is the commit `main` had at the fork, and `BASE:` names it,
 - `jj_changed` lists exactly the lane's own files (a rename-free diff, so the files drawn),
-- the step lines equal the lines selected before the landing.
+- the step lines equal the lines selected before the landing,
+- `--changed-paths main`, which `just lane-checks` reads, prints the same changed paths.
 Fixed cases first: the shape of a lane whose base moved under it, and a base that does not resolve.
 Exits non-zero when a property fails or a named input class was never drawn.
 """
@@ -81,6 +82,9 @@ def run_case(case, counts):
         changed = st.jj_changed(fork)
         after = selected(root, meta, changed)
         header = st.jj_header(fork)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert st.main(["--changed-paths", "main"]) == 0
         found = []
         if fork != old_main:
             found.append(f"fork point {fork} is not the old main {old_main}")
@@ -89,6 +93,8 @@ def run_case(case, counts):
         want = sorted(set(case["lane"]) | set(case["fix"]))
         if changed != want:
             found.append(f"changed paths {changed} are not the lane's own {want}; landed {case['landed']}")
+        if out.getvalue().splitlines() != want:
+            found.append(f"--changed-paths printed {out.getvalue().splitlines()}, not the lane's own {want}")
         if after != before:
             found.append(f"step lines moved with the landing:\n  before {before}\n  after  {after}")
         counts["cases"] += 1

@@ -112,6 +112,7 @@ def recipe_paths(src, dst):
     shown = subprocess.run(["just", "--justfile", str(REPO / "justfile"), "--show", "lane-checks"],
                            capture_output=True, text=True, check=True).stdout
     command = re.sub(r"\{\{ *base *\}\}", "@-", re.search(r"changed=\$\((.*)\)", shown).group(1))
+    command = command.replace("scripts/select-tests.py", str(REPO / "scripts/select-tests.py"))
     with tempfile.TemporaryDirectory() as repo:
         run = lambda *argv: subprocess.run(argv, cwd=repo, capture_output=True, text=True, check=True).stdout
         run("jj", "git", "init", ".")

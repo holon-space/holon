@@ -1572,6 +1572,7 @@ cargo-free-checks:
     check twin-own-red-names target/gate-logs/gate-arch-twin-own-red-names.log ./scripts/python311 scripts/test-twin-own-red.py
     check featuremap target/gate-logs/landing-featuremap.log /usr/bin/python3 scripts/featuremap.py check
     check just-calls-once target/gate-logs/gate-arch-just-calls-once.log ./scripts/test-just-calls-once.py
+    check select-tests-fork-point target/gate-logs/gate-arch-select-tests-fork-point.log ./scripts/test-select-tests-fork-point.py
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
     check hickory-dnssec-off target/gate-logs/gate-arch-hickory-dnssec-off.log \
         with_self_check ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}}
@@ -1582,14 +1583,13 @@ cargo-free-checks:
     fi
 
 # The fast checks a lane runs before verify: the cargo-free checks, machete and
-# deny always; archlint and deny's advisories only when the diff from `base`
-# reaches them (scripts/lane-check-map.py), so a new advisory on an unchanged
+# deny always; archlint and deny's advisories only when the diff from the fork
+# point of `base` reaches them (scripts/lane-check-map.py), so a new advisory on an unchanged
 # lock file stays the gate's. Each mapped check it skips prints why.
 lane-checks base:
     #!/usr/bin/env bash
     set -euo pipefail
-    # --name-only prints a rename's destination only; the reverse diff prints its source.
-    changed=$({ jj diff --from {{base}} --to @ --name-only; jj diff --from @ --to {{base}} --name-only; } | sort -u)
+    changed=$(python3 scripts/select-tests.py --changed-paths {{base}})
     failed=""
     run() {
         local name=$1

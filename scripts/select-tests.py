@@ -1238,9 +1238,13 @@ def main(argv):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--base", help="jj revision the lane started from, e.g. main")
     mode.add_argument("--gate", choices=sorted(GATE_SCRIPTS), help="print the selection of one landing gate")
+    mode.add_argument("--changed-paths", metavar="BASE", help="print the lane's changed paths, one per line, as --base reads them")
     ap.add_argument("--paths-from", help="the changed paths, one per line (default: with --gate $GATE_CHANGED, with "
                                          "--base the diff from the base to @)")
     a = ap.parse_args(argv)
+    if a.changed_paths:
+        print(*jj_changed(fork_point(a.changed_paths)), sep="\n")
+        return 0
     cwd = Path.cwd()
     meta = load_metadata()
     assert_workspace_root(meta, cwd)
