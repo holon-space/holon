@@ -1,8 +1,8 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
-use super::{KEYS, TestKinds, arb_places};
-use crate::{Applied, Discipline, Out, RowView, Store};
+use super::{Content, KEYS, TestKinds, arb_places, content};
+use crate::{Applied, Discipline, Out, Store};
 
 type Row = (u8, u8);
 
@@ -20,11 +20,6 @@ pub enum StoreOp {
     UnitOut(Row),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Content {
-    Tokens(Vec<u32>),
-    Count(u32),
-}
 
 pub fn arb_store_case() -> impl Strategy<Value = (Vec<(u8, Discipline)>, Vec<StoreOp>)> {
     arb_places(4).prop_flat_map(|places| {
@@ -90,13 +85,6 @@ pub fn check_store_laws_on<S: Store<TestKinds>>(
         }
     }
     Ok(())
-}
-
-fn content<S: Store<TestKinds>>(store: &S, (p, k): Row) -> Content {
-    match store.row(&p, &k) {
-        RowView::Tokens(t) => Content::Tokens(t.into_iter().copied().collect()),
-        RowView::Count(n) => Content::Count(n),
-    }
 }
 
 struct Case<'a, R> {
