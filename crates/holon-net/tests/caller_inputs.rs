@@ -529,14 +529,127 @@ fn net_gen() -> impl Strategy<Value = NetGen> {
             prop::collection::vec(trans_gen(n), 1..=TRANSITIONS.len()),
             prop::collection::vec(bind_prog(), 0..=DERIVED.len()),
             prop::collection::vec(work_gen(n), 0..=WORKS.len()),
+            prop::option::weighted(0.5, pool_read()),
         )
-            .prop_map(move |(transitions, derived, works)| NetGen {
-                places: places.clone(),
-                transitions,
-                derived,
-                works,
+            .prop_map(move |(transitions, derived, works, pool_read)| {
+                let mut net = NetGen {
+                    places: places.clone(),
+                    transitions,
+                    derived,
+                    works,
+                };
+                if let Some(read) = pool_read {
+                    read.apply(&mut net);
+                }
+                net
             })
     })
+}
+
+/// A transition whose bind reads a pool place it has no arc on: a change of
+/// the pool reaches it only through what its bind read.
+#[derive(Clone, Debug)]
+struct PoolRead {
+    place: prop::sample::Index,
+    size: u32,
+    transition: prop::sample::Index,
+    /// The read of place `Held(place)`.
+    read: fn(Name, Subj, String) -> ReadOp,
+    subject: Subj,
+    field: String,
+    drain: Option<Drain>,
+}
+
+/// The reader takes `input`, reads nothing but the pool and fails
+/// definitely, so its failure mark holds what it read of the pool. The
+/// drainer reads `input` and takes from the pool: the pool changes after the
+/// mark is set. Both are pure auto transitions with no other arcs.
+#[derive(Clone, Debug)]
+struct Drain {
+    drainer: prop::sample::Index,
+    input: prop::sample::Index,
+}
+
+fn pool_read() -> impl Strategy<Value = PoolRead> {
+    let kinds: Vec<fn(Name, Subj, String) -> ReadOp> = vec![
+        ReadOp::Field,
+        ReadOp::Text,
+        |p, s, _| ReadOp::Present(p, s),
+        |p, _, _| ReadOp::Free(p),
+    ];
+    let index = any::<prop::sample::Index>;
+    let drain = (index(), index()).prop_map(|(drainer, input)| Drain { drainer, input });
+    (
+        (index(), 1u32..4, index()),
+        (select(kinds), subj(), field()),
+        prop::option::of(drain),
+    )
+        .prop_map(
+            |((place, size, transition), (read, subject, field), drain)| PoolRead {
+                place,
+                size,
+                transition,
+                read,
+                subject,
+                field,
+                drain,
+            },
+        )
+}
+
+/// A pure auto transition that takes `consumes`, reads `reads` and has no
+/// other arc or read.
+fn plain(t: &mut TransGen, consumes: usize, reads: Option<usize>, body: BodyProg) {
+    t.trigger = Trigger::Auto;
+    t.roles.fill(Role::None);
+    t.roles[consumes] = Role::Consumes;
+    if let Some(r) = reads {
+        t.roles[r] = Role::Reads;
+    }
+    t.effect = None;
+    t.on_failure = None;
+    t.on_timeout = None;
+    t.timers = None;
+    t.bind = BindProg {
+        reads: vec![],
+        out: Some(vec![]),
+    };
+    t.body = body;
+}
+
+impl PoolRead {
+    fn apply(self, net: &mut NetGen) {
+        let p = self.place.index(net.places.len());
+        net.places[p] = PlaceGen {
+            capacity: PlaceCapacity::Fifo,
+            pool: Some(self.size),
+        };
+        let t = self.transition.index(net.transitions.len());
+        if let Some(drain) = self.drain {
+            let q = drain.input.index(net.places.len());
+            let d = drain.drainer.index(net.transitions.len());
+            if q != p && d != t {
+                plain(
+                    &mut net.transitions[d],
+                    p,
+                    Some(q),
+                    BodyProg::Outputs(vec![]),
+                );
+                plain(
+                    &mut net.transitions[t],
+                    q,
+                    None,
+                    BodyProg::Fails { retryable: false },
+                );
+            }
+        }
+        let t = &mut net.transitions[t];
+        t.roles[p] = Role::None;
+        // A stored place's index is its position in every readable list.
+        t.bind
+            .reads
+            .push((self.read)(Name::Held(p), self.subject, self.field));
+    }
 }
 
 fn duration(ms: u64) -> DurationSpec {
@@ -571,6 +684,29 @@ fn without_answer_fields(bind: &BindProg) -> BindProg {
 }
 
 impl NetGen {
+    /// The input of a drained pool reader: a pure auto transition that fails
+    /// definitely, reads only a pool it has no arc on and takes one place.
+    fn drained_input(&self) -> Option<usize> {
+        self.transitions.iter().find_map(|t| {
+            let [read] = t.bind.reads.as_slice() else {
+                return None;
+            };
+            let Name::Held(p) = *read.place() else {
+                return None;
+            };
+            let consumes: Vec<usize> = (0..t.roles.len())
+                .filter(|&i| t.roles[i] == Role::Consumes)
+                .collect();
+            (t.trigger == Trigger::Auto
+                && t.effect.is_none()
+                && matches!(t.body, BodyProg::Fails { retryable: false })
+                && self.places.get(p).is_some_and(|g| g.pool.is_some())
+                && t.roles[p] == Role::None
+                && consumes.len() == 1)
+                .then(|| consumes[0])
+        })
+    }
+
     fn stored(&self) -> Vec<String> {
         (0..self.places.len())
             .map(|i| PLACES[i].to_owned())
@@ -1906,21 +2042,106 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
     Ok(no_panic("load", || net.executor())?.ok())
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 512, max_shrink_time: 60_000, ..ProptestConfig::default() })]
+/// Any sequence of public calls on any net the format allows: no call
+/// panics, a call before the clock is refused and changes nothing, a name
+/// the net does not hold is refused, a caller value that repeats a bound
+/// field is refused, and a binding that reads an undeclared place never
+/// fires. The generator find below runs first.
+#[test]
+fn no_sequence_of_caller_calls_panics() {
+    let (net, ops) = a_pool_read_wakes_its_marked_reader();
+    run_calls(net, &ops)
+        .unwrap_or_else(|e| panic!("static example a_pool_read_wakes_its_marked_reader: {e}"));
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+        cases: 512,
+        max_shrink_time: 60_000,
+        source_file: Some(file!()),
+        ..ProptestConfig::default()
+    });
+    runner
+        .run(&calls(), |(net, ops)| run_calls(net, &ops))
+        .unwrap();
+}
 
-    /// Any sequence of public calls on any net the format allows: no call
-    /// panics, a call before the clock is refused and changes nothing, a
-    /// name the net does not hold is refused, a caller value that repeats a
-    /// bound field is refused, and a binding that reads an undeclared place
-    /// never fires.
-    #[test]
-    fn no_sequence_of_caller_calls_panics(
-        net in net_gen(),
-        ops in prop::collection::vec(op(), 1..24),
-    ) {
-        run_calls(net, &ops)?;
-    }
+/// A generator find, kept as its state: T0 binds by reading the pool P0 it
+/// has no arc on and fails definitely; T1 drains the pool. When the pool
+/// empties, T0's input changes, so its failure mark no longer holds and T0
+/// must be decided again.
+fn a_pool_read_wakes_its_marked_reader() -> (NetGen, Vec<Op>) {
+    let net = NetGen {
+        places: vec![
+            PlaceGen {
+                capacity: PlaceCapacity::Fifo,
+                pool: Some(3),
+            },
+            PlaceGen {
+                capacity: PlaceCapacity::Single,
+                pool: None,
+            },
+        ],
+        transitions: vec![
+            TransGen {
+                trigger: Trigger::Auto,
+                priority: 0,
+                roles: vec![Role::None, Role::Consumes],
+                produces: vec![],
+                facts: vec![],
+                on_failure: None,
+                on_timeout: None,
+                effect: None,
+                timers: None,
+                bind: BindProg {
+                    reads: vec![ReadOp::Field(Name::Held(0), Subj::Own, "x".to_owned())],
+                    out: Some(vec![]),
+                },
+                body: BodyProg::Fails { retryable: false },
+            },
+            TransGen {
+                trigger: Trigger::Auto,
+                priority: 0,
+                roles: vec![Role::Consumes, Role::Reads],
+                produces: vec![],
+                facts: vec![],
+                on_failure: None,
+                on_timeout: None,
+                effect: None,
+                timers: None,
+                bind: BindProg {
+                    reads: vec![],
+                    out: Some(vec![]),
+                },
+                body: BodyProg::Outputs(vec![]),
+            },
+        ],
+        derived: vec![],
+        works: vec![],
+    };
+    let ops = vec![Op::Write {
+        place: Name::Held(1),
+        subject: "s".to_string(),
+        content: vec![("v".to_owned(), Value::Array(vec![]))],
+        dt: Dt::Same,
+    }];
+    (net, ops)
+}
+
+/// A net and the calls on it; a drained pool reader ([`Drain`]) gets a first
+/// write of its input, which the drawn calls rarely make.
+fn calls() -> impl Strategy<Value = (NetGen, Vec<Op>)> {
+    (net_gen(), prop::collection::vec(op(), 1..24)).prop_map(|(net, mut ops)| {
+        if let Some(q) = net.drained_input() {
+            ops.insert(
+                0,
+                Op::Write {
+                    place: Name::Held(q),
+                    subject: "s".to_owned(),
+                    content: vec![],
+                    dt: Dt::Same,
+                },
+            );
+        }
+        (net, ops)
+    })
 }
 
 fn run_calls(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {

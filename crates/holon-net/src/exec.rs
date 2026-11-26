@@ -1074,13 +1074,20 @@ impl Tokens {
         })
     }
 
-    fn slot(&self, place: &str, subject: &str) -> Option<&Slot> {
-        let subject = if self.pools.contains_key(place) {
+    /// The subject a row of `place` is stored and touched under: a pool is
+    /// one row shared by every subject.
+    fn row_subject<'a>(&self, place: &str, subject: &'a str) -> &'a str {
+        if self.pools.contains_key(place) {
             POOL_SUBJECT
         } else {
             subject
-        };
-        self.slots.get(place).and_then(|m| m.get(subject))
+        }
+    }
+
+    fn slot(&self, place: &str, subject: &str) -> Option<&Slot> {
+        self.slots
+            .get(place)
+            .and_then(|m| m.get(self.row_subject(place, subject)))
     }
 
     /// Whether `subjects(place)` lists `subject`.
@@ -1092,11 +1099,7 @@ impl Tokens {
     }
 
     fn slot_mut(&mut self, place: &Place, subject: &Subject) -> &mut Slot {
-        let subject = if self.pools.contains_key(place) {
-            Subject::new(POOL_SUBJECT)
-        } else {
-            subject.clone()
-        };
+        let subject = Subject::new(self.row_subject(place, subject));
         self.touched.insert((place.clone(), subject.clone()));
         self.slots
             .entry(place.clone())
@@ -2809,9 +2812,11 @@ impl Executor {
                             {
                                 self.conditions.push(c);
                             }
-                            for row in trace.rows.into_keys() {
+                            for (place, subject) in trace.rows.into_keys() {
+                                let subject =
+                                    Subject::new(self.tokens.row_subject(&place, &subject));
                                 self.waiters
-                                    .entry(row)
+                                    .entry((place, subject))
                                     .or_default()
                                     .insert((name.clone(), s.clone()));
                             }
