@@ -1240,7 +1240,7 @@ def main(argv):
     mode.add_argument("--gate", choices=sorted(GATE_SCRIPTS), help="print the selection of one landing gate")
     mode.add_argument("--changed-paths", metavar="BASE", help="print the lane's changed paths, one per line, as --base reads them")
     ap.add_argument("--paths-from", help="the changed paths, one per line (default: with --gate $GATE_CHANGED, with "
-                                         "--base the diff from the base to @)")
+                                         "--base the diff from the fork point of the base to @)")
     a = ap.parse_args(argv)
     if a.changed_paths:
         print(*jj_changed(fork_point(a.changed_paths)), sep="\n")
