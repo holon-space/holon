@@ -15,6 +15,7 @@ pub const HOST: Host<Value> = Host {
     text,
     as_text,
     fact,
+    answer: crate::uft::answer::CODEC,
 };
 
 /// An empty net over Holon's [`Value`].

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
+use holon_net::exec::Asks;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -49,6 +50,7 @@ use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::REASON_FIELD;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::ANSWER_INPUT_KEY;
@@ -835,9 +837,10 @@ fn the_bypass_check_names_every_near_miss() {
 
 #[test]
 fn ask_row_carries_the_declared_input_type() {
-    let mut exec = executor(&descriptor());
+    let d = descriptor();
+    let mut exec = executor(&d);
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
-    let rows = exec.asks().expect("the asks derive");
+    let rows = exec.asks(&ask_metas([&d])).expect("the asks derive");
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].transition.0, T);
     assert_eq!(rows[0].subject.0, "a");
@@ -1117,7 +1120,9 @@ fn a_read_only_work_in_flight_hides_its_ask() {
 /// resolves it.
 #[test]
 fn a_parked_unknown_outcome_hides_its_ask() {
-    let mut exec = asking(&read_only(descriptor()));
+    let d = read_only(descriptor());
+    let metas = ask_metas([&d]);
+    let mut exec = asking(&d);
     let req = answer_and_start(&mut exec, "1");
     let lost = exec
         .complete(
@@ -1134,9 +1139,9 @@ fn a_parked_unknown_outcome_hides_its_ask() {
         "the ask shows while answer 1 is parked with an unknown outcome"
     );
     assert!(
-        exec.asks().expect("the asks derive").is_empty(),
+        exec.asks(&metas).expect("the asks derive").is_empty(),
         "the parked occurrence still offers an Asks row: {:?}",
-        exec.asks().expect("the asks derive")
+        exec.asks(&metas).expect("the asks derive")
     );
     let verified = exec
         .resolve(&req.occurrence, Resolution::Verify(vec![]), Duration::ZERO)
