@@ -2046,12 +2046,30 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
 /// panics, a call before the clock is refused and changes nothing, a name
 /// the net does not hold is refused, a caller value that repeats a bound
 /// field is refused, and a binding that reads an undeclared place never
-/// fires. The generator find below runs first.
+/// fires. The generator finds kept as their state run first.
 #[test]
 fn no_sequence_of_caller_calls_panics() {
-    let (net, ops) = a_pool_read_wakes_its_marked_reader();
-    run_calls(net, &ops)
-        .unwrap_or_else(|e| panic!("static example a_pool_read_wakes_its_marked_reader: {e}"));
+    let found: [(&str, FoundCase); 4] = [
+        (
+            "free_of_an_answer_place_counts_its_answer",
+            free_of_an_answer_place_counts_its_answer(),
+        ),
+        (
+            "a_pool_token_back_from_a_failed_run_joins_the_next_run",
+            a_pool_token_back_from_a_failed_run_joins_the_next_run(),
+        ),
+        (
+            "an_answer_for_the_pool_subject_read_through_free_does_not_panic",
+            an_answer_for_the_pool_subject_read_through_free_does_not_panic(),
+        ),
+        (
+            "a_pool_read_wakes_its_marked_reader",
+            a_pool_read_wakes_its_marked_reader(),
+        ),
+    ];
+    for (name, (net, ops)) in found {
+        run_calls(net, &ops).unwrap_or_else(|e| panic!("static example {name}: {e}"));
+    }
     let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
         cases: 512,
         max_shrink_time: 60_000,
@@ -2067,7 +2085,7 @@ fn no_sequence_of_caller_calls_panics() {
 /// has no arc on and fails definitely; T1 drains the pool. When the pool
 /// empties, T0's input changes, so its failure mark no longer holds and T0
 /// must be decided again.
-fn a_pool_read_wakes_its_marked_reader() -> (NetGen, Vec<Op>) {
+fn a_pool_read_wakes_its_marked_reader() -> FoundCase {
     let net = NetGen {
         places: vec![
             PlaceGen {
@@ -2144,6 +2162,9 @@ fn calls() -> impl Strategy<Value = (NetGen, Vec<Op>)> {
     })
 }
 
+/// A generator find kept as its state: a net and the calls on it.
+type FoundCase = (NetGen, Vec<Op>);
+
 fn run_calls(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {
     let Some(exec) = load(&net)? else {
         return Ok(());
@@ -2157,8 +2178,7 @@ fn run_calls(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {
 
 /// A generator find, kept as its state: a bind counts the free tokens of an
 /// answer place whose subject is the pool subject.
-#[test]
-fn free_of_an_answer_place_counts_its_answer() {
+fn free_of_an_answer_place_counts_its_answer() -> FoundCase {
     let net = NetGen {
         places: vec![PlaceGen {
             capacity: PlaceCapacity::Single,
@@ -2205,13 +2225,12 @@ fn free_of_an_answer_place_counts_its_answer() {
         value: None,
         forward: 0,
     }];
-    run_calls(net, &ops).unwrap();
+    (net, ops.to_vec())
 }
 
 /// A generator find, kept as its state: a pool token goes back after a
 /// failed run and a new run of the same consumer takes it.
-#[test]
-fn a_pool_token_back_from_a_failed_run_joins_the_next_run() {
+fn a_pool_token_back_from_a_failed_run_joins_the_next_run() -> FoundCase {
     let net = NetGen {
         places: vec![
             PlaceGen {
@@ -2263,13 +2282,12 @@ fn a_pool_token_back_from_a_failed_run_joins_the_next_run() {
         },
         write(1),
     ];
-    run_calls(net, &ops).unwrap();
+    (net, ops.to_vec())
 }
 
-/// A caller answer into the subject a pool row uses, while the work's bind
-/// counts the free tokens of a place: no call panics.
-#[test]
-fn an_answer_for_the_pool_subject_read_through_free_does_not_panic() {
+/// A generator find, kept as its state: a caller answer into the subject a
+/// pool row uses, while the work's bind counts the free tokens of a place.
+fn an_answer_for_the_pool_subject_read_through_free_does_not_panic() -> FoundCase {
     let net = NetGen {
         places: vec![PlaceGen {
             capacity: PlaceCapacity::Single,
@@ -2316,17 +2334,7 @@ fn an_answer_for_the_pool_subject_read_through_free_does_not_panic() {
         value: None,
         forward: 0,
     }];
-    let run = || -> Result<(), TestCaseError> {
-        let Some(exec) = load(&net)? else {
-            return Ok(());
-        };
-        let mut m = Machine::new(net.clone(), exec);
-        for op in &ops {
-            m.apply(op)?;
-        }
-        Ok(())
-    };
-    run().unwrap();
+    (net, ops.to_vec())
 }
 
 // ------------------------------------------------------ one defect each
