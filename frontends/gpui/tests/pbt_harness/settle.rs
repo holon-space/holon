@@ -32,6 +32,9 @@ pub struct SettleTimeout {
     pub deadline: Duration,
     pub epoch: RenderEpoch,
     pub target: EngineSeq,
+    /// The seq through which the engine routed every change to its watchers:
+    /// a frame can reflect no seq above it.
+    pub routed: EngineSeq,
     /// The last pump committed a new frame, or a frame forced for the pending
     /// views changed the screen: something keeps the window dirty.
     pub dirty: bool,
@@ -46,6 +49,13 @@ pub struct SettleTimeout {
     /// A pump ran [`PUMP_TICKS`] tasks without the executor parking: a task
     /// wakes itself on every poll.
     pub runnable: bool,
+}
+
+impl SettleTimeout {
+    /// The report names what the settle still waits for.
+    pub fn names_a_wait(&self) -> bool {
+        !self.owed.is_empty() || self.runnable || self.routed < self.target
+    }
 }
 
 #[derive(Debug)]
@@ -63,12 +73,13 @@ impl std::fmt::Display for SettleError {
             SettleError::Timeout(t) => write!(
                 f,
                 "window did not settle within {:?}: frame {:?} reflects {:?}, target {:?}, \
-                 dirty {}, pending views {:?}, owed {:?}, operations in flight {}, \
+                 routed {:?}, dirty {}, pending views {:?}, owed {:?}, operations in flight {}, \
                  held bridges {:?}, task still runnable {}",
                 t.deadline,
                 t.epoch.frame,
                 t.epoch.reflects,
                 t.target,
+                t.routed,
                 t.dirty,
                 t.pending_views,
                 t.owed,
@@ -242,6 +253,7 @@ pub fn settle_window(
             deadline,
             epoch,
             target: watermark.emitted().map_err(SettleError::Engine)?,
+            routed: watermark.routed().map_err(SettleError::Engine)?,
             dirty: epoch.frame != before.frame || forced_frame_changed_screen,
             pending_views: app.pending_views(),
             owed: watermark.owed(),
@@ -343,4 +355,32 @@ pub fn hold_tokio_workers(runtime: &tokio::runtime::Runtime, hold: Duration) {
     for _ in 0..runtime.metrics().num_workers() {
         runtime.spawn(async move { std::thread::sleep(hold) });
     }
+}
+
+/// Every tokio worker of a runtime, blocked until this drops: no tokio task
+/// runs while it lives.
+pub struct HeldWorkers {
+    release: std::sync::Arc<std::sync::Barrier>,
+}
+
+impl Drop for HeldWorkers {
+    fn drop(&mut self) {
+        self.release.wait();
+    }
+}
+
+/// Block every tokio worker of `runtime`; returns once each one is blocked.
+pub fn hold_tokio_workers_until_released(runtime: &tokio::runtime::Runtime) -> HeldWorkers {
+    let workers = runtime.metrics().num_workers();
+    let held = std::sync::Arc::new(std::sync::Barrier::new(workers + 1));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(workers + 1));
+    for _ in 0..workers {
+        let (held, release) = (held.clone(), release.clone());
+        runtime.spawn(async move {
+            held.wait();
+            release.wait();
+        });
+    }
+    held.wait();
+    HeldWorkers { release }
 }

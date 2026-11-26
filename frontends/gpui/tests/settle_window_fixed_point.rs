@@ -1008,6 +1008,9 @@ mod driver_hop {
     use holon_api::PAGE_TAG;
     use holon_api::Region;
     use holon_api::Value;
+    use holon_frontend::render_epoch::EngineSeq;
+    use holon_frontend::render_epoch::FrameNo;
+    use holon_frontend::render_epoch::RenderEpoch;
     use holon_gpui::RebindHandle;
     use holon_gpui::launch_holon_window_rebindable;
     use holon_gpui::navigation_state::NavigationState;
@@ -1016,7 +1019,9 @@ mod driver_hop {
 
     use super::*;
     use crate::pbt_harness::settle::HANG_DEADLINE;
+    use crate::pbt_harness::settle::SettleTimeout;
     use crate::pbt_harness::settle::hold_tokio_workers;
+    use crate::pbt_harness::settle::hold_tokio_workers_until_released;
     use crate::pbt_harness::windowed_wide::real_text_system;
     use crate::pbt_harness::windowed_wide::resize_window;
 
@@ -1474,10 +1479,10 @@ mod driver_hop {
                         }
                     ) =>
                 {
-                    // The hold stops every tokio task, so a late watcher or a
-                    // window task still running at the deadline is as
-                    // legitimate a cause as a late driver.
-                    if t.owed.is_empty() && !t.runnable {
+                    // The hold stops every tokio task, so a late watcher, an
+                    // unrouted change or a window task still running at the
+                    // deadline is as legitimate a cause as a late driver.
+                    if !t.names_a_wait() {
                         Err(TestCaseError::fail(format!(
                             "{step}: the settle timed out while the tokio workers were held, yet \
                              names nothing it waits for: {}",
@@ -1517,6 +1522,156 @@ mod driver_hop {
         for (seeded, steps) in found {
             settled_frame_shows_every_row(seeded, steps).unwrap_or_else(|e| panic!("{e}"));
         }
+    }
+
+    /// Why a settle under held workers timed out, as its report shows it.
+    #[derive(Clone, Copy, Debug)]
+    enum Cause {
+        Owed,
+        Runnable,
+        RoutingLag,
+        /// Nothing the settle waits for is left, yet the frame lags: a stall.
+        Stall,
+    }
+
+    /// A report of `cause` whose frame reflects `reflects`, below `target`.
+    fn timeout_report(cause: Cause, reflects: u64, target: u64, dirty: bool) -> SettleTimeout {
+        assert!(
+            reflects < target,
+            "a timeout report's frame lags its target"
+        );
+        SettleTimeout {
+            deadline: SHORT_DEADLINE,
+            epoch: RenderEpoch {
+                frame: FrameNo(32),
+                reflects: EngineSeq(reflects),
+            },
+            target: EngineSeq(target),
+            routed: EngineSeq(match cause {
+                Cause::RoutingLag => reflects,
+                Cause::Owed | Cause::Runnable | Cause::Stall => target,
+            }),
+            dirty,
+            pending_views: Vec::new(),
+            owed: match cause {
+                Cause::Owed => vec![format!("block:hop-page-a: applied through {reflects}")],
+                Cause::Runnable | Cause::RoutingLag | Cause::Stall => Vec::new(),
+            },
+            operations_in_flight: 0,
+            held_bridges: Vec::new(),
+            runnable: matches!(cause, Cause::Runnable),
+        }
+    }
+
+    fn report_names_its_wait(
+        cause: Cause,
+        reflects: u64,
+        target: u64,
+        dirty: bool,
+    ) -> Result<(), TestCaseError> {
+        let report = timeout_report(cause, reflects, target, dirty);
+        prop_assert_eq!(
+            report.names_a_wait(),
+            !matches!(cause, Cause::Stall),
+            "{:?}: {}",
+            cause,
+            SettleError::Timeout(report.clone())
+        );
+        Ok(())
+    }
+
+    proptest! {
+        /// Every settle-timeout path reports one of these causes: the three
+        /// stopped pumps a runnable task, the deadline an owed subscription,
+        /// an unrouted change, or nothing.
+        #[test]
+        fn a_held_timeout_names_its_wait_unless_it_stalled(
+            cause in prop_oneof![
+                Just(Cause::Owed),
+                Just(Cause::Runnable),
+                Just(Cause::RoutingLag),
+                Just(Cause::Stall),
+            ],
+            (reflects, target) in (0u64..200).prop_flat_map(|r| (Just(r), r + 1..r + 50)),
+            dirty in any::<bool>(),
+        ) {
+            report_names_its_wait(cause, reflects, target, dirty)?;
+        }
+    }
+
+    /// The report of the gate's held `Refocus` timeout, under both readings.
+    #[test]
+    fn a_held_timeout_names_its_wait_unless_it_stalled_on_found_cases() {
+        for cause in [Cause::RoutingLag, Cause::Stall] {
+            report_names_its_wait(cause, 51, 63, true).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// A timeout under held workers reports the seq the engine's router had
+    /// reached, which stays below the target while a change waits for routing.
+    #[test]
+    fn a_held_timeout_reports_the_routed_seq_the_router_reached() {
+        let mut model = Model::default();
+        let mut window = Window::open(&mut model, [1, 1]);
+        let engine = window
+            .env
+            .reactive_engine
+            .get()
+            .cloned()
+            .expect("reactive engine after start_app");
+        let watermark = engine.ui_watermark();
+        // The write itself needs a tokio worker, so the hold can start only
+        // once it returned.
+        apply(&mut window, &mut model, &Op::AddChild);
+        let held = hold_tokio_workers_until_released(&window.runtime);
+        let lag =
+            watermark.routed().expect("routed seq") < watermark.emitted().expect("emitted seq");
+        let settled = settle_window(
+            &window.app,
+            &window.bounds,
+            watermark,
+            &mut || {},
+            SHORT_DEADLINE,
+        );
+        let routed = watermark.routed().expect("routed seq");
+        drop(held);
+        match settled {
+            Err(SettleError::Timeout(t)) => {
+                let report = SettleError::Timeout(t.clone()).to_string();
+                eprintln!(
+                    "[driver-hop] branch timeout, routing lag at the hold {lag}: routed {:?}, \
+                     target {:?}: {report}",
+                    t.routed, t.target
+                );
+                assert_eq!(
+                    t.routed, routed,
+                    "the report's routed seq differs from the router's: {report}"
+                );
+                if lag {
+                    assert!(
+                        t.routed < t.target,
+                        "the router lagged at the hold, yet the report shows none: {report}"
+                    );
+                }
+            }
+            Ok(epoch) => {
+                assert!(
+                    !lag,
+                    "the window settled at {epoch:?} though the router lagged at the hold"
+                );
+                let target = watermark.emitted().expect("emitted seq");
+                assert!(
+                    epoch.reflects >= target,
+                    "the window settled at {epoch:?} below the target {target:?}"
+                );
+                eprintln!("[driver-hop] branch settled at {epoch:?}, routed not compared");
+            }
+            Err(e) => panic!("{e}"),
+        }
+        window
+            .settle(Hop::OnTime)
+            .unwrap_or_else(|e| panic!("settle once the workers are released: {e}"));
+        window.close();
     }
 
     /// A held AddChild supersedes a render generation of the page's watcher
