@@ -227,7 +227,10 @@ Laws, checked as PBT invariants:
   ChangeDriven equals level semantics.
 - **Crash.** Drop the driver and every cache, rebuild from the marking: the
   observable run is the same. `Crash` is a shared PBT action.
-- **Witness.** The witness needs `V: Eq + Hash`.
+- **Witness.** The witness is a digest of the read trace. The host gives
+  `NetDef` an encoder function from `V` to bytes, so `V` needs no `Eq + Hash`
+  bound and no trait (Holon's `Value` holds floats and is only `PartialEq`).
+  The law: two values that are `==` encode to the same bytes.
 
 ## Migration: an inside-out carve
 
@@ -291,6 +294,24 @@ process clock.
 
 Recommendation: (b). Time stays monotonic inside an epoch, and the boundary
 has one explicit rule.
+
+### `tries` per token against attempts per run
+
+The header counts `tries[T]` per token in T's current run. The count bound
+reads `Run.attempts`. The two agree at each take, except while a parked
+occurrence (outcome unknown) shares the run: then the new token has fewer
+tries than the run has attempts. The retry step moves the bound into the
+header and must pick one authority.
+
+- (a) The bound reads the header. A parked occurrence does not count for
+  the new token.
+- (b) The bound stays on the run, and the header only shows the count.
+
+### Pool tokens
+
+A pool token serves the runs of every subject, so it counts no tries.
+Open for the retry step: does a failed run over a pool token retry, and
+what is its count?
 
 ### `notify(rows)` for Loro-backed stores
 
