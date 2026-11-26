@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::{Kinds, RowView, Store};
+use crate::Kinds;
+use crate::RowView;
+use crate::Store;
 
 /// The store as a bind sees it, without the store's stamp types.
 pub(crate) trait Reader<K: Kinds> {
@@ -30,7 +32,13 @@ pub struct View<'a, K: Kinds> {
 
 impl<'a, K: Kinds> View<'a, K> {
     pub(crate) fn new(reader: &'a dyn Reader<K>, readable: &'a BTreeSet<K::Place>) -> Self {
-        View { reader, readable, rows: BTreeSet::new(), scans: BTreeSet::new(), undeclared: None }
+        View {
+            reader,
+            readable,
+            rows: BTreeSet::new(),
+            scans: BTreeSet::new(),
+            undeclared: None,
+        }
     }
 
     fn declared(&mut self, place: &K::Place) -> bool {

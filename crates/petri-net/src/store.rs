@@ -1,4 +1,6 @@
-use crate::{Discipline, Kinds, Out};
+use crate::Discipline;
+use crate::Kinds;
+use crate::Out;
 
 /// What a reader sees of one row.
 #[derive(Debug)]

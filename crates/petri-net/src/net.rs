@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::Discipline;
+use crate::Kinds;
+use crate::Out;
 use crate::view::View;
-use crate::{Discipline, Kinds, Out};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trigger {
@@ -39,7 +42,9 @@ impl<K: Kinds> ArcSpec<K> {
 /// Guard, binding and fire in one: `None` means not enabled. The binding is
 /// `Some` exactly for external transitions.
 pub type Bind<K> = Arc<
-    dyn Fn(&mut View<'_, K>, &<K as Kinds>::Key, Option<&<K as Kinds>::Binding>) -> Option<Fire<K>> + Send + Sync,
+    dyn Fn(&mut View<'_, K>, &<K as Kinds>::Key, Option<&<K as Kinds>::Binding>) -> Option<Fire<K>>
+        + Send
+        + Sync,
 >;
 
 pub struct Transition<K: Kinds> {
@@ -47,7 +52,8 @@ pub struct Transition<K: Kinds> {
     pub trigger: Trigger,
     /// Higher fires first.
     pub priority: i32,
-    /// Each takes the head token of its row (Counted: one unit). The bind may read them.
+    /// Each takes the head token of its row (Counted: one unit). The bind may
+    /// read them.
     pub consumes: Vec<ArcSpec<K>>,
     /// Any key, through the view.
     pub reads: Vec<K::Place>,
@@ -61,7 +67,10 @@ pub struct Transition<K: Kinds> {
 
 impl<K: Kinds> fmt::Debug for Transition<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Transition").field("name", &self.name).field("trigger", &self.trigger).finish_non_exhaustive()
+        f.debug_struct("Transition")
+            .field("name", &self.name)
+            .field("trigger", &self.trigger)
+            .finish_non_exhaustive()
     }
 }
 
@@ -76,9 +85,15 @@ pub struct TransitionId(pub usize);
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError<P> {
     DuplicatePlace(P),
-    UndeclaredPlace { transition: String, place: P },
-    /// An auto transition needs an own-key consume or a same-key read to draw its keys from.
-    AutoWithoutKeyArc { transition: String },
+    UndeclaredPlace {
+        transition: String,
+        place: P,
+    },
+    /// An auto transition needs an own-key consume or a same-key read to draw
+    /// its keys from.
+    AutoWithoutKeyArc {
+        transition: String,
+    },
 }
 
 pub struct NetBuilder<K: Kinds> {
@@ -88,7 +103,10 @@ pub struct NetBuilder<K: Kinds> {
 
 impl<K: Kinds> Default for NetBuilder<K> {
     fn default() -> Self {
-        NetBuilder { places: vec![], transitions: vec![] }
+        NetBuilder {
+            places: vec![],
+            transitions: vec![],
+        }
     }
 }
 
@@ -113,23 +131,45 @@ impl<K: Kinds> NetBuilder<K> {
         let mut readable = Vec::new();
         for t in &self.transitions {
             let arcs = t.consumes.iter().chain(&t.inhibits).map(|a| &a.place);
-            let all: Vec<&K::Place> = arcs.chain(&t.reads).chain(&t.same_key_reads).chain(&t.produces).collect();
+            let all: Vec<&K::Place> = arcs
+                .chain(&t.reads)
+                .chain(&t.same_key_reads)
+                .chain(&t.produces)
+                .collect();
             if let Some(p) = all.into_iter().find(|p| !places.contains_key(*p)) {
-                return Err(BuildError::UndeclaredPlace { transition: t.name.clone(), place: p.clone() });
+                return Err(BuildError::UndeclaredPlace {
+                    transition: t.name.clone(),
+                    place: p.clone(),
+                });
             }
             let own_consume = t.consumes.iter().any(|a| matches!(a.key, KeySel::Own));
             if t.trigger == Trigger::Auto && !own_consume && t.same_key_reads.is_empty() {
-                return Err(BuildError::AutoWithoutKeyArc { transition: t.name.clone() });
+                return Err(BuildError::AutoWithoutKeyArc {
+                    transition: t.name.clone(),
+                });
             }
-            let arcs = t.consumes.iter().chain(&t.inhibits).map(|a| a.place.clone());
-            readable.push(arcs.chain(t.reads.iter().cloned()).chain(t.same_key_reads.iter().cloned()).collect());
+            let arcs = t
+                .consumes
+                .iter()
+                .chain(&t.inhibits)
+                .map(|a| a.place.clone());
+            readable.push(
+                arcs.chain(t.reads.iter().cloned())
+                    .chain(t.same_key_reads.iter().cloned())
+                    .collect(),
+            );
         }
         let mut auto_order: Vec<TransitionId> = (0..self.transitions.len())
             .filter(|&i| self.transitions[i].trigger == Trigger::Auto)
             .map(TransitionId)
             .collect();
         auto_order.sort_by_key(|id| std::cmp::Reverse(self.transitions[id.0].priority));
-        Ok(Net { places, transitions: self.transitions, readable, auto_order })
+        Ok(Net {
+            places,
+            transitions: self.transitions,
+            readable,
+            auto_order,
+        })
     }
 }
 

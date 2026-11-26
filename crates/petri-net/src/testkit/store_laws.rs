@@ -1,8 +1,17 @@
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestCaseError, TestRunner};
+use proptest::test_runner::Config;
+use proptest::test_runner::TestCaseError;
+use proptest::test_runner::TestRunner;
 
-use super::{Content, KEYS, TestKinds, arb_places, content};
-use crate::{Applied, Discipline, Out, Store};
+use super::Content;
+use super::KEYS;
+use super::TestKinds;
+use super::arb_places;
+use super::content;
+use crate::Applied;
+use crate::Discipline;
+use crate::Out;
+use crate::Store;
 
 type Row = (u8, u8);
 
@@ -12,14 +21,19 @@ type Row = (u8, u8);
 pub enum StoreOp {
     Write(Row),
     Drop(Row),
-    Move { from: Row, to: Row },
+    Move {
+        from: Row,
+        to: Row,
+    },
     /// Move the head of `from` into `to`, then the head of `to` back.
-    Bounce { from: Row, to: Row },
+    Bounce {
+        from: Row,
+        to: Row,
+    },
     Swap(Row, Row),
     UnitIn(Row),
     UnitOut(Row),
 }
-
 
 pub fn arb_store_case() -> impl Strategy<Value = (Vec<(u8, Discipline)>, Vec<StoreOp>)> {
     arb_places(4).prop_flat_map(|places| {
@@ -41,8 +55,13 @@ pub fn arb_store_case() -> impl Strategy<Value = (Vec<(u8, Discipline)>, Vec<Sto
 /// Runs the store laws (stamp-sound, move-neutral) over drawn cases on stores
 /// that `factory` makes for the drawn places.
 pub fn check_store_laws<S: Store<TestKinds>>(factory: impl Fn(&[(u8, Discipline)]) -> S) {
-    let mut runner = TestRunner::new(Config { failure_persistence: None, ..Config::default() });
-    if let Err(e) = runner.run(&arb_store_case(), |(places, ops)| check_store_laws_on(&factory, &places, &ops)) {
+    let mut runner = TestRunner::new(Config {
+        failure_persistence: None,
+        ..Config::default()
+    });
+    if let Err(e) = runner.run(&arb_store_case(), |(places, ops)| {
+        check_store_laws_on(&factory, &places, &ops)
+    }) {
         panic!("store laws: {e}");
     }
 }
@@ -54,16 +73,24 @@ pub fn check_store_laws_on<S: Store<TestKinds>>(
     ops: &[StoreOp],
 ) -> Result<(), TestCaseError> {
     let mut store = factory(places);
-    let mut case = Case { places, next_token: 0, seen: Vec::new() };
+    let mut case = Case {
+        places,
+        next_token: 0,
+        seen: Vec::new(),
+    };
     case.observe(&store)?;
     for op in ops {
         match op {
             StoreOp::Bounce { from, to } => {
                 let before = (content(&store, *from), store.row_stamp(&from.0, &from.1));
-                let Some(there) = case.plan_move(&store, *from, *to) else { continue };
+                let Some(there) = case.plan_move(&store, *from, *to) else {
+                    continue;
+                };
                 store.apply(there);
                 case.observe(&store)?;
-                let Some(back) = case.plan_move(&store, *to, *from) else { continue };
+                let Some(back) = case.plan_move(&store, *to, *from) else {
+                    continue;
+                };
                 store.apply(back);
                 case.observe(&store)?;
                 if content(&store, *from) == before.0 {
@@ -98,13 +125,22 @@ impl<R: Clone + Eq + std::fmt::Debug> Case<'_, R> {
         self.places[p as usize].1
     }
 
-    fn observe<S: Store<TestKinds, RowStamp = R>>(&mut self, store: &S) -> Result<(), TestCaseError> {
+    fn observe<S: Store<TestKinds, RowStamp = R>>(
+        &mut self,
+        store: &S,
+    ) -> Result<(), TestCaseError> {
         for &(p, _) in self.places {
             for k in 0..KEYS {
                 let (c, r) = (content(store, (p, k)), store.row_stamp(&p, &k));
                 for (row, c0, r0) in &self.seen {
                     if *row == (p, k) && *r0 == r {
-                        prop_assert_eq!(c0, &c, "stamp-sound: row {:?} has stamp {:?} for two contents", row, r);
+                        prop_assert_eq!(
+                            c0,
+                            &c,
+                            "stamp-sound: row {:?} has stamp {:?} for two contents",
+                            row,
+                            r
+                        );
                     }
                 }
                 self.seen.push(((p, k), c, r));
@@ -113,14 +149,21 @@ impl<R: Clone + Eq + std::fmt::Debug> Case<'_, R> {
         Ok(())
     }
 
-    fn plan_move<S: Store<TestKinds>>(&mut self, store: &S, from: Row, to: Row) -> Option<Applied<TestKinds>> {
+    fn plan_move<S: Store<TestKinds>>(
+        &mut self,
+        store: &S,
+        from: Row,
+        to: Row,
+    ) -> Option<Applied<TestKinds>> {
         self.plan(store, &StoreOp::Move { from, to })
     }
 
     fn plan<S: Store<TestKinds>>(&mut self, store: &S, op: &StoreOp) -> Option<Applied<TestKinds>> {
         let len = |(p, k): Row| store.row(&p, &k).len();
         let tokens = |(p, _): Row| !self.discipline(p).is_counted();
-        let accepts = |row: Row, after_consumes: usize| self.discipline(row.0) != Discipline::Single || after_consumes == 0;
+        let accepts = |row: Row, after_consumes: usize| {
+            self.discipline(row.0) != Discipline::Single || after_consumes == 0
+        };
         let firing = |consumes: Vec<Row>, outputs: Vec<(Row, Out<TestKinds>)>| Applied {
             consumes,
             outputs: outputs.into_iter().map(|((p, k), o)| (p, k, o)).collect(),
@@ -136,13 +179,20 @@ impl<R: Clone + Eq + std::fmt::Debug> Case<'_, R> {
                 accepts(to, after).then(|| firing(vec![from], vec![(to, Out::Moved(0))]))
             }
             StoreOp::Swap(a, b) if a != b && tokens(a) && tokens(b) && len(a) > 0 && len(b) > 0 => {
-                Some(firing(vec![a, b], vec![(a, Out::Moved(1)), (b, Out::Moved(0))]))
+                Some(firing(
+                    vec![a, b],
+                    vec![(a, Out::Moved(1)), (b, Out::Moved(0))],
+                ))
             }
             StoreOp::UnitIn(row) => match self.discipline(row.0) {
-                Discipline::Counted { size } if (len(row) as u32) < size => Some(firing(vec![], vec![(row, Out::Unit)])),
+                Discipline::Counted { size } if (len(row) as u32) < size => {
+                    Some(firing(vec![], vec![(row, Out::Unit)]))
+                }
                 _ => None,
             },
-            StoreOp::UnitOut(row) if !tokens(row) && len(row) > 0 => Some(firing(vec![row], vec![])),
+            StoreOp::UnitOut(row) if !tokens(row) && len(row) > 0 => {
+                Some(firing(vec![row], vec![]))
+            }
             _ => None,
         }
     }

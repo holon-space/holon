@@ -20,10 +20,31 @@ mod net;
 mod store;
 mod view;
 
-pub use bound::{Bound, Evaluation, Fired, Footprint, StoreMismatch, Unsettled, WhyNot};
-pub use mem::{MemRowStamp, MemStamp, MemStore};
-pub use net::{ArcSpec, Bind, BuildError, Fire, KeySel, Net, NetBuilder, Transition, TransitionId, Trigger};
-pub use store::{Applied, RowView, Store};
+pub use bound::Bound;
+pub use bound::Evaluation;
+pub use bound::Fired;
+pub use bound::FiredOf;
+pub use bound::Footprint;
+pub use bound::Settled;
+pub use bound::StoreMismatch;
+pub use bound::Unsettled;
+pub use bound::WhyNot;
+pub use mem::MemRowStamp;
+pub use mem::MemStamp;
+pub use mem::MemStore;
+pub use net::ArcSpec;
+pub use net::Bind;
+pub use net::BuildError;
+pub use net::Fire;
+pub use net::KeySel;
+pub use net::Net;
+pub use net::NetBuilder;
+pub use net::Transition;
+pub use net::TransitionId;
+pub use net::Trigger;
+pub use store::Applied;
+pub use store::RowView;
+pub use store::Store;
 pub use view::View;
 
 #[cfg(feature = "testkit")]

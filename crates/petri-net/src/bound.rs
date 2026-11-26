@@ -1,7 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
+use crate::Applied;
+use crate::Discipline;
+use crate::Fire;
+use crate::Kinds;
+use crate::Net;
+use crate::Out;
+use crate::Store;
+use crate::TransitionId;
+use crate::Trigger;
 use crate::view::View;
-use crate::{Applied, Discipline, Fire, Kinds, Net, Out, Store, Trigger, TransitionId};
 
 /// Why a (transition, key) pair cannot fire. Arc indices count within the
 /// transition's `consumes` or `inhibits`.
@@ -9,22 +18,29 @@ use crate::{Applied, Discipline, Fire, Kinds, Net, Out, Store, Trigger, Transiti
 pub enum WhyNot<P, Key> {
     /// An auto transition got a binding, or an external one got none.
     WrongTrigger,
-    ConsumeEmpty { arc: usize },
-    Inhibited { arc: usize },
+    ConsumeEmpty {
+        arc: usize,
+    },
+    Inhibited {
+        arc: usize,
+    },
     ReadsUndeclared(P),
     BindDeclined,
     ProducesUndeclared(P),
     /// A token into a Counted place, or a unit into a token place.
     OutputKind(P),
     /// A unit consumed from a Counted place has no token to move.
-    MovedCounted { arc: usize },
+    MovedCounted {
+        arc: usize,
+    },
     OutputFull(P, Key),
 }
 
 /// What an evaluation looked at, so a cache knows when to look again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Footprint<P: Ord, Key: Ord, R> {
-    /// Arc rows and rows the bind read, present or absent, with their row stamps.
+    /// Arc rows and rows the bind read, present or absent, with their row
+    /// stamps.
     pub rows: BTreeMap<(P, Key), R>,
     /// Places the bind listed the keys of.
     pub scans: BTreeSet<P>,
@@ -48,10 +64,19 @@ pub struct Unsettled<Key, Stamp> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreMismatch<P, Key> {
-    Places { net: Vec<(P, Discipline)>, store: Vec<(P, Discipline)> },
+    Places {
+        net: Vec<(P, Discipline)>,
+        store: Vec<(P, Discipline)>,
+    },
     /// A row holds more than its discipline allows.
     Row { place: P, key: Key, len: usize },
 }
+
+pub type FiredOf<K, S> = Fired<<K as Kinds>::Key, <S as Store<K>>::Stamp>;
+
+/// What `settle` returns.
+pub type Settled<K, S> =
+    Result<Vec<FiredOf<K, S>>, Unsettled<<K as Kinds>::Key, <S as Store<K>>::Stamp>>;
 
 pub type Evaluation<K, R> = (
     Result<Fire<K>, WhyNot<<K as Kinds>::Place, <K as Kinds>::Key>>,
@@ -60,11 +85,17 @@ pub type Evaluation<K, R> = (
 
 impl<K: Kinds> Net<K> {
     /// Checks the store against the net (places, disciplines, row sizes).
-    pub fn bind<'a, S: Store<K>>(&'a self, store: &'a mut S) -> Result<Bound<'a, K, S>, StoreMismatch<K::Place, K::Key>> {
+    pub fn bind<'a, S: Store<K>>(
+        &'a self,
+        store: &'a mut S,
+    ) -> Result<Bound<'a, K, S>, StoreMismatch<K::Place, K::Key>> {
         let net: Vec<_> = self.places().collect();
         let in_store = store.places();
         if net != in_store {
-            return Err(StoreMismatch::Places { net, store: in_store });
+            return Err(StoreMismatch::Places {
+                net,
+                store: in_store,
+            });
         }
         for (place, discipline) in net {
             for key in store.keys(&place) {
@@ -79,7 +110,11 @@ impl<K: Kinds> Net<K> {
                 }
             }
         }
-        Ok(Bound { net: self, store, settled: false })
+        Ok(Bound {
+            net: self,
+            store,
+            settled: false,
+        })
     }
 }
 
@@ -97,17 +132,29 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
         self.store
     }
 
-    pub fn enabled(&self, t: TransitionId, key: &K::Key, binding: Option<&K::Binding>) -> Evaluation<K, S::RowStamp> {
+    pub fn enabled(
+        &self,
+        t: TransitionId,
+        key: &K::Key,
+        binding: Option<&K::Binding>,
+    ) -> Evaluation<K, S::RowStamp> {
         let net = self.net;
         let store = &*self.store;
         let tr = net.transition(t);
-        let mut fp = Footprint { rows: BTreeMap::new(), scans: BTreeSet::new(), outputs: BTreeMap::new() };
+        let mut fp = Footprint {
+            rows: BTreeMap::new(),
+            scans: BTreeSet::new(),
+            outputs: BTreeMap::new(),
+        };
         let stamped = |row: (K::Place, K::Key)| {
             let stamp = store.row_stamp(&row.0, &row.1);
             (row, stamp)
         };
         let consumes: Vec<_> = tr.consumes.iter().map(|a| a.row(key)).collect();
-        let arc_rows = consumes.iter().cloned().chain(tr.inhibits.iter().map(|a| a.row(key)));
+        let arc_rows = consumes
+            .iter()
+            .cloned()
+            .chain(tr.inhibits.iter().map(|a| a.row(key)));
         fp.rows.extend(arc_rows.map(stamped));
         if (tr.trigger == Trigger::Auto) != binding.is_none() {
             return (Err(WhyNot::WrongTrigger), fp);
@@ -144,10 +191,19 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
             }
             let discipline = net.places[p];
             match out {
-                Out::Unit if !discipline.is_counted() => return (Err(WhyNot::OutputKind(p.clone())), fp),
-                Out::New(_) | Out::Moved(_) if discipline.is_counted() => return (Err(WhyNot::OutputKind(p.clone())), fp),
+                Out::Unit if !discipline.is_counted() => {
+                    return (Err(WhyNot::OutputKind(p.clone())), fp);
+                }
+                Out::New(_) | Out::Moved(_) if discipline.is_counted() => {
+                    return (Err(WhyNot::OutputKind(p.clone())), fp);
+                }
                 Out::Moved(i) => {
-                    assert!(*i < consumes.len(), "{}: Moved({i}) with {} consumes", tr.name, consumes.len());
+                    assert!(
+                        *i < consumes.len(),
+                        "{}: Moved({i}) with {} consumes",
+                        tr.name,
+                        consumes.len()
+                    );
                     if net.places[&consumes[*i].0].is_counted() {
                         return (Err(WhyNot::MovedCounted { arc: *i }), fp);
                     }
@@ -174,10 +230,23 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
         (Ok(fire), fp)
     }
 
-    fn apply(&mut self, t: TransitionId, key: K::Key, fire: Fire<K>) -> Fired<K::Key, S::Stamp> {
-        let consumes = self.net.transition(t).consumes.iter().map(|a| a.row(&key)).collect();
-        let stamps = self.store.apply(Applied { consumes, outputs: fire.outputs });
-        Fired { transition: t, key, stamps }
+    fn apply(&mut self, t: TransitionId, key: K::Key, fire: Fire<K>) -> FiredOf<K, S> {
+        let consumes = self
+            .net
+            .transition(t)
+            .consumes
+            .iter()
+            .map(|a| a.row(&key))
+            .collect();
+        let stamps = self.store.apply(Applied {
+            consumes,
+            outputs: fire.outputs,
+        });
+        Fired {
+            transition: t,
+            key,
+            stamps,
+        }
     }
 
     /// Only at quiescence (asserted); a refusal leaves the store unchanged.
@@ -186,8 +255,12 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
         t: TransitionId,
         key: K::Key,
         binding: K::Binding,
-    ) -> Result<Fired<K::Key, S::Stamp>, WhyNot<K::Place, K::Key>> {
-        assert!(self.settled, "external firing of {:?} while the net is not settled", self.net.transition(t));
+    ) -> Result<FiredOf<K, S>, WhyNot<K::Place, K::Key>> {
+        assert!(
+            self.settled,
+            "external firing of {:?} while the net is not settled",
+            self.net.transition(t)
+        );
         let fire = self.enabled(t, &key, Some(&binding)).0?;
         self.settled = false;
         Ok(self.apply(t, key, fire))
@@ -196,8 +269,15 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
     fn first_enabled(&self) -> Option<(TransitionId, K::Key, Fire<K>)> {
         for &t in &self.net.auto_order {
             let tr = self.net.transition(t);
-            let own = tr.consumes.iter().filter(|a| matches!(a.key, crate::KeySel::Own)).map(|a| &a.place);
-            let keys: BTreeSet<K::Key> = own.chain(&tr.same_key_reads).flat_map(|p| self.store.keys(p)).collect();
+            let own = tr
+                .consumes
+                .iter()
+                .filter(|a| matches!(a.key, crate::KeySel::Own))
+                .map(|a| &a.place);
+            let keys: BTreeSet<K::Key> = own
+                .chain(&tr.same_key_reads)
+                .flat_map(|p| self.store.keys(p))
+                .collect();
             for key in keys {
                 if let Ok(fire) = self.enabled(t, &key, None).0 {
                     return Some((t, key, fire));
@@ -207,13 +287,15 @@ impl<K: Kinds, S: Store<K>> Bound<'_, K, S> {
         None
     }
 
-    /// The pair `settle` fires next: highest priority, then declaration order, then key order.
+    /// The pair `settle` fires next: highest priority, then declaration order,
+    /// then key order.
     pub fn next_enabled(&self) -> Option<(TransitionId, K::Key)> {
         self.first_enabled().map(|(t, k, _)| (t, k))
     }
 
-    /// Level semantics, interleaving: fire the first enabled auto pair, check again.
-    pub fn settle(&mut self, bound: usize) -> Result<Vec<Fired<K::Key, S::Stamp>>, Unsettled<K::Key, S::Stamp>> {
+    /// Level semantics, interleaving: fire the first enabled auto pair, check
+    /// again.
+    pub fn settle(&mut self, bound: usize) -> Settled<K, S> {
         let mut fired = Vec::new();
         while let Some((t, key, fire)) = self.first_enabled() {
             if fired.len() == bound {

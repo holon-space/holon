@@ -1,7 +1,13 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 
-use crate::{Applied, Discipline, Kinds, Out, RowView, Store};
+use crate::Applied;
+use crate::Discipline;
+use crate::Kinds;
+use crate::Out;
+use crate::RowView;
+use crate::Store;
 
 /// A token stamp of the in-memory store: a unique id with no meaningful order,
 /// so no layer above can come to rely on one.
@@ -15,10 +21,13 @@ pub enum MemRowStamp {
     Count(u32),
 }
 
+type TokenRows<K> =
+    BTreeMap<(<K as Kinds>::Place, <K as Kinds>::Key), VecDeque<(<K as Kinds>::Token, MemStamp)>>;
+
 /// The marking in memory. Rows that become empty are removed: no tombstones.
 pub struct MemStore<K: Kinds> {
     places: BTreeMap<K::Place, Discipline>,
-    tokens: BTreeMap<(K::Place, K::Key), VecDeque<(K::Token, MemStamp)>>,
+    tokens: TokenRows<K>,
     counts: BTreeMap<(K::Place, K::Key), u32>,
     seed: u64,
     issued: u64,
@@ -47,7 +56,9 @@ impl<K: Kinds> MemStore<K> {
         self.issued += 1;
         // An odd multiplier and the splitmix64 finalizer are both bijections,
         // so ids stay unique while their order looks random.
-        let mut z = self.seed.wrapping_add(self.issued.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut z = self
+            .seed
+            .wrapping_add(self.issued.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         MemStamp(z ^ (z >> 31))
@@ -101,7 +112,11 @@ impl<K: Kinds> Store<K> for MemStore<K> {
         if self.discipline(place).is_counted() {
             RowView::Count(self.counts.get(&at).copied().unwrap_or(0))
         } else {
-            RowView::Tokens(self.tokens.get(&at).map_or(vec![], |r| r.iter().map(|(t, _)| t).collect()))
+            RowView::Tokens(
+                self.tokens
+                    .get(&at)
+                    .map_or(vec![], |r| r.iter().map(|(t, _)| t).collect()),
+            )
         }
     }
 
@@ -110,7 +125,11 @@ impl<K: Kinds> Store<K> for MemStore<K> {
         if self.discipline(place).is_counted() {
             MemRowStamp::Count(self.counts.get(&at).copied().unwrap_or(0))
         } else {
-            MemRowStamp::Tokens(self.tokens.get(&at).map_or(vec![], |r| r.iter().map(|(_, s)| *s).collect()))
+            MemRowStamp::Tokens(
+                self.tokens
+                    .get(&at)
+                    .map_or(vec![], |r| r.iter().map(|(_, s)| *s).collect()),
+            )
         }
     }
 
@@ -120,7 +139,10 @@ impl<K: Kinds> Store<K> for MemStore<K> {
         } else {
             self.tokens.keys().cloned().collect()
         };
-        rows.into_iter().filter(|(p, _)| p == place).map(|(_, k)| k).collect()
+        rows.into_iter()
+            .filter(|(p, _)| p == place)
+            .map(|(_, k)| k)
+            .collect()
     }
 
     fn places(&self) -> Vec<(K::Place, Discipline)> {
@@ -128,11 +150,15 @@ impl<K: Kinds> Store<K> for MemStore<K> {
     }
 
     fn apply(&mut self, firing: Applied<K>) -> Vec<MemStamp> {
-        let mut consumed: Vec<Option<(K::Token, MemStamp)>> = Vec::with_capacity(firing.consumes.len());
+        let mut consumed: Vec<Option<(K::Token, MemStamp)>> =
+            Vec::with_capacity(firing.consumes.len());
         for (place, key) in firing.consumes {
             let at = (place, key);
             if self.discipline(&at.0).is_counted() {
-                let n = self.counts.get_mut(&at).expect("consume from an empty Counted row");
+                let n = self
+                    .counts
+                    .get_mut(&at)
+                    .expect("consume from an empty Counted row");
                 *n -= 1;
                 if *n == 0 {
                     self.counts.remove(&at);
@@ -163,7 +189,9 @@ impl<K: Kinds> Store<K> for MemStore<K> {
                     self.put(place, key, (token, stamp));
                 }
                 Out::Moved(i) => {
-                    let entry = consumed[i].take().expect("a token moved twice, or a unit moved out of a Counted row");
+                    let entry = consumed[i]
+                        .take()
+                        .expect("a token moved twice, or a unit moved out of a Counted row");
                     self.put(place, key, entry);
                 }
             }

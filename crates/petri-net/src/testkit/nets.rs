@@ -8,8 +8,20 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 
-use super::{KEYS, TestKinds, arb_places};
-use crate::{ArcSpec, Discipline, Fire, KeySel, Net, NetBuilder, Out, RowView, Transition, TransitionId, Trigger};
+use super::KEYS;
+use super::TestKinds;
+use super::arb_places;
+use crate::ArcSpec;
+use crate::Discipline;
+use crate::Fire;
+use crate::KeySel;
+use crate::Net;
+use crate::NetBuilder;
+use crate::Out;
+use crate::RowView;
+use crate::Transition;
+use crate::TransitionId;
+use crate::Trigger;
 
 /// A place and, when fixed, the key of the row an arc touches.
 pub type ArcS = (u8, Option<u8>);
@@ -57,7 +69,8 @@ pub struct NetSpec {
     pub transitions: Vec<TSpec>,
 }
 
-/// An external firing: an index into `NetSpec::externals` (modulo), a key, a binding.
+/// An external firing: an index into `NetSpec::externals` (modulo), a key, a
+/// binding.
 pub type Call = (usize, u8, u32);
 
 #[derive(Clone, Debug)]
@@ -76,60 +89,95 @@ fn arb_tspec(places: Vec<(u8, Discipline)>) -> impl Strategy<Value = TSpec> {
     let n = places.len() as u8;
     let arcs = |max| prop::collection::vec(arb_arc(n), 0..=max);
     let place_set = |max| prop::collection::vec(0..n, 0..=max);
-    let out_kind = prop_oneof![(0u32..4).prop_map(OutS::New), (0usize..3).prop_map(OutS::Moved), Just(OutS::Unit)];
+    let out_kind = prop_oneof![
+        (0u32..4).prop_map(OutS::New),
+        (0usize..3).prop_map(OutS::Moved),
+        Just(OutS::Unit)
+    ];
     let outputs = prop::collection::vec((arb_arc(n), out_kind, prop::bool::weighted(0.85)), 0..=3);
-    let bind = (arcs(2), prop::option::weighted(0.2, 0..n), prop_oneof![Just(Guard::Always), Just(Guard::EvenSum)], outputs);
-    let shape = (prop::bool::weighted(0.6), 0i32..2, arcs(2), place_set(1), place_set(1), arcs(1));
+    let bind = (
+        arcs(2),
+        prop::option::weighted(0.2, 0..n),
+        prop_oneof![Just(Guard::Always), Just(Guard::EvenSum)],
+        outputs,
+    );
+    let shape = (
+        prop::bool::weighted(0.6),
+        0i32..2,
+        arcs(2),
+        place_set(1),
+        place_set(1),
+        arcs(1),
+    );
     let faults = (prop::bool::weighted(0.1), prop::bool::weighted(0.1));
-    (shape, bind, faults).prop_map(move |(shape, bind, (undeclared_read, undeclared_produce))| {
-        let (auto, priority, consumes, extra_reads, mut same_key_reads, inhibits) = shape;
-        let (bind_reads, scan, guard, outputs) = bind;
-        let mut moved = BTreeSet::new();
-        let outputs: Vec<(ArcS, OutS)> = outputs
-            .into_iter()
-            .map(|(arc, kind, right)| {
-                let counted = places[arc.0 as usize].1.is_counted();
-                let kind = match kind {
-                    _ if right && counted => OutS::Unit,
-                    OutS::Unit if right => OutS::New(0),
-                    OutS::Moved(i) if i < consumes.len() && moved.insert(i) => OutS::Moved(i),
-                    OutS::Moved(_) => OutS::New(1),
-                    kind => kind,
-                };
-                (arc, kind)
-            })
-            .collect();
-        let mut reads: Vec<u8> = bind_reads.iter().map(|a| a.0).chain(scan).chain(extra_reads).collect();
-        if undeclared_read && !reads.is_empty() {
-            let dropped = reads[0];
-            reads.retain(|p| *p != dropped);
-            same_key_reads.retain(|p| *p != dropped);
-        }
-        let own_consume = consumes.iter().any(|(_, k)| k.is_none());
-        if auto && !own_consume && same_key_reads.is_empty() {
-            same_key_reads.push(0);
-        }
-        let mut produces: Vec<u8> = outputs.iter().map(|(a, _)| a.0).collect();
-        if undeclared_produce && !produces.is_empty() {
-            produces.remove(0);
-        }
-        TSpec {
-            trigger: if auto { Trigger::Auto } else { Trigger::External },
-            priority,
-            consumes,
-            reads,
-            same_key_reads,
-            inhibits,
-            produces,
-            bind: BindSpec { reads: bind_reads, scan, guard, outputs },
-        }
-    })
+    (shape, bind, faults).prop_map(
+        move |(shape, bind, (undeclared_read, undeclared_produce))| {
+            let (auto, priority, consumes, extra_reads, mut same_key_reads, inhibits) = shape;
+            let (bind_reads, scan, guard, outputs) = bind;
+            let mut moved = BTreeSet::new();
+            let outputs: Vec<(ArcS, OutS)> = outputs
+                .into_iter()
+                .map(|(arc, kind, right)| {
+                    let counted = places[arc.0 as usize].1.is_counted();
+                    let kind = match kind {
+                        _ if right && counted => OutS::Unit,
+                        OutS::Unit if right => OutS::New(0),
+                        OutS::Moved(i) if i < consumes.len() && moved.insert(i) => OutS::Moved(i),
+                        OutS::Moved(_) => OutS::New(1),
+                        kind => kind,
+                    };
+                    (arc, kind)
+                })
+                .collect();
+            let mut reads: Vec<u8> = bind_reads
+                .iter()
+                .map(|a| a.0)
+                .chain(scan)
+                .chain(extra_reads)
+                .collect();
+            if undeclared_read && !reads.is_empty() {
+                let dropped = reads[0];
+                reads.retain(|p| *p != dropped);
+                same_key_reads.retain(|p| *p != dropped);
+            }
+            let own_consume = consumes.iter().any(|(_, k)| k.is_none());
+            if auto && !own_consume && same_key_reads.is_empty() {
+                same_key_reads.push(0);
+            }
+            let mut produces: Vec<u8> = outputs.iter().map(|(a, _)| a.0).collect();
+            if undeclared_produce && !produces.is_empty() {
+                produces.remove(0);
+            }
+            TSpec {
+                trigger: if auto {
+                    Trigger::Auto
+                } else {
+                    Trigger::External
+                },
+                priority,
+                consumes,
+                reads,
+                same_key_reads,
+                inhibits,
+                produces,
+                bind: BindSpec {
+                    reads: bind_reads,
+                    scan,
+                    guard,
+                    outputs,
+                },
+            }
+        },
+    )
 }
 
 pub fn arb_net_spec() -> impl Strategy<Value = NetSpec> {
     arb_places(4).prop_flat_map(|places| {
         let ts = prop::collection::vec(arb_tspec(places.clone()), 1..=5);
-        (Just(places), ts).prop_map(|(places, transitions)| NetSpec { places, transitions })
+        (Just(places), ts).prop_map(|(places, transitions)| NetSpec {
+            places,
+            transitions,
+        })
     })
 }
 
@@ -139,7 +187,10 @@ pub fn arb_net_case() -> impl Strategy<Value = NetCase> {
 }
 
 fn arc(a: &ArcS) -> ArcSpec<TestKinds> {
-    ArcSpec { place: a.0, key: a.1.map_or(KeySel::Own, KeySel::Fixed) }
+    ArcSpec {
+        place: a.0,
+        key: a.1.map_or(KeySel::Own, KeySel::Fixed),
+    }
 }
 
 fn sum_of(row: Option<RowView<'_, TestKinds>>) -> u64 {
@@ -167,8 +218,14 @@ impl NetSpec {
                 inhibits: vec![],
                 produces: vec![p],
                 bind: Arc::new(move |_, key, binding| {
-                    let out = if d.is_counted() { Out::Unit } else { Out::New(*binding.unwrap()) };
-                    Some(Fire { outputs: vec![(p, *key, out)] })
+                    let out = if d.is_counted() {
+                        Out::Unit
+                    } else {
+                        Out::New(*binding.unwrap())
+                    };
+                    Some(Fire {
+                        outputs: vec![(p, *key, out)],
+                    })
                 }),
             });
         }
@@ -198,13 +255,15 @@ impl NetSpec {
                     let outputs = spec.bind.outputs.iter().map(|(a, o)| {
                         let (p, k) = row(a);
                         let out = match o {
-                            OutS::New(off) => Out::New(sum as u32 + off),
+                            OutS::New(off) => Out::New((sum as u32).wrapping_add(*off)),
                             OutS::Moved(i) => Out::Moved(*i),
                             OutS::Unit => Out::Unit,
                         };
                         (p, k, out)
                     });
-                    Some(Fire { outputs: outputs.collect() })
+                    Some(Fire {
+                        outputs: outputs.collect(),
+                    })
                 }),
             });
         }
@@ -213,7 +272,14 @@ impl NetSpec {
 
     pub fn externals(&self) -> Vec<TransitionId> {
         let n = self.places.len();
-        let generated = self.transitions.iter().enumerate().filter(|(_, t)| t.trigger == Trigger::External);
-        (0..n).map(TransitionId).chain(generated.map(|(i, _)| TransitionId(n + i))).collect()
+        let generated = self
+            .transitions
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.trigger == Trigger::External);
+        (0..n)
+            .map(TransitionId)
+            .chain(generated.map(|(i, _)| TransitionId(n + i)))
+            .collect()
     }
 }
