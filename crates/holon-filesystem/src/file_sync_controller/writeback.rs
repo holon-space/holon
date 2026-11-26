@@ -659,8 +659,7 @@ impl FileSyncController {
                 .into_iter()
                 .map(|doc| {
                     let seen = field(
-                        exec
-                            .tokens()
+                        exec.tokens()
                             .token(wn::REFUSED, &doc)
                             .expect("listed by refused_docs")
                             .record(),
