@@ -414,7 +414,16 @@ pub struct Host<V> {
     /// The bytes of a value in a mark key and an ask hash. Law: two values
     /// that are `==` encode to the same bytes.
     pub encode: fn(&V) -> Vec<u8>,
+    /// A text as a value: the cause field of a port, an answer id.
+    pub text: fn(&str) -> V,
+    /// The text a value holds, if it is a text.
+    pub as_text: fn(&V) -> Option<&str>,
+    /// One probe fact from a JSON line: its subject (the `subject_field`)
+    /// and its record, or why the line is not a fact.
+    pub fact: FactFn<V>,
 }
+
+pub type FactFn<V> = fn(serde_json::Value, &str) -> Result<(Subject, Record<V>), String>;
 
 impl<V> Clone for Host<V> {
     fn clone(&self) -> Self {
@@ -1327,8 +1336,9 @@ impl Reader<'_> {
                     .token(place, subject)
                     .and_then(|t| match &t.payload {
                         Payload::Answered(a) => answer::answered_field(a, field, !self.hide_value),
-                        Payload::Failure { cause } => (field == FAILURE_CAUSE_FIELD)
-                            .then(|| Value::String(cause.text.clone())),
+                        Payload::Failure { cause } => {
+                            (field == FAILURE_CAUSE_FIELD).then(|| (net.host.text)(&cause.text))
+                        }
                         Payload::Record(r) => r.get(field).cloned(),
                         other => unreachable!("the arm above refuses a read of {other:?}"),
                     });
@@ -1480,10 +1490,8 @@ impl Reader<'_> {
 
     /// A field as a string; `None` when absent or not a string.
     pub fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
-        match self.field(place, subject, field)? {
-            Value::String(s) => Some(s),
-            _ => None,
-        }
+        let value = self.field(place, subject, field)?;
+        (self.net.host.as_text)(&value).map(str::to_owned)
     }
 }
 
@@ -2275,6 +2283,10 @@ impl Executor {
     #[cfg(not(feature = "naive-twins"))]
     fn twin(&self, _: Twin) -> bool {
         false
+    }
+
+    pub fn host(&self) -> Host<Value> {
+        self.net.host
     }
 
     pub fn tokens(&self) -> &Tokens {

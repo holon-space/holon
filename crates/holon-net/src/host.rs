@@ -5,16 +5,51 @@ use std::collections::BTreeMap;
 
 use holon_pattern::Value;
 
+use crate::exec::Content;
 use crate::exec::Host;
 use crate::exec::NetDef;
+use crate::exec::Subject;
 
 pub const HOST: Host<Value> = Host {
     encode: encode_value,
+    text,
+    as_text,
+    fact,
 };
 
 /// An empty net over Holon's [`Value`].
 pub fn new_net() -> NetDef {
     NetDef::new(HOST)
+}
+
+fn text(s: &str) -> Value {
+    Value::String(s.to_owned())
+}
+
+fn as_text(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// A probe fact: a JSON object whose `subject_field` is a string or an
+/// integer.
+fn fact(json: serde_json::Value, subject_field: &str) -> Result<(Subject, Content), String> {
+    let Value::Object(fields) = Value::from_json_value(json) else {
+        return Err("is not a JSON object".to_owned());
+    };
+    let subject = match fields.get(subject_field) {
+        Some(Value::String(s)) => Subject::new(s),
+        Some(Value::Integer(n)) => Subject::new(&n.to_string()),
+        Some(other) => {
+            return Err(format!(
+                "has a {subject_field} that is neither a string nor an integer: {other:?}"
+            ));
+        }
+        None => return Err(format!("has no {subject_field}")),
+    };
+    Ok((subject, fields.into_iter().collect()))
 }
 
 /// The canonical bytes of a value in a mark key and an ask hash. Panics on

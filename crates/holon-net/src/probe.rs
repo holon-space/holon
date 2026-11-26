@@ -23,6 +23,7 @@ use crate::exec::Content;
 use crate::exec::EffectRequest;
 use crate::exec::ExecError;
 use crate::exec::Executor;
+use crate::exec::FactFn;
 use crate::exec::Place;
 use crate::exec::Subject;
 use crate::file::CommandSpec;
@@ -135,7 +136,9 @@ impl Probes {
         state.running = false;
         state.next = now + state.spec.interval.duration();
         let facts = match outcome {
-            ProbeOutcome::Output(stdout) => facts(&stdout, &state.spec.subject_field),
+            ProbeOutcome::Output(stdout) => {
+                facts(&stdout, &state.spec.subject_field, exec.host().fact)
+            }
             ProbeOutcome::Failed(cause) => Err(cause),
         };
         let facts = match facts {
@@ -190,26 +193,17 @@ impl Probes {
 
 /// Every line of `stdout` as one fact under the subject its `subject_field`
 /// names, or why the stdout is not facts.
-fn facts(stdout: &str, subject_field: &str) -> Result<BTreeMap<Subject, Content>, String> {
+fn facts(
+    stdout: &str,
+    subject_field: &str,
+    fact: FactFn<Value>,
+) -> Result<BTreeMap<Subject, Content>, String> {
     let mut facts = BTreeMap::new();
     for (i, line) in stdout.lines().enumerate() {
         let refused = |why: String| format!("line {} of the output {why}: {line}", i + 1);
         let json: serde_json::Value =
             serde_json::from_str(line).map_err(|e| refused(format!("is not JSON ({e})")))?;
-        let Value::Object(fields) = Value::from_json_value(json) else {
-            return Err(refused("is not a JSON object".to_owned()));
-        };
-        let subject = match fields.get(subject_field) {
-            Some(Value::String(s)) => Subject::new(s),
-            Some(Value::Integer(n)) => Subject::new(&n.to_string()),
-            Some(other) => {
-                return Err(refused(format!(
-                    "has a {subject_field} that is neither a string nor an integer: {other:?}"
-                )));
-            }
-            None => return Err(refused(format!("has no {subject_field}"))),
-        };
-        let content: Content = fields.into_iter().collect();
+        let (subject, content) = fact(json, subject_field).map_err(refused)?;
         if facts.insert(subject.clone(), content).is_some() {
             return Err(refused(format!("repeats the subject {subject}")));
         }
