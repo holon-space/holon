@@ -629,6 +629,78 @@ Flow mode tracks:
 
 ---
 
+## Functional Core, Imperative Shell
+
+Each decision is a pure step function. The code around it does only I/O, time
+and scheduling.
+
+```rust
+fn step(state: &S, input: Input) -> (S, Vec<Effect>)
+```
+
+- **Core:** synchronous and deterministic. It does not await, lock, spawn,
+  read the clock, read the file system, or query a store. Time and every
+  outside fact arrive as `Input`. Each change to the world leaves as an
+  `Effect` value.
+- **Shell:** reads the world and turns it into `Input`, calls the core, and
+  carries out each `Effect`. It makes no domain decision. "Is the read model
+  caught up?", "which rows does this merge write?" and "which tests does this
+  change reach?" are core questions.
+- **Tests:** a test calls the core when the core can observe the behaviour.
+  Such a test has no `settle`, no quiescence wait and no deadline. It is fast,
+  it does not depend on machine load, and its input list replays it. Only the
+  shell's own contract (it delivers every input, it carries out every effect,
+  in order) needs a test through the running pipeline.
+- **Values from a moving world** (the tip of `main`, the latest CDC sequence)
+  are read once by the shell and passed in. A core that reads such a value
+  itself gives a different answer for the same input.
+
+**In the Petri net.** The net is the functional core of coordination. Domain
+cores are plain pure functions. The engines (Loro, Turso) own the domain
+state; the marking holds coordination state only. A pure transition is a core
+step; an effectful transition is the shell's effect. The sans-IO executor in
+`holon-net` (`exec`, [CrateMap.md](CrateMap.md)) is the house example. The
+companion rules for places, tokens and guards are in
+[Vision-PetriNetCoordination.md §5](Vision-PetriNetCoordination.md#5-engines-as-substitution-transitions).
+
+**Effect bodies.** An effect body observes or acts and returns what happened
+as data, including domain results such as `Absent`. It decides nothing. Pure
+decisions sit before it and after it (for example "is this my own write?"
+compares the result hash with `LastWritten[path]`).
+
+**Read-modify-write.** A read-modify-write runs the pure plan inside the
+engine transaction: `doc.transact(|view| plan(text, view))`.
+
+- Reason: there is no staleness window and no conflict path, and the plan
+  stays a pure function that a property test calls directly.
+- A split into separate plan and apply transitions needs a reify reason: a
+  visible plan (dry run, human approval).
+- A split then needs all of these: a base version on the plan token, a
+  conditional apply, a conflict returned as data, and a re-plan bound that
+  ends in a disclosure.
+
+**Time.** Time enters the net only through `Tick(now)`.
+
+- The driver fires `Tick(now)`. The guard of `Tick` refuses a time older than
+  the Clock place, so the time never goes back.
+- The executor reads no clock. No other call takes a `now` parameter, and no
+  clock object is injected.
+- The executor outputs when it next needs the time (a next-due output), so
+  the driver arms one timer for it and never polls with a sleep. A test drives
+  time by firing `Tick`.
+- A pure transition that only needs the date reads a coarse `Today` place, not
+  `Clock`.
+
+Limit: an external engine (Turso IVM, the Loro CRDT) is not our core. There
+the core is the contract that the engine's result must satisfy (the derived-data
+contract, [Reactivity.md](Reactivity.md)), and the shell still waits for one
+quiescence event.
+
+New code follows this rule when it is written. Existing code moves inside out,
+one decision at a time; there is no rewrite in one step.
+
+---
+
 ## Dependency Injection
 
 The system uses **fluxdi** (`Injector`, `Module`, `Provider`, `Shared`) for service registration and resolution. Modules implement the `Module` trait and register providers; first-wins semantics apply (the first registration wins; `override_provider` is available for test overrides). The composition root is `crates/holon-app/src/wiring.rs` (`FrontendInjectorExt::add_frontend`), which conditionally registers Loro and OrgMode modules based on runtime config. The Turso-free stack is assembled in `crates/holon-app/src/no_turso.rs`.

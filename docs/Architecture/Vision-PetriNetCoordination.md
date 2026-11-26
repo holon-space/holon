@@ -207,7 +207,7 @@ The fit for Holon:
   per step. Simulation samples durations and reports the risk that the plan
   misses its deadline (section 3).
 
-**The clock is an input arc.** A timed transition reads the time on every firing, so by [the input-arc rule](#5-engines-as-substitution-transitions) the time is one of its input arcs: a Clock place with a read arc to each timed transition. The read happens inside the atomic firing. Its precondition is not one global linear time: the time must not go back along one executor's firing order. So each executor has one timeline, and it takes the time itself; a caller never passes it in. Clocks outside an executor (log stamps, one task's durations, the order between devices that Loro keeps) need no such rule.
+**The clock is an input arc.** A timed transition reads the time on every firing, so by [the input-arc rule](#5-engines-as-substitution-transitions) the time is one of its input arcs: a Clock place with a read arc to each timed transition. The read happens inside the atomic firing. Its precondition is not one global linear time: the time must not go back along one executor's firing order. So each executor has one timeline, and the time enters only through the external `Tick(now)` transition, whose guard refuses a time older than the Clock place (the time rule in [Principles.md](Principles.md#functional-core-imperative-shell)). Clocks outside an executor (log stamps, one task's durations, the order between devices that Loro keeps) need no such rule.
 
 Chicken Teriyaki with time:
 
@@ -270,6 +270,10 @@ Do not give a pure transition the effectful path "to be safe". Do not put an
 effectful transition on the fast path "to be fast". The kind is part of the
 contract.
 
+What an effect body may contain, and how a read-modify-write is cut into
+transitions, is stated once in
+[Principles.md](Principles.md#functional-core-imperative-shell).
+
 ## 5. Engines as substitution transitions
 
 Each engine exposes three things:
@@ -296,6 +300,22 @@ cell is not durable state.
 Text edits stay inside Loro and bypass the dispatcher
 (`docs/adr/0032-petri-net-execution-semantics.md:219-224`). The net observes
 their results as marking.
+
+**Companion rules.** These bind the places, tokens and guards of every net
+that wraps an engine. The effect-body, read-modify-write and time rules are in
+[Principles.md](Principles.md#functional-core-imperative-shell).
+
+- Store inputs are `(doc, version)` handles to immutable snapshots, never
+  content tokens.
+- Places hold levels (`Dirty[path]`), not events. The level-dead law
+  ([PetriNetLayers.md](PetriNetLayers.md)) already demands it.
+- Settle is a convergence predicate over state (disk hash = rendered store
+  hash, Loro frontier = projected frontier, view seq = commit seq), not
+  executor quiescence.
+- The marking of these nets is derived at boot, never migrated (recovery is
+  resync).
+- Guards compare typed token fields. Rust functions compute domain values.
+- A panic in a pure transition becomes `Poisoned[subject]`, with no retry.
 
 **First contract, designed:** mirror the fluxdi live-cell states into the
 marking as read-only environment places (`source(vault)`,
@@ -418,6 +438,39 @@ supersedes it.
     path. Direction: the net takes more work, also on the live path
     (section 3). [Simulation.md](Simulation.md) states this direction. ADR
     0031 guard 1 now states this direction.
+
+11. How does undo fit the net? Today two mechanisms act, split by content
+    type: text edits undo through the Loro undo manager (`holon-loro`
+    `text_undo`), and structural operations undo through the inverse
+    operations of the `UndoStack` ([Operations.md](Operations.md)). L1 plans
+    `UndoRow` tokens with compiled inverse transitions
+    ([PetriNetLayers.md](PetriNetLayers.md)). Options: (a) keep both
+    mechanisms and leave undo outside the net; (b) move structural undo to
+    `UndoRow` and keep Loro undo for text; (c) one mechanism for both.
+    Still to check: whether Loro undo and `UndoRow` undo can both act on the
+    same block state without one invalidating the other. Not ruled.
+12. *Design idea, not ruled:* an atomic subnet, to split a transactional
+    transition without losing the transaction. On the parent net it is one
+    transition (substitution transition, section 1). Inside, the steps (read,
+    plan, apply) are separate and visible to why-not, simulation and tests.
+    Not built: subnets are designed in section 1, and `holon-net` has none.
+    Open questions:
+    - [ ] What does "atomic" mean exactly: isolation (no other transition
+      sees a marking from the middle), all-or-nothing (a failure discards the
+      marking change and aborts the engine transaction), or both?
+    - [ ] Which layer owns it: L0 on the marking only, or L1 bound to the
+      engine transaction?
+    - [ ] How is a failure or a panic inside the subnet shown?
+    - [ ] How does it compare with known models? CPN Tools substitution
+      transitions have no atomicity; BPMN transaction subprocesses use
+      compensation, not rollback.
+    - [ ] Does it remove the base version and the re-plan bound of a split,
+      because there is no staleness window? And is a dry run "run the subnet,
+      then abort"?
+    - [ ] Which limits apply? Possibly only pure transitions and effects
+      inside one engine transaction. An external transition, a timer, a human
+      task or a wait on a second engine would hold the transaction open across
+      a wait, so human approval would still need the versioned split.
 
 ## Related documents
 

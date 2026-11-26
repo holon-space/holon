@@ -38,7 +38,7 @@ L1 compiles it into L0 places and L0 transitions. L0 sees only these:
 | `FetchFeed.take` | Auto | `Feed[s]` | `Settings[s]`, `Clock` | `FetchFeed.Running[s]`, `tries` raised | the author's guard; `tries < 3`; no `next_try`, or `next_try` at or before `Clock` |
 | `FetchFeed.record` | External | `FetchFeed.Running[s]` | | `Items[s]`, or the candidate place, or nothing (stale-record rule) | caller binding: attempt, outputs |
 | `FetchFeed.fail` | External | `FetchFeed.Running[s]` | `Clock` | `Feed[s]` with the cause and `next_try` | caller binding: attempt, cause |
-| `Tick` | External | `Clock` | | `Clock` with the new time | caller binding: `now` |
+| `Tick` | External | `Clock` | | `Clock` with the new time | caller binding: `now`; guard: `now` is not older than `Clock` |
 
 `FetchFeed.record` is an illustration. Whether the record is one L0
 transition or three is open, see
@@ -131,8 +131,9 @@ Constraints:
 - **Time is a Clock place.** Timed transitions read it through read arcs.
   To L0 it is an ordinary place. The driver advances it by firing the
   external `Tick` transition with `now` in its binding, at the due times of
-  its next-due index (a rebuildable cache). So the executor takes the time
-  itself, and no caller passes it in.
+  its next-due index (a rebuildable cache). `Tick` is the only way time
+  enters; the rule is in
+  [Principles.md](Principles.md#functional-core-imperative-shell).
 - **Compiler.** Compiles each high-level transition into L0 places and L0
   transitions. Features it compiles:
   - effects with the receivers Keyed, StateProbe and None;
