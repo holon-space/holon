@@ -43,7 +43,8 @@ fn encode_into(h: &mut Vec<u8>, v: &Value) {
         }
         Value::Float(f) => {
             h.extend_from_slice(&[3]);
-            h.extend_from_slice(&f.to_bits().to_le_bytes());
+            // `-0.0 == 0.0`, so both encode as `0.0`.
+            h.extend_from_slice(&(f + 0.0).to_bits().to_le_bytes());
         }
         Value::Boolean(b) => {
             h.extend_from_slice(&[4, u8::from(*b)]);
