@@ -207,7 +207,7 @@ The fit for Holon:
   per step. Simulation samples durations and reports the risk that the plan
   misses its deadline (section 3).
 
-**The clock is an input arc.** A timed transition reads the time on every firing, so by [the input-arc rule](#5-engines-as-substitution-transitions) the time is one of its input arcs: a Clock place with a read arc to each timed transition. The read happens inside the atomic firing. Its precondition is not one global linear time: the time must not go back along one executor's firing order. So each executor has one timeline, and the time enters only through the external `Tick(now)` transition, whose guard refuses a time older than the Clock place (the time rule in [Principles.md](Principles.md#functional-core-imperative-shell)). Clocks outside an executor (log stamps, one task's durations, the order between devices that Loro keeps) need no such rule.
+**The clock is an input arc.** A timed transition reads the time on every firing, so by [the input-arc rule](#5-engines-as-substitution-transitions) the time is one of its input arcs: a Clock place with a read arc to each timed transition. The read happens inside the atomic firing. Its precondition is not one global linear time: the time must not go back along one executor's firing order. So each executor has one timeline; how time enters it is the time rule in [Principles.md](Principles.md#functional-core-imperative-shell). Clocks outside an executor (log stamps, one task's durations, the order between devices that Loro keeps) need no such rule.
 
 Chicken Teriyaki with time:
 
@@ -316,6 +316,8 @@ that wraps an engine. The effect-body, read-modify-write and time rules are in
   resync).
 - Guards compare typed token fields. Rust functions compute domain values.
 - A panic in a pure transition becomes `Poisoned[subject]`, with no retry.
+- Keystrokes stay off the net: text edits bypass the dispatcher
+  (`docs/adr/0032-petri-net-execution-semantics.md:219-224`, see above).
 
 **First contract, designed:** mirror the fluxdi live-cell states into the
 marking as read-only environment places (`source(vault)`,

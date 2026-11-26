@@ -131,8 +131,8 @@ Constraints:
 - **Time is a Clock place.** Timed transitions read it through read arcs.
   To L0 it is an ordinary place. The driver advances it by firing the
   external `Tick` transition with `now` in its binding, at the due times of
-  its next-due index (a rebuildable cache). `Tick` is the only way time
-  enters; the rule is in
+  its next-due index (a rebuildable cache). The time rule, and what is built
+  today, are in
   [Principles.md](Principles.md#functional-core-imperative-shell).
 - **Compiler.** Compiles each high-level transition into L0 places and L0
   transitions. Features it compiles:
@@ -281,7 +281,9 @@ so it can persist. Open: how a persisted `next_try` is read against a fresh
 process clock.
 
 - (a) `next_try` holds wall-clock time, and `Tick` puts wall-clock time
-  beside the monotonic time. Simple; a clock jump fires or delays retries.
+  beside the monotonic time. Simple; a forward jump fires retries early, and
+  the `Tick` guard refuses a backward jump, so a backward jump stops time until
+  the wall clock catches up or the process restarts.
 - (b) `next_try` holds (process epoch, monotonic time). A `next_try` from an
   older epoch counts as due, or is re-armed by one declared rule.
 - (c) `next_try` holds the remaining wait, and the first take after a restart
