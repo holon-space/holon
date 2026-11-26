@@ -417,6 +417,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-vault-scale-timeout`
+- `read-lock-ratio-under-load`
 - `read-model-never-seeded-sql-rows`
 - `read-only-home-refuses-writes-moved-recipe`
 - `reaper-deletes-saved-headless-newborn`

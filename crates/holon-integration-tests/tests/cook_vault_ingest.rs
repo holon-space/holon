@@ -2956,8 +2956,9 @@ fn the_default_layout_seed_does_not_wait_for_the_recipe_backlog() {
 
 /// Stopping the app at any point of the recipe backlog seals its import:
 /// the file in flight completes, no file is imported after the seal, the
-/// shutdown reports no lost edit, and no recipe file changes on disk.
-fn stop_at_any_point_of_the_backlog(recipes: usize, quit_after: usize) {
+/// shutdown reports no lost edit, and no recipe file changes on disk. A seal
+/// already requested, as by a second shutdown, changes none of this.
+fn stop_at_any_point_of_the_backlog(recipes: usize, quit_after: usize, sealed_before: bool) {
     use holon_filesystem::FileSystem;
     use tracing::Instrument;
 
@@ -2980,6 +2981,13 @@ fn stop_at_any_point_of_the_backlog(recipes: usize, quit_after: usize) {
                 collector.count_spans("FileSyncController.ingest_backlog_file")
             )
         });
+        if sealed_before {
+            app.injector()
+                .expect("a booted app has an injector")
+                .resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .seal_backlog()
+                .await;
+        }
         let stopped = app
             .stop_app()
             .instrument(tracing::info_span!("backlog.stop"))
@@ -3003,7 +3011,7 @@ fn stop_at_any_point_of_the_backlog(recipes: usize, quit_after: usize) {
         let seals = collector.spans_named("OrgSyncIdleSignal.seal_backlog");
         assert_eq!(
             seals.len(),
-            1,
+            1 + usize::from(sealed_before),
             "the shutdown seals the backlog once: {seals:?}"
         );
         let late: Vec<_> = ingests
@@ -3045,19 +3053,26 @@ proptest::proptest! {
         // Only the files before the stop cost import work: the seal stops the rest.
         quit_after in 0usize..=100,
         behind in 0usize..=400,
+        sealed_before: bool,
     ) {
         let _scope = holon_integration_tests::test_tracing::begin_test_scope();
-        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after);
+        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after, sealed_before);
     }
 }
 
 /// The generator's edges, run through the same properties: an empty backlog,
-/// a stop before the first file, and a stop after the last one.
+/// a stop before the first file, a stop after the last one, and a backlog
+/// sealed twice with files left.
 #[test]
 fn stopping_at_the_backlog_edges_imports_nothing_after_the_seal() {
-    for (quit_after, behind) in [(0, 0), (0, 400), (100, 0)] {
+    for (quit_after, behind, sealed_before) in [
+        (0, 0, false),
+        (0, 400, false),
+        (100, 0, false),
+        (0, 400, true),
+    ] {
         let _scope = holon_integration_tests::test_tracing::begin_test_scope();
-        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after);
+        stop_at_any_point_of_the_backlog(quit_after + behind, quit_after, sealed_before);
     }
 }
 

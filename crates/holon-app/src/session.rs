@@ -395,7 +395,7 @@ struct WritebackProbe {
 
 /// Poll `probe` until it reports nothing busy and the same watermarks for
 /// `floor`, or `budget` runs out. Then it is an error naming what was not
-/// written, unless only the read model is still moving: that is logged.
+/// written, unless only the read model is behind: that is logged.
 async fn settle<P, F>(
     mut probe: P,
     unwritten: impl Fn() -> Vec<String>,
@@ -419,7 +419,11 @@ where
         }
         if tokio::time::Instant::now() >= deadline {
             let unwritten = unwritten();
-            if now.busy.is_empty() && now.tick == last.tick && unwritten.is_empty() {
+            if now.read_model_behind
+                && now.busy.is_empty()
+                && now.tick == last.tick
+                && unwritten.is_empty()
+            {
                 tracing::warn!(
                     "shutdown: the read model is still behind the document after {budget:?}; \
                      every document is written and the Loro checkpoint keeps every edit"
@@ -529,5 +533,54 @@ mod settle_tests {
         )
         .await
         .expect("a lagging read model loses no edit: the Loro checkpoint keeps them");
+    }
+
+    /// Every probe shape at the budget: only a lagging read model, with nothing
+    /// busy, nothing unwritten and a still tick, may end the shutdown Ok.
+    #[tokio::test]
+    async fn only_a_lagging_read_model_is_ok_at_the_budget() {
+        for case in 0u8..32 {
+            let busy = case & 1 != 0;
+            let behind = case & 2 != 0;
+            let cdc_moves = case & 4 != 0;
+            let tick_moves = case & 8 != 0;
+            let unwritten = case & 16 != 0;
+            let mut n = 0u64;
+            let got = settle(
+                move || {
+                    n += 1;
+                    async move {
+                        Ok(WritebackProbe {
+                            busy: if busy {
+                                vec!["renders queued".to_string()]
+                            } else {
+                                Vec::new()
+                            },
+                            read_model_behind: behind,
+                            cdc: Some(if cdc_moves { n } else { 0 }),
+                            tick: if tick_moves { n } else { 0 },
+                        })
+                    }
+                },
+                move || {
+                    if unwritten {
+                        vec!["doc:page.org".to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                },
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(10),
+            )
+            .await;
+            let quiet = !busy && !behind && !cdc_moves && !tick_moves;
+            let only_read_model_lags = behind && !busy && !tick_moves && !unwritten;
+            assert_eq!(
+                got.is_ok(),
+                quiet || only_read_model_lags,
+                "busy={busy} behind={behind} cdc_moves={cdc_moves} tick_moves={tick_moves} \
+                 unwritten={unwritten}: {got:?}"
+            );
+        }
     }
 }

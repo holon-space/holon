@@ -2179,8 +2179,12 @@ async fn run_file_sync_controller(
             // Before the backlog arm, else a long backlog starves the seal; between
             // two arms, so the backlog file in flight is complete.
             Some(answer) = seal_rx.recv() => {
-                ingest_writer = None;
-                let left = backlog.len() + usize::from(backlog_read.take().is_some());
+                // A repeated seal, as from a second shutdown, finds the writer gone.
+                let left = if ingest_writer.take().is_some() {
+                    backlog.len() + usize::from(backlog_read.take().is_some())
+                } else {
+                    0
+                };
                 if left > 0 {
                     let msg = format!(
                         "the read-only backlog stopped at shutdown: {} of {backlog_total} \
