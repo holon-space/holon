@@ -534,6 +534,7 @@ impl AdmissionOverlay {
 
     pub fn admit(&self, footprint: Footprint) -> Claim {
         let (seq, release) = self.state.lock().admit(footprint);
+        self.state.progress.moved();
         Claim {
             seq,
             overlay: Arc::clone(&self.state),
@@ -592,6 +593,7 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         self.overlay.lock().settle(self.seq);
+        self.overlay.progress.moved();
     }
 }
 
@@ -655,6 +657,7 @@ impl ClaimRef {
     /// The nested claim settles before this one.
     pub fn nest(&self, footprint: Footprint) -> Result<Option<Claim>, NestRefused> {
         let nested = self.overlay.lock().nest(self.seq, footprint)?;
+        self.overlay.progress.moved();
         Ok(nested.map(|(seq, release)| Claim {
             seq,
             overlay: Arc::clone(&self.overlay),

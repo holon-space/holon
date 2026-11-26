@@ -2,7 +2,8 @@
 //! frame reflects every change the engine emitted, and the window is at rest.
 
 use std::collections::BTreeMap;
-use std::future::Future as _;
+use std::future::Future;
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -119,6 +120,30 @@ pub trait Pump {
     /// Draw every window once more, dirty or not, then pump like
     /// [`Pump::run_until_parked`].
     fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool;
+    /// Block the calling thread for at most `timeout`, or until it is
+    /// unparked: by a settle's change waker, or by a window task that became
+    /// runnable.
+    fn park(&self, timeout: Duration);
+}
+
+/// Unparks the thread that polled the change.
+struct Unpark(std::thread::Thread);
+
+impl std::task::Wake for Unpark {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// Park until `change` resolves, a window task wakes, or `timeout` passes.
+fn await_change(app: &impl Pump, change: Pin<&mut impl Future<Output = ()>>, timeout: Duration) {
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    if change
+        .poll(&mut std::task::Context::from_waker(&waker))
+        .is_pending()
+    {
+        app.park(timeout);
+    }
 }
 
 /// The most tasks one pump runs before it stops. Counted in ticks, not wall
@@ -173,6 +198,10 @@ impl Pump for HeadlessAppContext {
         refresh_windows(&mut self.app.borrow_mut());
         Pump::run_until_parked(self, go_on)
     }
+
+    fn park(&self, timeout: Duration) {
+        std::thread::park_timeout(timeout);
+    }
 }
 
 impl Pump for TestAppContext {
@@ -191,6 +220,10 @@ impl Pump for TestAppContext {
     fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
         self.update(refresh_windows);
         Pump::run_until_parked(self, go_on)
+    }
+
+    fn park(&self, timeout: Duration) {
+        std::thread::park_timeout(timeout);
     }
 }
 
@@ -231,8 +264,10 @@ fn screen(bounds: &BoundsRegistry) -> BTreeMap<String, String> {
 /// view pending without dirtying the window, and a test app draws only a dirty
 /// window, so while a view is pending the settle forces two frames: the window
 /// is settled only when the second shows what the first showed. A change that
-/// comes only after two unchanged renders is not seen. No sleep and no clock
-/// advance: a gpui timer that must fire is the caller's to advance.
+/// comes only after two unchanged renders is not seen. Between two tries it
+/// waits for a change of the watermark or a window task to wake, unless the
+/// try itself moved the frame. No clock advance: a gpui timer that must fire
+/// is the caller's to advance.
 #[allow(clippy::result_large_err)]
 pub fn settle_window(
     app: &impl Pump,
@@ -262,10 +297,12 @@ pub fn settle_window(
             runnable,
         }))
     };
+    watermark.poke();
     loop {
+        let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
         let mut forced_frame_changed_screen = false;
+        let mut frame_moved = false;
         settle_engine();
-        watermark.poke();
         let before = bounds.epoch();
         let parked = pump_parks(|go_on| app.run_until_parked(go_on));
         bounds.flush();
@@ -284,8 +321,8 @@ pub fn settle_window(
                 return timeout(before, false, true);
             }
             let emitted = watermark.emitted().map_err(SettleError::Engine)?;
-            if bounds.epoch() == epoch && emitted == target && watermark.operations_in_flight() == 0
-            {
+            frame_moved = bounds.epoch() != epoch;
+            if !frame_moved && emitted == target && watermark.operations_in_flight() == 0 {
                 if !app.pending_views().is_empty() {
                     // The first forced frame may itself change what the next
                     // one shows.
@@ -312,8 +349,12 @@ pub fn settle_window(
                 }
             }
         }
-        if clock.now() >= until {
+        let now = clock.now();
+        if now >= until {
             return timeout(before, forced_frame_changed_screen, false);
+        }
+        if !(frame_moved || forced_frame_changed_screen) {
+            await_change(app, change.as_mut(), until - now);
         }
     }
 }
@@ -336,15 +377,17 @@ pub fn settle_window_until(
     let clock = app.clock();
     let start = clock.now();
     loop {
+        let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
         let left = deadline.saturating_sub(clock.now() - start);
         let epoch = settle_window(app, bounds, watermark, &mut || {}, left)?;
         if delivered(bounds) {
             return Ok(epoch);
         }
-        if clock.now() - start >= deadline {
+        let spent = clock.now() - start;
+        if spent >= deadline {
             return Err(SettleError::Undelivered(epoch));
         }
-        clock.sleep_blocking(Duration::from_millis(5));
+        await_change(app, change.as_mut(), deadline - spent);
     }
 }
 

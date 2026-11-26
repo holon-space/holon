@@ -801,6 +801,7 @@ impl MatviewManager {
         );
         // The demux sees only batches broadcast after its subscription.
         routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
+        db_handle.progress().moved();
         Self {
             db_handle,
             demux_cmd_tx,
@@ -1077,6 +1078,7 @@ impl MatviewManager {
                                 }
                                 routed.fetch_max(seq, Ordering::Release);
                                 delivery_changed.send_modify(|n| *n += 1);
+                                progress.moved();
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 // A broadcast lag means the demux missed `n` CDC

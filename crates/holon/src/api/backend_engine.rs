@@ -1501,6 +1501,7 @@ impl BackendEngine {
                 }
                 cursor.routed(seq);
                 router.fetch_max(seq, std::sync::atomic::Ordering::Release);
+                db_handle.progress().moved();
 
                 let rows = match db_handle.query(&sql, HashMap::new()).await {
                     Ok(rows) => rows,

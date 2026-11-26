@@ -924,7 +924,8 @@ fn positional_params_fingerprint(sql: &str, params: &[turso::Value]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// The seq of the last emitted CDC batch, and the engine progress it moves.
+/// The seq of the last emitted CDC batch, and the engine progress the demux
+/// moves once it routed the batch: a waiter cannot settle before that.
 #[derive(Default)]
 pub struct CdcSeq {
     seq: AtomicU64,
@@ -934,8 +935,7 @@ pub struct CdcSeq {
 impl CdcSeq {
     /// The seq of a batch about to be broadcast.
     fn next(&self) -> u64 {
-        let next = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        next
+        self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
     }
 }
 

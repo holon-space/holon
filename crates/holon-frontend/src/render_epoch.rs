@@ -79,6 +79,7 @@ impl UiWatermark {
     /// `reporting_to(subscription.cursor())`.
     pub fn register(self: &Arc<Self>, key: impl Into<String>) -> UiSubscription {
         let cursor = Arc::new(DeliveryCursor::default());
+        cursor.wake_on_release(self.changed.clone());
         let mut guard = self.subscriptions.lock().unwrap();
         let (next, entries) = &mut *guard;
         let id = *next;
@@ -247,14 +248,32 @@ impl UiWatermark {
         owed
     }
 
-    /// Resolves after the next change of a subscription's applied state, or
-    /// after [`Self::poke`].
+    /// Resolves after the next change of a subscription's applied state,
+    /// after [`Self::poke`], or after the engine's progress moved.
     pub fn changed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let mut rx = self.changed.subscribe();
+        let progress = self
+            .engine
+            .as_ref()
+            .map(|engine| engine.progress().subscribe());
         async move {
-            rx.changed()
-                .await
-                .expect("the watermark outlives its change receivers");
+            let own = std::pin::pin!(async {
+                rx.changed()
+                    .await
+                    .expect("the watermark outlives its change receivers")
+            });
+            match progress {
+                None => own.await,
+                Some(mut progress) => {
+                    let engine = std::pin::pin!(async {
+                        progress
+                            .changed()
+                            .await
+                            .expect("the engine outlives the watermark's change receivers")
+                    });
+                    futures::future::select(own, engine).await;
+                }
+            }
         }
     }
 

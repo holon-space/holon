@@ -695,6 +695,13 @@ impl Drop for OwedChild {
             .lock()
             .expect("children mutex")
             .retain(|c| !std::ptr::eq(c.as_ptr(), Arc::as_ptr(&self.0)));
+        let mut root = parent;
+        while let Some(up) = &root.parent {
+            root = up;
+        }
+        if let Some(wake) = root.release_wake.get() {
+            wake.send_modify(|n| *n += 1);
+        }
     }
 }
 
@@ -714,9 +721,22 @@ pub struct DeliveryCursor {
     requery_failure: std::sync::Mutex<Option<(u64, String)>>,
     /// The change counter of the ledger this cursor reports to.
     ledger_changed: std::sync::OnceLock<Arc<tokio::sync::watch::Sender<u64>>>,
+    /// Bumped on a root cursor when an owed child below it drops: the debt
+    /// it releases moves no seq a waiter could see.
+    release_wake: std::sync::OnceLock<tokio::sync::watch::Sender<u64>>,
 }
 
 impl DeliveryCursor {
+    /// Wake `wake`'s receivers whenever an owed child of this root cursor
+    /// drops.
+    pub fn wake_on_release(&self, wake: tokio::sync::watch::Sender<u64>) {
+        assert!(self.parent.is_none(), "only a root cursor wakes on release");
+        assert!(
+            self.release_wake.set(wake).is_ok(),
+            "a cursor wakes one receiver set on release"
+        );
+    }
+
     /// A cursor whose routed batches this one owes while the returned handle
     /// lives, until this cursor's consumer applies through them.
     pub fn owed_child(self: &Arc<Self>) -> OwedChild {

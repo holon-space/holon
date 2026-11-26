@@ -13,8 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -520,12 +518,13 @@ struct Hold {
 impl Hold {
     fn all_workers(rt: &tokio::runtime::Runtime, workers: usize) -> Self {
         let released = Arc::new((Mutex::new(false), Condvar::new()));
-        let entered = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new((Mutex::new(0usize), Condvar::new()));
         let spawn_one = || {
             let released = released.clone();
             let entered = entered.clone();
             rt.spawn(async move {
-                entered.fetch_add(1, Ordering::AcqRel);
+                *entered.0.lock().unwrap() += 1;
+                entered.1.notify_all();
                 let (lock, cvar) = &*released;
                 let mut done = lock.lock().unwrap();
                 while !*done {
@@ -537,21 +536,27 @@ impl Hold {
             spawn_one();
         }
         let deadline = Instant::now() + QUIET_DEADLINE;
-        let mut top_up = Instant::now();
-        while entered.load(Ordering::Acquire) < workers {
+        let mut count = entered.0.lock().unwrap();
+        while *count < workers {
             assert!(
                 Instant::now() < deadline,
                 "only {} of {workers} tokio workers entered the hold",
-                entered.load(Ordering::Acquire)
+                *count
             );
             // A worker that took a hold task can carry the next one in its own
             // queue; a fresh spawn wakes an idle worker.
-            if top_up.elapsed() > Duration::from_millis(20) {
+            let (next, waited) = entered
+                .1
+                .wait_timeout(count, Duration::from_millis(20))
+                .unwrap();
+            count = next;
+            if waited.timed_out() {
+                drop(count);
                 spawn_one();
-                top_up = Instant::now();
+                count = entered.0.lock().unwrap();
             }
-            std::thread::sleep(Duration::from_micros(100));
         }
+        drop(count);
         Self { released }
     }
 }
@@ -1050,7 +1055,9 @@ impl Run {
         let deadline = Instant::now() + QUIET_DEADLINE;
         loop {
             let wakes = self.owed.wakes();
-            if self.owed.seen().is_empty() {
+            // The last wake can predate this step's input: it must see the
+            // empty debt that a fresh read shows.
+            if self.owed.seen().is_empty() && self.services.watermark.owed().is_empty() {
                 break;
             }
             if !self

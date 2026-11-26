@@ -2754,10 +2754,10 @@ impl DriverReport {
 
     fn applied(&self, delivered: holon_api::live_data::Delivered) {
         if let Some(inner) = &self.0 {
-            inner.subscription.applied(delivered.seq);
             inner
                 .applied_batches
                 .store(delivered.batches, std::sync::atomic::Ordering::Release);
+            inner.subscription.applied(delivered.seq);
         }
     }
 
@@ -2787,6 +2787,7 @@ impl DriverReport {
 struct InputReport<T> {
     input: Mutable<T>,
     state: Arc<Mutex<InputState<T>>>,
+    watermark: Option<Arc<crate::render_epoch::UiWatermark>>,
     _check: Option<crate::render_epoch::UiCheck>,
 }
 
@@ -2857,13 +2858,15 @@ impl<T: Clone + Send + Sync + 'static> InputReport<T> {
         let generation = state.generation();
         state.shown = Some((generation, input.get_cloned()));
         let state = Arc::new(Mutex::new(state));
-        let check = services.ui_watermark().map(|watermark| {
+        let watermark = services.ui_watermark();
+        let check = watermark.as_ref().map(|watermark| {
             let state = state.clone();
             watermark.register_check(key, move || state.lock().unwrap().owed())
         });
         Self {
             input: input.clone(),
             state,
+            watermark,
             _check: check,
         }
     }
@@ -2942,9 +2945,15 @@ impl<T: Clone + Send + Sync + 'static> InputPass<'_, T> {
 
     /// Call after the rows are shown: until then the old rows are on screen.
     fn finish(self) {
-        let mut state = self.report.state.lock().unwrap();
-        let consistent = self.consistent && state.generation() == self.start;
-        state.shown = consistent.then_some((self.start, self.value));
+        let consistent = {
+            let mut state = self.report.state.lock().unwrap();
+            let consistent = self.consistent && state.generation() == self.start;
+            state.shown = consistent.then_some((self.start, self.value));
+            consistent
+        };
+        if let (true, Some(watermark)) = (consistent, &self.report.watermark) {
+            watermark.poke();
+        }
     }
 }
 

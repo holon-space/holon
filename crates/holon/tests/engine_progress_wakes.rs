@@ -1,8 +1,9 @@
 //! A settle waiter on `UiWatermark::changed` wakes to every change of what the
-//! engine reports it: the emitted seq, the routed seq and the operations in
-//! flight. Drawn writes on two keyed places (each batch for one place is a
-//! skip for the other), writes held in their claim, and a live eager re-query
-//! must leave the waiter's last wake reading the engine as it is, once quiet.
+//! engine reports it: the emitted seq, the routed seq, the operations in
+//! flight and the deliveries the subscriptions owe. Drawn writes on two keyed
+//! places (each batch for one place is a skip for the other), writes held in
+//! their claim, and a live eager re-query must leave the waiter's last wake
+//! reading the engine as it is, once quiet.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::QueryEngine;
 use holon_api::Value;
+use holon_api::delivery_ledger::Owed;
 use holon_api::wake_witness::WakeWitness;
 use holon_frontend::render_epoch::EngineSeq;
 use holon_frontend::render_epoch::UiWatermark;
@@ -58,6 +60,7 @@ struct Reported {
     emitted: EngineSeq,
     routed: EngineSeq,
     in_flight: usize,
+    owed: Vec<Owed>,
 }
 
 impl Reported {
@@ -70,6 +73,7 @@ impl Reported {
                 .routed()
                 .expect("the engine reports its routed seq"),
             in_flight: watermark.operations_in_flight(),
+            owed: watermark.owed_deliveries(),
         }
     }
 }
@@ -120,7 +124,7 @@ fn write(
     })
 }
 
-fn every_engine_change_wakes_a_settle_waiter(steps: &[Step]) {
+fn wakes_on_every_change(steps: &[Step]) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -207,29 +211,28 @@ fn every_engine_change_wakes_a_settle_waiter(steps: &[Step]) {
     drains.iter().for_each(|drain| drain.abort());
 }
 
+/// The found cases run first, then the drawn ones.
 #[test]
-fn every_engine_change_wakes_a_settle_waiter_examples() {
+fn every_engine_change_wakes_a_settle_waiter() {
     for steps in [
         vec![Step::Edit(0)],
         vec![Step::Hold(0), Step::Release],
         vec![Step::Hold(0), Step::Edit(0), Step::Edit(1), Step::Release],
+        // The eager router and the demux race for each batch; many writes
+        // draw the order where the eager router moves the routed seq last.
+        (0..16).map(|i| Step::Edit(i % 2)).collect(),
     ] {
-        every_engine_change_wakes_a_settle_waiter(&steps);
+        wakes_on_every_change(&steps);
     }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig {
+    proptest::test_runner::TestRunner::new(ProptestConfig {
         cases: 8,
         failure_persistence: None,
         max_shrink_time: 60_000,
         ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn every_engine_change_wakes_a_settle_waiter_drawn(
-        steps in proptest::collection::vec(step(), 1..12)
-    ) {
-        every_engine_change_wakes_a_settle_waiter(&steps);
-    }
+    })
+    .run(&proptest::collection::vec(step(), 1..12), |steps| {
+        wakes_on_every_change(&steps);
+        Ok(())
+    })
+    .unwrap();
 }

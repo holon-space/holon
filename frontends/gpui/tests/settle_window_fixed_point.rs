@@ -312,6 +312,9 @@ impl Pump for ScriptedWindow {
         &self.clock
     }
 
+    /// Arrivals come one per pump, so the next pump is the next change.
+    fn park(&self, _: Duration) {}
+
     fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
         if !self.run_relay(go_on) {
             return false;
@@ -1039,6 +1042,65 @@ mod driver_hop {
     const MAX_REFS: usize = 3;
     /// Shorter than every drawn hold, so a late hop outlasts it.
     const SHORT_DEADLINE: Duration = Duration::from_millis(30);
+    /// A settle reads its clock once per try. A settle that waits for changes
+    /// tries a few times per change; one that spins tries thousands of times
+    /// while a hop is late.
+    const MAX_CLOCK_READINGS: usize = 200;
+
+    /// The system clock, counting its monotonic readings.
+    #[derive(Debug, Default)]
+    struct CountingClock(AtomicUsize);
+
+    impl Clock for CountingClock {
+        fn now_millis(&self) -> i64 {
+            unreachable!("a settle reads only the monotonic clock")
+        }
+
+        fn now(&self) -> Mono {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            holon_api::SystemClock.now()
+        }
+
+        fn sleep_until(&self, _: Mono) -> BoxFuture<'static, ()> {
+            unreachable!("a settle never sleeps")
+        }
+
+        fn sleep_blocking(&self, _: Duration) {
+            unreachable!("a settle never sleeps")
+        }
+
+        fn utc_offset_seconds_at(&self, _: i64) -> i32 {
+            unreachable!("a settle reads only the monotonic clock")
+        }
+    }
+
+    /// The window's app context, with a clock that counts the settle's tries.
+    struct Counted<'a> {
+        app: &'a HeadlessAppContext,
+        clock: CountingClock,
+    }
+
+    impl Pump for Counted<'_> {
+        fn clock(&self) -> &dyn Clock {
+            &self.clock
+        }
+
+        fn run_until_parked(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+            Pump::run_until_parked(self.app, go_on)
+        }
+
+        fn pending_views(&self) -> Vec<gpui::EntityId> {
+            Pump::pending_views(self.app)
+        }
+
+        fn force_frame(&self, go_on: &mut dyn FnMut() -> bool) -> bool {
+            Pump::force_frame(self.app, go_on)
+        }
+
+        fn park(&self, timeout: Duration) {
+            Pump::park(self.app, timeout)
+        }
+    }
 
     #[derive(Clone, Debug)]
     enum Op {
@@ -1234,8 +1296,9 @@ mod driver_hop {
             window
         }
 
+        /// The settle's clock readings when it settled.
         #[allow(clippy::result_large_err)]
-        fn settle(&self, hop: Hop) -> Result<(), SettleError> {
+        fn settle(&self, hop: Hop) -> Result<usize, SettleError> {
             let engine = self
                 .env
                 .reactive_engine
@@ -1243,9 +1306,13 @@ mod driver_hop {
                 .expect("reactive engine after start_app");
             let (runtime, env) = (&self.runtime, &self.env);
             let mut settle_engine = || runtime.block_on(env.settle());
+            let app = Counted {
+                app: &self.app,
+                clock: CountingClock::default(),
+            };
             match hop {
                 Hop::OnTime => settle_window(
-                    &self.app,
+                    &app,
                     &self.bounds,
                     engine.ui_watermark(),
                     &mut settle_engine,
@@ -1263,7 +1330,7 @@ mod driver_hop {
                         HANG_DEADLINE
                     };
                     settle_window(
-                        &self.app,
+                        &app,
                         &self.bounds,
                         engine.ui_watermark(),
                         &mut || {},
@@ -1273,7 +1340,7 @@ mod driver_hop {
                 Hop::HeldBeforeEngine { hold_ms } => {
                     hold_tokio_workers(runtime, Duration::from_millis(hold_ms));
                     settle_window(
-                        &self.app,
+                        &app,
                         &self.bounds,
                         engine.ui_watermark(),
                         &mut settle_engine,
@@ -1281,7 +1348,7 @@ mod driver_hop {
                     )
                 }
             }
-            .map(|_| ())
+            .map(|_| app.clock.0.load(Ordering::Relaxed))
         }
 
         /// Every Main list that holds one of this test's rows matches a fresh
@@ -1476,8 +1543,17 @@ mod driver_hop {
             let step = format!("step {i} {op:?} {hop:?} of {steps:?}");
             eprintln!("[driver-hop] {step}");
             apply(&mut window, &mut model, op);
+            let few_tries = |readings: usize| {
+                if readings > MAX_CLOCK_READINGS {
+                    return Err(TestCaseError::fail(format!(
+                        "{step}: the settle read its clock {readings} times: it tries again \
+                         without waiting for a change"
+                    )));
+                }
+                Ok(())
+            };
             outcome = match window.settle(*hop) {
-                Ok(()) => Ok(()),
+                Ok(readings) => few_tries(readings),
                 Err(SettleError::Timeout(t))
                     if matches!(
                         hop,
@@ -1497,11 +1573,14 @@ mod driver_hop {
                             SettleError::Timeout(t)
                         )))
                     } else {
-                        window.settle(Hop::OnTime).map_err(|e| {
-                            TestCaseError::fail(format!(
-                                "{step}: once the hold ended, the settle still fails: {e}"
-                            ))
-                        })
+                        window
+                            .settle(Hop::OnTime)
+                            .map_err(|e| {
+                                TestCaseError::fail(format!(
+                                    "{step}: once the hold ended, the settle still fails: {e}"
+                                ))
+                            })
+                            .and_then(few_tries)
                     }
                 }
                 Err(e) => Err(TestCaseError::fail(format!("{step}: {e}"))),
@@ -1692,17 +1771,27 @@ mod driver_hop {
         }
     }
 
-    proptest! {
-        // A case boots a backend and a window: seconds each.
-        #![proptest_config(ProptestConfig {
+    /// The fixed cases run first, then the drawn ones.
+    #[test]
+    fn settled_frame_shows_every_row_its_drivers_received() {
+        // A hop late by seconds, while the settle waits for it: the drawn
+        // holds stay short, since a case boots a backend and a window.
+        let late = Hop::HeldAfterEngine {
+            hold_ms: 3000,
+            short_deadline: false,
+        };
+        for steps in [vec![(Op::AddChild, late)], vec![(Op::Refocus, late)]] {
+            settled_frame_shows_every_row([1, 1], steps).unwrap_or_else(|e| panic!("{e}"));
+        }
+        proptest::test_runner::TestRunner::new(ProptestConfig {
             cases: 6,
             max_shrink_iters: 24,
             failure_persistence: None,
             ..ProptestConfig::default()
-        })]
-        #[test]
-        fn settled_frame_shows_every_row_its_drivers_received((seeded, steps) in case()) {
-            settled_frame_shows_every_row(seeded, steps)?;
-        }
+        })
+        .run(&case(), |(seeded, steps)| {
+            settled_frame_shows_every_row(seeded, steps)
+        })
+        .unwrap();
     }
 }
