@@ -2068,6 +2068,9 @@ fn no_sequence_of_caller_calls_panics() {
         ),
     ];
     for (name, (net, ops)) in found {
+        if let Err(e) = net.executor() {
+            panic!("static example {name}: the net does not load: {e}");
+        }
         run_calls(net, &ops).unwrap_or_else(|e| panic!("static example {name}: {e}"));
     }
     let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {

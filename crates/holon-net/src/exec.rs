@@ -2213,6 +2213,18 @@ impl Executor {
             .collect();
     }
 
+    /// Whether no decline is remembered and every auto transition decides
+    /// again for every subject: the state `crash` leaves.
+    pub fn decides_all_again(&self) -> bool {
+        self.waiters.is_empty()
+            && self
+                .net
+                .transitions
+                .iter()
+                .filter(|t| t.trigger == Trigger::Auto)
+                .all(|t| self.pending_all.contains(&t.name))
+    }
+
     /// Evaluates every derived place once on the initial marking: a cycle it
     /// meets there is a load refusal, one only a later marking reveals
     /// refuses the call that evaluates it.

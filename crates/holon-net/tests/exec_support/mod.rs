@@ -518,6 +518,10 @@ impl Checked {
         let r = call(&mut self.exec);
         if let Some(crashed) = &mut self.crashed {
             crashed.crash();
+            assert!(
+                crashed.decides_all_again(),
+                "crash law broken before {op}: crash() kept a waiter or an auto transition that does not decide again"
+            );
             let c = call(crashed);
             assert_same(op, &r, &c);
             assert_same(op, &observable(&self.exec), &observable(crashed));
