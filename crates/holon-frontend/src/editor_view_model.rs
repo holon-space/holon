@@ -254,6 +254,9 @@ pub struct EditorViewModel {
     /// superseded by any newer directive, and replayed by the adapter on the
     /// composition-end / focus edge via `take_pending_directive`.
     pending_directive: Option<ConvergeDirective>,
+    /// The interaction span of the last cell keystroke, for the frontend's
+    /// frame stage. Taken by [`Self::take_cell_edit_span`].
+    cell_edit_span: Option<tracing::Span>,
     /// Handle to the reaper's registry, when this editor was mounted by a
     /// frontend that births blocks from creation affordances. `None` for
     /// headless/unit editors, which have no reaper to race.
@@ -312,6 +315,7 @@ impl EditorViewModel {
             buffer: original_value,
             last_local_seq: holon_api::write_seq::WriteSeq::ZERO.get(),
             pending_directive: None,
+            cell_edit_span: None,
             ephemeral_newborns: None,
             hidden_command: None,
             restoring_to: None,
@@ -626,9 +630,7 @@ impl EditorViewModel {
             // Cell mode: apply the delta through the CRDT unless the cell
             // already holds this text (our own echo).
             if self.current_text().as_deref() != Some(new_text) {
-                for op in crate::cell::compute_text_delta(&self.buffer, new_text) {
-                    self.apply_local(op)?;
-                }
+                self.apply_cell_edit(new_text)?;
             }
             self.buffer = new_text.to_string();
             return Ok(None);
@@ -765,15 +767,61 @@ impl EditorViewModel {
         Some(directive)
     }
 
+    /// One cell keystroke: its own root interaction span, held open by the
+    /// e2e clock until the edit is visible in a block mirror.
+    fn apply_cell_edit(&mut self, new_text: &str) -> Result<()> {
+        let target = self.handler.context_id();
+        let interaction = tracing::info_span!(
+            parent: None,
+            "interaction.cell_edit",
+            block = target.as_ref().map(|t| t.as_str()),
+        );
+        let _interaction = interaction.enter();
+        {
+            let _apply = tracing::info_span!("cell.apply").entered();
+            let ops = crate::cell::compute_text_delta(&self.buffer, new_text);
+            let last = ops.len().saturating_sub(1);
+            for (i, op) in ops.into_iter().enumerate() {
+                match (&target, i == last) {
+                    (Some(target), true) => self.apply_local_announcing(op, &|committed| {
+                        holon_api::latency_e2e::cell_edit_committed(
+                            target.as_str(),
+                            committed,
+                            &interaction,
+                        )
+                    })?,
+                    _ => self.apply_local(op)?,
+                }
+            }
+        }
+        self.cell_edit_span = Some(interaction.clone());
+        Ok(())
+    }
+
+    /// The interaction span of the last cell keystroke, once.
+    pub fn take_cell_edit_span(&mut self) -> Option<tracing::Span> {
+        self.cell_edit_span.take()
+    }
+
     /// Apply a local edit to the CRDT (origin-tagged so the remote-delta
     /// stream filters it out). Errors when no cell is attached —
     /// callers in headless contexts should gate on [`Self::has_cell`].
     pub fn apply_local(&self, op: TextOp) -> Result<()> {
+        self.apply_local_announcing(op, &|_| {})
+    }
+
+    /// [`Self::apply_local`], calling `before_commit` as
+    /// [`holon_core::cell::TextCellBacking::apply_text_op_announcing`] does.
+    pub fn apply_local_announcing(
+        &self,
+        op: TextOp,
+        before_commit: &dyn Fn(holon_core::cell::CellOp),
+    ) -> Result<()> {
         let cell = self
             .cell
             .as_ref()
             .ok_or_else(|| anyhow!("EditorViewModel has no Cell<String> attached"))?;
-        cell.apply_text_op(op)
+        cell.apply_text_op_announcing(op, before_commit)
     }
 
     /// Stream of remote text deltas (peer edits, file reloads, CDC echoes
@@ -1288,6 +1336,54 @@ pub fn surface_caret_to_content(
     };
     holon_org_format::source_content_offsets(surface_body(surface, surface_prefix)?)
         .content_offset(body_byte)
+}
+
+/// The root span of one editor key event. What the handler dispatches inside it
+/// nests under it, across the tokio tasks the dispatch spawns.
+fn key_event_span(key: &str, block: Option<&str>) -> tracing::Span {
+    tracing::info_span!(parent: None, "interaction.key", key, block)
+}
+
+/// A key event that changed the editor text to `text`: the VM's write,
+/// dispatched under the event's root span. Returns that span for the frame
+/// stage when a write was dispatched.
+pub fn dispatch_text_change(
+    vm: &mut EditorViewModel,
+    services: &dyn crate::reactive::BuilderServices,
+    text: &str,
+) -> Result<Option<tracing::Span>> {
+    let block = vm.handler.context_id();
+    let key = key_event_span("text", block.as_ref().map(|b| b.as_str()));
+    let dispatched = key.in_scope(|| -> Result<bool> {
+        let intent = vm.apply_local_edit(text)?;
+        Ok(intent
+            .map(|intent| services.dispatch_intent(intent))
+            .is_some())
+    })?;
+    Ok(dispatched.then_some(key))
+}
+
+/// A key event whose op is `structural`: the editor's pending text first, then
+/// the op, as one ordered chain under the event's root span (structural ops are
+/// commit points).
+pub fn dispatch_structural_key(
+    vm: &std::sync::Mutex<EditorViewModel>,
+    services: &Arc<dyn crate::reactive::BuilderServices>,
+    live_text: &str,
+    structural: OperationIntent,
+) {
+    // ALLOW(raw_row_id_column): label — a span field, never resolved
+    let block = structural.params.get("id").and_then(|v| v.as_string());
+    let key = key_event_span(&structural.op_name, block);
+    let _key = key.enter();
+    let commit = vm.lock().unwrap().chord_commit_intent(live_text);
+    crate::reactive::dispatch_intent_chain(
+        services,
+        commit
+            .into_iter()
+            .chain(std::iter::once(structural))
+            .collect(),
+    );
 }
 
 /// The structural block operation a key triggers when no popup/completion is

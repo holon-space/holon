@@ -200,6 +200,8 @@ impl IntegrationStateProjector {
                     holon_api::latency_e2e::Observable::BlockRow(None),
                 )
             }),
+            // Integration rows are no cell edit's target.
+            &[],
         );
 
         // The boot log carried NOT ONE line from this projector while the

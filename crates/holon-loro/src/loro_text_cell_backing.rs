@@ -15,6 +15,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use holon_core::cell::CellBacking;
+use holon_core::cell::CellOp;
 use holon_core::cell::CursorAnchor;
 use holon_core::cell::CursorBias;
 use holon_core::cell::DeltaOp;
@@ -236,11 +237,19 @@ impl CellBacking<String> for LoroTextCellBacking {
 
 impl TextCellBacking for LoroTextCellBacking {
     fn apply_text_op(&self, op: TextOp) -> Result<()> {
+        self.apply_text_op_announcing(op, &|_| {})
+    }
+
+    fn apply_text_op_announcing(&self, op: TextOp, before_commit: &dyn Fn(CellOp)) -> Result<()> {
         // The editor's own keystroke — stamp the echo origin so the subscribe
         // filter drops it (the editor already holds this value; converging it
         // back would yank the caret to end). All non-keystroke writers carry
         // another origin and therefore pass the filter.
         self.write_disclosing(|| {
+            // Read before the edit: the edit's ops enter the oplog version
+            // vector before the commit.
+            let peer = self.doc.peer_id();
+            let first = self.doc.oplog_vv().get(&peer).copied().unwrap_or(0);
             self.doc
                 .set_next_commit_origin(&WriteOrigin::UiEditorKeystroke.as_origin());
             mutate_guarded(&self.doc, "a text cell keystroke", || {
@@ -260,6 +269,15 @@ impl TextCellBacking for LoroTextCellBacking {
                 }
                 Ok(())
             })?;
+            // Announced under the write lock, before the commit wakes any
+            // projection pass: a pass can never cover an unannounced commit.
+            if self.doc.get_pending_txn_len() > 0 {
+                before_commit(CellOp {
+                    doc: crate::doc_lock::doc_key(&self.doc) as u64,
+                    peer,
+                    counter: first,
+                });
+            }
             self.doc.commit();
             Ok(())
         })

@@ -277,6 +277,11 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/loro_root_deliveries_are_guarded.rs",
         2,
     ),
+    // A root subscription that records the thread each delivery runs on.
+    (
+        "crates/holon-integration-tests/tests/span_capture_suite/cell_edit_trace.rs",
+        1,
+    ),
     // The bench's subscription registration.
     ("crates/holon-loro/examples/projection_extract_bench.rs", 1),
     // The vault's `UndoManager`: a long-lived observer registered on the doc,

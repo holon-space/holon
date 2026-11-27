@@ -14,11 +14,10 @@
 //! by requiring that span to carry a parent — it runs on an actor that outlives
 //! every interaction, so a parent can only have come across the CDC hop.
 //!
-//! The two are NOT one trace, and the assertions deliberately do not claim they
-//! are: the Loro→SQL projection runs on its own long-lived pass, so the writing
-//! span is the projection's, not the interaction's. One pass may consolidate
-//! ops from several interactions, so joining them needs a ruling on what "the"
-//! originating trace of a batch is, then context on the projection queue entry.
+//! The two are one trace: the Loro→SQL pass parents to the span of the newest
+//! commit it projects and links the rest, so the row it writes, and the mirror
+//! apply of that row, carry the interaction's trace. `key_event_trace.rs`
+//! asserts that chain from the editor's key event to the e2e close.
 //!
 //! Run: `cargo nextest run -p holon-integration-tests --features pbt \
 //!       --test interaction_trace_connectivity`
@@ -69,7 +68,7 @@ fn trace_id(span: &SpanData) -> String {
 
 /// Pick a stable, editable seeded block: a `block:` content block with
 /// non-empty content that is not a structural `::src::` / `::render::` node.
-async fn pick_target(session: &holon_frontend::FrontendSession) -> String {
+pub(super) async fn pick_target(session: &holon_frontend::FrontendSession) -> String {
     let snap = session
         .block_query()
         .snapshot()
@@ -458,7 +457,10 @@ fn a_consolidated_batch_links_every_writer_past_the_first() {
 }
 
 /// Span ids reachable from `root` by parenthood alone.
-fn descendants_of(spans: &[SpanData], root: &SpanData) -> std::collections::HashSet<SpanId> {
+pub(super) fn descendants_of(
+    spans: &[SpanData],
+    root: &SpanData,
+) -> std::collections::HashSet<SpanId> {
     let mut children: HashMap<SpanId, Vec<SpanId>> = HashMap::new();
     for span in spans {
         children
@@ -483,6 +485,20 @@ fn descendants_of(spans: &[SpanData], root: &SpanData) -> std::collections::Hash
 /// parenthood, nor by the links a consolidated pass carries back to the
 /// interactions it serves (ruling D3.a).
 fn unattributed<'a>(spans: &'a [SpanData], root: &SpanData) -> Vec<&'a SpanData> {
+    let seen = reachable_with_links(spans, root);
+    spans
+        .iter()
+        .filter(|s| !seen.contains(&s.span_context.span_id()))
+        .filter(|s| !BACKGROUND_ROOTS.contains(&s.name.as_ref()))
+        .collect()
+}
+
+/// Span ids reachable from `root` by parenthood or by a consolidated pass's
+/// link back to it.
+pub(super) fn reachable_with_links(
+    spans: &[SpanData],
+    root: &SpanData,
+) -> std::collections::HashSet<SpanId> {
     let mut edges: HashMap<SpanId, Vec<SpanId>> = HashMap::new();
     for span in spans {
         edges
@@ -508,11 +524,7 @@ fn unattributed<'a>(spans: &'a [SpanData], root: &SpanData) -> Vec<&'a SpanData>
             }
         }
     }
-    spans
-        .iter()
-        .filter(|s| !seen.contains(&s.span_context.span_id()))
-        .filter(|s| !BACKGROUND_ROOTS.contains(&s.name.as_ref()))
-        .collect()
+    seen
 }
 
 fn render_report(interaction_trace: &str, by_trace: &BTreeMap<String, Vec<&SpanData>>) -> String {

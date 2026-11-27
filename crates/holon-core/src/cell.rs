@@ -21,6 +21,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+pub use holon_api::latency_e2e::CellOp;
 
 /// Consumer-facing handle for a reactive field of type `T`.
 ///
@@ -107,6 +108,14 @@ pub trait CellBacking<T: 'static + Send + Sync + Clone>: Send + Sync + 'static {
 /// history under concurrent peer edits.
 pub trait TextCellBacking: CellBacking<String> {
     fn apply_text_op(&self, op: TextOp) -> Result<()>;
+    /// [`Self::apply_text_op`], calling `before_commit` with the first CRDT op
+    /// of the commit while the commit is not yet visible to any reader. A
+    /// backing that commits no CRDT op, or an `op` that changes nothing,
+    /// never calls it.
+    fn apply_text_op_announcing(&self, op: TextOp, before_commit: &dyn Fn(CellOp)) -> Result<()> {
+        let _ = before_commit;
+        self.apply_text_op(op)
+    }
     fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor;
     fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize;
     fn remote_deltas(&self) -> BoxStream<'static, TextDelta>;
@@ -213,8 +222,18 @@ impl Cell<String> {
     /// (e.g. an LWW backing in SqlOnly mode); callers in editor paths
     /// should only ever reach this with a Loro backing.
     pub fn apply_text_op(&self, op: TextOp) -> Result<()> {
+        self.apply_text_op_announcing(op, &|_| {})
+    }
+
+    /// [`Self::apply_text_op`] with
+    /// [`TextCellBacking::apply_text_op_announcing`].
+    pub fn apply_text_op_announcing(
+        &self,
+        op: TextOp,
+        before_commit: &dyn Fn(CellOp),
+    ) -> Result<()> {
         match self.inner.as_text_backing() {
-            Some(text) => text.apply_text_op(op),
+            Some(text) => text.apply_text_op_announcing(op, before_commit),
             None => Err(anyhow!(
                 "Cell<String>::apply_text_op called on a backing without text-rich support \
                  (as_text_backing() returned None). This is unreachable in production: SqlOnly \

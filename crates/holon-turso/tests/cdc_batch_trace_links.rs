@@ -224,3 +224,77 @@ async fn a_projection_without_the_origin_column_attributes_nothing() {
         batch.metadata.linked_contexts
     );
 }
+
+const TRACE_A: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const SPAN_A: &str = "00f067aa0ba902b7";
+const TRACE_B: &str = "4bf92f3577b34da6a3ce929d0e0e4737";
+const SPAN_B: &str = "00f067aa0ba902b8";
+
+/// Row `a` written under trace A in its own commit; that commit's batch is
+/// consumed.
+async fn row_written_under_a(handle: &DbHandle, rx: &mut Receiver<BatchWithMetadata<RowChange>>) {
+    handle
+        .execute(
+            "INSERT INTO origin_probe (id, content, _change_origin) VALUES (?, ?, ?)",
+            vec![
+                turso::Value::Text("a".into()),
+                turso::Value::Text("first".into()),
+                turso::Value::Text(origin(TRACE_A, SPAN_A)),
+            ],
+        )
+        .await
+        .expect("write under A");
+    sole_batch(rx).await;
+}
+
+/// The view delivers an update as DELETE(old row) + INSERT(new row). The old
+/// row still names A; the update is B's alone.
+#[tokio::test]
+async fn an_update_is_attributed_to_its_own_writer_not_the_rows_previous_one() {
+    let (handle, mut rx) = setup().await;
+    row_written_under_a(&handle, &mut rx).await;
+
+    handle
+        .execute(
+            "UPDATE origin_probe SET content = ?, _change_origin = ? WHERE id = 'a'",
+            vec![
+                turso::Value::Text("second".into()),
+                turso::Value::Text(origin(TRACE_B, SPAN_B)),
+            ],
+        )
+        .await
+        .expect("update under B");
+
+    let batch = sole_batch(&mut rx).await;
+    let parent = batch.metadata.trace_context.as_ref().expect("attributed");
+    assert_eq!(
+        (parent.trace_id.as_str(), parent.span_id.as_str()),
+        (TRACE_B, SPAN_B)
+    );
+    assert!(
+        batch.metadata.linked_contexts.is_empty(),
+        "the previous writer A is no writer of this batch; got links {:?}",
+        batch.metadata.linked_contexts
+    );
+}
+
+/// A plain DELETE stamps no origin, so the deleted row's last writer is the
+/// only origin its CDC event carries.
+#[tokio::test]
+async fn a_delete_without_an_insert_names_the_deleted_rows_last_writer() {
+    let (handle, mut rx) = setup().await;
+    row_written_under_a(&handle, &mut rx).await;
+
+    handle
+        .execute("DELETE FROM origin_probe WHERE id = 'a'", vec![])
+        .await
+        .expect("delete");
+
+    let batch = sole_batch(&mut rx).await;
+    let parent = batch.metadata.trace_context.as_ref().expect("attributed");
+    assert_eq!(
+        (parent.trace_id.as_str(), parent.span_id.as_str()),
+        (TRACE_A, SPAN_A)
+    );
+    assert!(batch.metadata.linked_contexts.is_empty());
+}

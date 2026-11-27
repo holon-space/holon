@@ -256,6 +256,31 @@ python3 scripts/measure_latency.py /path/to/log
 some-command | python3 scripts/measure_latency.py -
 ```
 
+### Editor key-event traces from a release build
+
+Every editor key event is one trace: `interaction.key` (GPUI keystroke and
+Enter) or `interaction.cell_edit` (a CRDT cell keystroke), down to its
+`interaction.visible` close on a block mirror. One command, with an OTLP
+collector listening on port 4318:
+
+```bash
+RUST_LOG=holon=info,holon_latency=info \
+  HOLON_LOG=file:///tmp/holon-latency.log,otlp HOLON_LATENCY_SLO=1 \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+  cargo run --release -p holon-gpui \
+  && python3 scripts/measure_latency.py /tmp/holon-latency.log
+```
+
+`otlp` is required for e2e samples of `cell_edit`, and for any close to join
+its key event's trace: the close finds its interaction through the OTel trace
+context the write carries, which exists only with the OTel layer on. A capture
+with key events of an action but no e2e sample of it exits 3 with a
+`RUN INVALID` line that names the cause. That check needs the
+`holon_frontend` spans in the log (`holon=info` matches every `holon*`
+target): an unset `RUST_LOG` gives the same filter, but a narrower one set in
+the shell, such as `holon_latency=info` alone, drops the `interaction.key`
+context and the check never fires.
+
 ## Scale Soak
 
 `just measure-latency` runs the keystone against a 3-block focus doc, so vault-scale

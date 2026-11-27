@@ -4,6 +4,14 @@
 #   (load can only make it pass), harness (plumbing: a wait helper's own bound),
 #   virtual-clock (a PAUSED tokio clock: load cannot move it at all).
 # See docs/Testing/TimingCritical.md. Regenerate with `scripts/timing-split.py assertions --update`.
+crates/holon-integration-tests/tests/span_capture_suite/cell_edit_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/interaction_sequence_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/interaction_sequence_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/interaction_sequence_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/interaction_sequence_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/key_event_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/key_event_trace.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/span_capture_suite/key_event_trace.rs	liveness	Instant::now() < deadline,
 crates/holon/src/api/action_watcher.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon/src/api/backend_engine.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon/src/api/holon_rule_watcher.rs	liveness	std::time::Instant::now() < deadline,
@@ -239,6 +247,7 @@ crates/holon-rows/tests/mapper_bounds.rs	timing	holon_api::duration_budget::Dura
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	lower-bound	waited >= Duration::from_millis(500),
+frontends/gpui/tests/quick_open_returns_focus_windowed.rs	liveness	std::time::Instant::now() < deadline,
 frontends/holon-worker/src/lib.rs	virtual-clock	ready_ms <= limit_ms,
 frontends/mcp/src/standalone.rs	liveness	Instant::now() < deadline,
 frontends/mcp/src/tools.rs	liveness	std::time::Instant::now() < deadline,

@@ -8,10 +8,13 @@
 //! collector CAPTURES is per-`TestScope`, not global, so these tests still run
 //! in parallel in one process.
 
+mod cell_edit_trace;
 mod declared_column_parity;
 mod harness_probe_reads_outside_budget;
 mod host_page_with_inline_subpages_ingest;
+mod interaction_sequence_trace;
 mod interaction_trace_connectivity;
+mod key_event_trace;
 mod periodic_reads_outside_budget;
 mod region_writeback_loss;
 mod render_requirement_manifest;

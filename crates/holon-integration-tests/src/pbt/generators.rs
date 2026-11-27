@@ -1416,6 +1416,65 @@ pub fn generate_profile_content_mutation(ids: Vec<EntityUri>) -> impl Strategy<V
     })
 }
 
+/// One editor key event on a block of a fixed set.
+#[derive(Debug, Clone)]
+pub enum EditorKeyStep {
+    /// Insert `ch` at a char boundary of the focused block.
+    Type { at: CaretAt, ch: char },
+    /// Enter: split the focused block at a char boundary.
+    Enter { at: CaretAt },
+    /// Move the focus to the `block`-th block, modulo their count.
+    Focus { block: usize },
+}
+
+/// A caret on a char boundary of the text the editor holds when the step
+/// runs. The ends are drawn on their own: they are where a split leaves the
+/// source row as it is.
+#[derive(Debug, Clone)]
+pub enum CaretAt {
+    Start,
+    End,
+    /// Any char boundary, 0 and the end included.
+    Inside(prop::sample::Index),
+}
+
+impl CaretAt {
+    pub fn byte_in(&self, text: &str) -> usize {
+        match self {
+            Self::Start => 0,
+            Self::End => text.len(),
+            Self::Inside(at) => {
+                let boundaries: Vec<usize> = text
+                    .char_indices()
+                    .map(|(b, _)| b)
+                    .chain(std::iter::once(text.len()))
+                    .collect();
+                boundaries[at.index(boundaries.len())]
+            }
+        }
+    }
+}
+
+fn caret_at() -> BoxedStrategy<CaretAt> {
+    prop_oneof![
+        1 => Just(CaretAt::Start),
+        1 => Just(CaretAt::End),
+        3 => any::<prop::sample::Index>().prop_map(CaretAt::Inside),
+    ]
+    .boxed()
+}
+
+/// Sequences of editor key events: runs of keystrokes (so a burst coalesces),
+/// Enters and focus moves.
+pub fn editor_key_steps(max: usize) -> BoxedStrategy<Vec<EditorKeyStep>> {
+    let step = prop_oneof![
+        6 => (caret_at(), extended_char()).prop_map(|(at, ch)| EditorKeyStep::Type { at, ch }),
+        2 => caret_at().prop_map(|at| EditorKeyStep::Enter { at }),
+        2 => (0..8usize).prop_map(|block| EditorKeyStep::Focus { block }),
+    ];
+    prop::collection::vec(step, 1..=max).boxed()
+}
+
 #[cfg(test)]
 mod default_vocabulary_tests {
     use super::*;

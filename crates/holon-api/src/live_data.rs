@@ -628,6 +628,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     feed,
                     received_at,
                     touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
+                    &origins,
                 );
                 if seq > 0 {
                     live.last_consumed_seq.store(seq, Ordering::SeqCst);

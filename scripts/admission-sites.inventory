@@ -12,6 +12,7 @@
 1 crates/holon-connections/src/registry.rs below
 1 crates/holon-core/src/operation_subset.rs below
 1 crates/holon-core/src/operation_wrapper.rs below
+2 crates/holon-frontend/src/editor_view_model.rs entry
 5 crates/holon-frontend/src/headless_editor_mirror.rs entry
 7 crates/holon-frontend/src/lib.rs entry
 1 crates/holon-frontend/src/operations.rs entry
@@ -46,7 +47,7 @@
 4 frontends/gpui/src/share_ui.rs entry
 1 frontends/gpui/src/tab_strip.rs entry
 1 frontends/gpui/src/user_driver.rs entry
-11 frontends/gpui/src/views/editor_view.rs entry
+9 frontends/gpui/src/views/editor_view.rs entry
 1 frontends/gpui/src/views/render_entity_view.rs entry
 1 frontends/gpui/src/views/rich_text_editor.rs entry
 4 frontends/holon-worker/src/lib.rs entry

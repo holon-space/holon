@@ -105,6 +105,17 @@
 //! [`crate::latency_slo`], which both the runtime oracle and the land gate
 //! score through.
 //!
+//! # Cell edits: correlated by commit, carried by the trace
+//!
+//! A cell keystroke commits straight to the Loro text and dispatches no op, so
+//! no row ever carries its token. Its clock ([`Observable::CellCommit`]) names
+//! the commit's [`CellOp`]; the projection pass that read past that op claims
+//! it ([`projection_covers`]) and runs inside the interaction's trace, so its
+//! writes reach the block mirror stamped with that trace id. The clock closes
+//! on a delivery of its block whose batch carries that trace, never on a row
+//! that merely has the same id or content. Without an OpenTelemetry layer no
+//! trace id exists and no cell clock is enrolled.
+//!
 //! # SLO endpoint: projection-visible, deliberately NOT frame-present
 //!
 //! The `stage="e2e"` span closes **here** — inside the `LiveData::subscribe`
@@ -369,6 +380,31 @@ pub enum Observable {
     /// navigation. Carries no token by construction: navigation writes
     /// `navigation_history`, never a block row.
     FocusRoot,
+    /// A cell edit committed straight to the CRDT. Never delivered by a mirror
+    /// itself: [`rows_delivered`] derives it from a block row whose batch
+    /// carries the trace of the projection pass that covered the commit.
+    CellCommit(CellOp),
+    /// A row the interaction created lands in a block mirror, in a batch that
+    /// carries the interaction's trace: a split's new row, which no id known at
+    /// dispatch names. Its target is the block the op addresses. The op's
+    /// `write_seq` is the clock's token only when no trace exists.
+    NewRow(Option<WriteSeq>),
+}
+
+/// The Loro op that committed one cell edit, and the doc it lives in. Two
+/// docs can share a peer id, so the op id alone does not name a commit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct CellOp {
+    pub doc: u64,
+    pub peer: u64,
+    pub counter: i32,
+}
+
+/// What a delivery names about an op instance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Token {
+    Seq(WriteSeq),
+    Op(CellOp),
 }
 
 /// The [`Observable`] discriminant, without the token. Two observables
@@ -377,6 +413,8 @@ pub enum Observable {
 enum Kind {
     BlockRow,
     FocusRoot,
+    CellCommit,
+    NewRow,
 }
 
 impl Observable {
@@ -384,13 +422,26 @@ impl Observable {
         match self {
             Observable::BlockRow(_) => Kind::BlockRow,
             Observable::FocusRoot => Kind::FocusRoot,
+            Observable::CellCommit(_) => Kind::CellCommit,
+            Observable::NewRow(_) => Kind::NewRow,
         }
     }
 
-    fn seq(self) -> Option<WriteSeq> {
+    fn token(self) -> Option<Token> {
         match self {
-            Observable::BlockRow(seq) => seq,
+            Observable::BlockRow(seq) => seq.map(Token::Seq),
             Observable::FocusRoot => None,
+            Observable::CellCommit(op) => Some(Token::Op(op)),
+            Observable::NewRow(_) => None,
+        }
+    }
+
+    /// What a dispatched block op becomes visible as: a split as its new row,
+    /// every other op as its target's row (with the op's `write_seq` token).
+    pub fn of_block_op(op_name: &str, params: &HashMap<String, crate::Value>) -> Self {
+        match op_name {
+            "split_block" => Observable::NewRow(write_seq_from_params(params)),
+            _ => Observable::BlockRow(write_seq_from_params(params)),
         }
     }
 }
@@ -426,6 +477,15 @@ struct Pending {
     /// EXPECTED shape here, because facade spans are systematically shorter
     /// than UI spans (23ms vs 29ms p50, measured on this lane's own rung).
     contended: bool,
+    /// The interaction span of a UI clock, held open until its close.
+    interaction: Option<Interaction>,
+}
+
+struct Interaction {
+    span: tracing::Span,
+    trace_id: String,
+    /// The trace of the projection pass that covered or linked the commit.
+    pass_trace: Option<String>,
 }
 
 /// One closed correlation, ready to emit. Returned by the pure
@@ -449,6 +509,7 @@ struct Closed {
     /// count them all, each at its own dispatch.
     superseded: Superseded,
     quiet: QuietBatches,
+    span: Option<tracing::Span>,
 }
 
 /// The pending-interaction registry, **partitioned by [`ClockOrigin`]**.
@@ -645,6 +706,368 @@ pub fn interaction_dispatched(
     observable: Observable,
     origin: ClockOrigin,
 ) {
+    let interaction = match origin {
+        ClockOrigin::Ui => interaction_of(tracing::Span::current()),
+        ClockOrigin::Facade => None,
+    };
+    // Without a trace no batch can name the new row as this interaction's: the
+    // clock falls back to its target's row with the op's `write_seq`.
+    let observable = match (observable, &interaction) {
+        (Observable::NewRow(seq), None) => Observable::BlockRow(seq),
+        (o, _) => o,
+    };
+    start(action, target, observable, origin, interaction);
+}
+
+/// `span` as the interaction a clock closes under, when it has an
+/// OpenTelemetry trace: without a trace id a cell close could not be told from
+/// another write of the block.
+fn interaction_of(span: tracing::Span) -> Option<Interaction> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let trace_id = span.context().span().span_context().trace_id();
+    (trace_id != opentelemetry::trace::TraceId::INVALID).then(|| Interaction {
+        span,
+        trace_id: format!("{trace_id:032x}"),
+        pass_trace: None,
+    })
+}
+
+/// Start the clock of a cell edit whose commit starts with `op`, under the
+/// keystroke's interaction `span`, held open until the edit is visible. Call
+/// it before the commit is visible to a projection pass. Enrols nothing when
+/// `span` has no OpenTelemetry context, because without a trace id the close
+/// could not be told from another write of the block.
+pub fn cell_edit_committed(target: &str, op: CellOp, span: &tracing::Span) {
+    let Some(interaction) = interaction_of(span.clone()) else {
+        return;
+    };
+    start(
+        CELL_EDIT,
+        target,
+        Observable::CellCommit(op),
+        ClockOrigin::Ui,
+        Some(interaction),
+    );
+}
+
+/// The action name of a cell keystroke's e2e sample.
+pub const CELL_EDIT: &str = "cell_edit";
+
+/// Claim the pending cell commits a projection pass read past. The pass runs
+/// as a child of the newest claimed interaction and links the rest, so its
+/// writes carry the newest one's trace, and every claimed clock waits for a
+/// delivery carrying that trace. A pass that fails before
+/// [`PassClaim::wrote`] releases its claims when the claim drops, so the pass
+/// that retries can claim them again.
+pub fn projection_covers(covered: impl Fn(CellOp) -> bool) -> PassClaim {
+    if PENDING_LEN.load(Ordering::Acquire) == 0 {
+        return PassClaim {
+            claim: Claim::default(),
+            registry: &PENDING,
+        };
+    }
+    claim_in(&PENDING, covered)
+}
+
+fn claim_in(registry: &'static Mutex<Registry>, covered: impl Fn(CellOp) -> bool) -> PassClaim {
+    let claim = cover(
+        registry
+            .lock()
+            .expect("latency_e2e mutex poisoned")
+            .slot(ClockOrigin::Ui),
+        covered,
+    );
+    PassClaim { claim, registry }
+}
+
+/// The cell commits one projection pass claimed.
+pub struct PassClaim {
+    claim: Claim,
+    registry: &'static Mutex<Registry>,
+}
+
+impl PassClaim {
+    /// The claimed interaction spans, newest first.
+    pub fn spans(&self) -> &[tracing::Span] {
+        &self.claim.spans
+    }
+
+    /// The pass runs as `pass` and links `committed`, the commit spans it
+    /// read besides its claims. A row one of those commits changes reaches
+    /// the sink under the pass's trace, so its clock waits for that trace
+    /// too. Call it before the pass writes the sink.
+    pub fn link(&mut self, pass: &tracing::Span, committed: &[tracing::Span]) {
+        self.claim.linked = committed
+            .iter()
+            .filter_map(|span| interaction_of(span.clone()))
+            .map(|i| i.trace_id)
+            .collect();
+        let Some(pass) = interaction_of(pass.clone()) else {
+            return;
+        };
+        let mut registry = self.registry.lock().expect("latency_e2e mutex poisoned");
+        link_rows(
+            registry.slot(ClockOrigin::Ui),
+            &self.claim.linked,
+            &pass.trace_id,
+        );
+    }
+
+    /// The pass succeeded. `retire` names, per block, why the pass made
+    /// nothing visible for it, or `None` when it did. A claimed cell edit on
+    /// such a block is retired, and so is a linked commit's block-row clock.
+    /// Nothing will ever become visible for them.
+    pub fn wrote(mut self, retire: impl Fn(&str) -> Option<Retire>) {
+        let claim = std::mem::take(&mut self.claim);
+        let mut registry = self.registry.lock().expect("latency_e2e mutex poisoned");
+        let retired = retire_invisible(
+            registry.slot(ClockOrigin::Ui),
+            &claim,
+            retire,
+            // ALLOW(physical_time): a latency sample's age, it decides nothing.
+            Instant::now(),
+        );
+        if std::ptr::eq(self.registry, &PENDING) {
+            PENDING_LEN.store(registry.len(), Ordering::Release);
+        }
+        drop(registry);
+        for r in retired {
+            tracing::info!(
+                target: "holon_latency",
+                stage = "e2e_retired",
+                action = %r.clock.action,
+                block = %r.clock.target,
+                origin = r.clock.origin.as_str(),
+                waited_ms = r.clock.waited_ms,
+                reason = r.reason.as_str(),
+                "an interaction's projection changed nothing visible on its block",
+            );
+            if let Some(span) = &r.span {
+                let _retired = tracing::info_span!(
+                    parent: span,
+                    "interaction.retired",
+                    action = %r.clock.action,
+                    block = %r.clock.target,
+                    reason = r.reason.as_str(),
+                )
+                .entered();
+            }
+        }
+    }
+}
+
+impl Drop for PassClaim {
+    fn drop(&mut self) {
+        if self.claim.claimed.is_empty() {
+            return;
+        }
+        let mut registry = self.registry.lock().expect("latency_e2e mutex poisoned");
+        release(registry.slot(ClockOrigin::Ui), &self.claim);
+    }
+}
+
+/// Pure core of [`PassClaim`]: what one pass claimed, newest first.
+#[derive(Default)]
+struct Claim {
+    claimed: Vec<(CellOp, String)>,
+    spans: Vec<tracing::Span>,
+    trace: String,
+    /// The traces of the commits the pass links.
+    linked: Vec<String>,
+}
+
+/// Why a pass made nothing visible for a block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Retire {
+    /// The pass emitted no op for the block.
+    Unwritten,
+    /// The pass's op leaves the block's stored row as it was: the sink stores
+    /// content through `content_canonical::canonicalize_stored_content`, so
+    /// an edit of edge whitespace only changes nothing another view shows.
+    NoVisibleChange,
+}
+
+impl Retire {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Retire::Unwritten => "unwritten",
+            Retire::NoVisibleChange => "no_visible_change",
+        }
+    }
+}
+
+/// A clock a pass retired, with its reason and its interaction span.
+struct Retired {
+    clock: Expired,
+    reason: Retire,
+    span: Option<tracing::Span>,
+}
+
+fn cover(pending: &mut [Pending], covered: impl Fn(CellOp) -> bool) -> Claim {
+    let mut by_age: Vec<&mut Pending> = pending.iter_mut().collect();
+    by_age.sort_by_key(|p| std::cmp::Reverse(p.t0));
+    let mut claim = Claim::default();
+    for p in by_age {
+        let Observable::CellCommit(op) = p.observable else {
+            continue;
+        };
+        let interaction = p
+            .interaction
+            .as_mut()
+            .expect("a cell clock is enrolled with its interaction");
+        if interaction.pass_trace.is_some() || !covered(op) {
+            continue;
+        }
+        if claim.spans.is_empty() {
+            claim.trace = interaction.trace_id.clone();
+        }
+        interaction.pass_trace = Some(claim.trace.clone());
+        claim.claimed.push((op, p.target.clone()));
+        claim.spans.push(interaction.span.clone());
+    }
+    claim
+}
+
+fn retire_invisible(
+    pending: &mut Vec<Pending>,
+    claim: &Claim,
+    retire: impl Fn(&str) -> Option<Retire>,
+    now: Instant,
+) -> Vec<Retired> {
+    let mut retired = Vec::new();
+    pending.retain(|p| {
+        let claimed = matches!(p.observable, Observable::CellCommit(op)
+            if claim.claimed.iter().any(|(c, _)| *c == op));
+        let linked = p.observable.kind() == Kind::BlockRow
+            && p.interaction
+                .as_ref()
+                .is_some_and(|i| claim.linked.contains(&i.trace_id));
+        let reason = match retire(&p.target) {
+            Some(reason) if claimed || linked => reason,
+            _ => return true,
+        };
+        retired.push(Retired {
+            clock: Expired {
+                action: p.action.clone(),
+                target: p.target.clone(),
+                origin: p.origin,
+                waited_ms: now.duration_since(p.t0).as_millis() as u64,
+            },
+            reason,
+            span: p.interaction.as_ref().map(|i| i.span.clone()),
+        });
+        false
+    });
+    retired
+}
+
+/// Point the row clocks of the `linked` commits at the pass trace their rows
+/// reach the sink under.
+fn link_rows(pending: &mut [Pending], linked: &[String], pass_trace: &str) {
+    for p in pending {
+        if p.observable.kind() == Kind::CellCommit {
+            continue;
+        }
+        if let Some(i) = p
+            .interaction
+            .as_mut()
+            .filter(|i| linked.contains(&i.trace_id))
+        {
+            i.pass_trace = Some(pass_trace.to_string());
+        }
+    }
+}
+
+fn release(pending: &mut [Pending], claim: &Claim) {
+    for p in pending {
+        let Observable::CellCommit(op) = p.observable else {
+            continue;
+        };
+        let interaction = p
+            .interaction
+            .as_mut()
+            .expect("a cell clock is enrolled with its interaction");
+        if interaction.pass_trace.as_deref() == Some(claim.trace.as_str())
+            && claim.claimed.iter().any(|(c, _)| *c == op)
+        {
+            interaction.pass_trace = None;
+        }
+    }
+}
+
+/// The cell commits a batch makes visible: a block row of a clock's target in
+/// a batch that carries the trace of the pass that covered its commit.
+fn cell_deliveries(
+    pending: &[Pending],
+    deliveries: &[(String, Observable)],
+    traces: &[&str],
+) -> Vec<(String, Observable)> {
+    pending
+        .iter()
+        .filter_map(|p| {
+            let Observable::CellCommit(op) = p.observable else {
+                return None;
+            };
+            let pass = p.interaction.as_ref()?.pass_trace.as_deref()?;
+            let delivered = traces.contains(&pass)
+                && deliveries
+                    .iter()
+                    .any(|(id, o)| *id == p.target && o.kind() == Kind::BlockRow);
+            delivered.then(|| (p.target.clone(), Observable::CellCommit(op)))
+        })
+        .collect()
+}
+
+/// The new rows a batch makes visible: a created block row in a batch that
+/// carries the trace of a pending [`Observable::NewRow`] clock's interaction,
+/// or of the pass that linked its commit.
+fn new_row_deliveries(
+    pending: &[Pending],
+    deliveries: &[(String, Observable)],
+    traces: &[&str],
+) -> Vec<(String, Observable)> {
+    let created = deliveries.iter().any(|(_, o)| o.kind() == Kind::NewRow);
+    pending
+        .iter()
+        .filter(|p| p.observable.kind() == Kind::NewRow)
+        .filter(|p| {
+            created
+                && p.interaction.as_ref().is_some_and(|i| {
+                    traces.contains(&i.trace_id.as_str())
+                        || i.pass_trace.as_deref().is_some_and(|t| traces.contains(&t))
+                })
+        })
+        .map(|p| (p.target.clone(), p.observable))
+        .collect()
+}
+
+/// What a batch offers one origin's `pending` clocks: its rows as delivered,
+/// and the cell commits and new rows it makes visible by its `traces`.
+fn offered(
+    pending: &[Pending],
+    deliveries: &[(String, Observable)],
+    traces: &[&str],
+) -> Vec<(String, Observable)> {
+    let mut offered = cell_deliveries(pending, deliveries, traces);
+    offered.extend(new_row_deliveries(pending, deliveries, traces));
+    offered.extend(
+        deliveries
+            .iter()
+            .filter(|(_, o)| o.kind() != Kind::NewRow)
+            .cloned(),
+    );
+    offered
+}
+
+fn start(
+    action: &str,
+    target: &str,
+    observable: Observable,
+    origin: ClockOrigin,
+    interaction: Option<Interaction>,
+) {
     let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
     let (expired, evicted) = enrol(
         &mut registry,
@@ -652,6 +1075,7 @@ pub fn interaction_dispatched(
         target,
         observable,
         origin,
+        interaction,
         Instant::now(),
     );
     PENDING_LEN.store(registry.len(), Ordering::Release);
@@ -674,6 +1098,7 @@ fn enrol(
     target: &str,
     observable: Observable,
     origin: ClockOrigin,
+    interaction: Option<Interaction>,
     now: Instant,
 ) -> (Vec<Expired>, Option<Evicted>) {
     let mut expired = Vec::new();
@@ -716,6 +1141,7 @@ fn enrol(
         t0: now,
         in_flight,
         contended,
+        interaction,
     });
     (expired, evicted)
 }
@@ -813,7 +1239,19 @@ pub fn touched_entities(
         .iter()
         .flat_map(block_row_pairs)
         .map(|(id, seq)| (id, Observable::BlockRow(seq)))
+        .chain(changes.iter().filter_map(created_row))
         .collect()
+}
+
+/// A created block row, offered to the [`Observable::NewRow`] clocks whose
+/// trace its batch carries (see [`new_row_deliveries`]).
+fn created_row(c: &crate::Change<crate::StorageEntity>) -> Option<(String, Observable)> {
+    let crate::Change::Created { data, .. } = c else {
+        return None;
+    };
+    // ALLOW(raw_row_id_column): key — the latency ledger keys on the id TEXT
+    let id = data.get("id").and_then(|v| v.as_string())?;
+    Some((id.to_string(), Observable::NewRow(None)))
 }
 
 /// The block a `focus_roots` change makes the region's root.
@@ -919,6 +1357,7 @@ pub fn rows_delivered<'a>(
     feed: Feed,
     received_at: Instant,
     deliveries: impl IntoIterator<Item = (&'a str, Observable)>,
+    origins: &[crate::streaming::BatchTraceContext],
 ) {
     if PENDING_LEN.load(Ordering::Acquire) == 0 {
         return;
@@ -927,6 +1366,7 @@ pub fn rows_delivered<'a>(
         .into_iter()
         .map(|(id, observable)| (id.to_string(), observable))
         .collect();
+    let traces: Vec<&str> = origins.iter().map(|o| o.trace_id.as_str()).collect();
     let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
     let now = Instant::now();
     // Offered to EVERY origin's slot, each closed on its own. Two interactions
@@ -945,7 +1385,7 @@ pub fn rows_delivered<'a>(
         // otherwise close on this batch and report a >30s "measurement" the SLO
         // oracle would fire on.
         expired.extend(prune_expired(slot, now));
-        let mut of_origin = close_received(slot, &deliveries, received_at, now);
+        let mut of_origin = close_batch(slot, &deliveries, &traces, received_at, now);
         log_quiet(registry.quiet(feed, o), &mut of_origin, now);
         closed.extend(of_origin);
     }
@@ -990,6 +1430,18 @@ pub fn rows_delivered<'a>(
             feed = feed.id(),
             "holon_latency",
         );
+        if let Some(interaction) = &c.span {
+            let _visible = tracing::info_span!(
+                parent: interaction,
+                "interaction.visible",
+                action = %c.action,
+                source,
+                block = %c.target,
+                ms = c.ms,
+                superseded = c.superseded.ages_ms().len(),
+            )
+            .entered();
+        }
     }
 }
 
@@ -1018,25 +1470,50 @@ fn log_quiet(since: &mut Vec<Instant>, closed: &mut [Closed], now: Instant) {
     }
 }
 
+/// The clocks of one origin's `pending` that a batch makes visible: its
+/// `deliveries`, written under `traces`, received at `received_at`.
+fn close_batch(
+    pending: &mut Vec<Pending>,
+    deliveries: &[(String, Observable)],
+    traces: &[&str],
+    received_at: Instant,
+    now: Instant,
+) -> Vec<Closed> {
+    let offered = offered(pending, deliveries, traces);
+    close_received(pending, &offered, traces, received_at, now)
+}
+
+/// Whether a batch written under `traces` carries `p`'s interaction: its own
+/// trace or the trace of the pass that read its commit. A clock without an
+/// interaction, or a batch without a trace, cannot tell, so it carries.
+fn carried(p: &Pending, traces: &[&str]) -> bool {
+    traces.is_empty()
+        || p.interaction.as_ref().is_none_or(|i| {
+            traces.contains(&i.trace_id.as_str())
+                || i.pass_trace.as_deref().is_some_and(|t| traces.contains(&t))
+        })
+}
+
 /// [`close_delivered`] over the clocks dispatched BEFORE the batch was
 /// received.
 ///
 /// A delivered row that carries no `WriteSeq` names no op instance, so
-/// `close_delivered` gives it to the newest pending clock on its target. A
-/// clock dispatched after the batch was received is newer than anything the
-/// batch can carry: the batch would close it and report a latency too short to
-/// be true. The second `LiveData` subscriber of one source, which delivers the
-/// same rows again, is the same case.
+/// `close_delivered` gives it to the newest pending clock on its target that
+/// the batch carries. A clock dispatched after the batch was received is newer
+/// than anything the batch can carry: the batch would close it and report a
+/// latency too short to be true. The second `LiveData` subscriber of one
+/// source, which delivers the same rows again, is the same case.
 fn close_received<S: AsRef<str>>(
     pending: &mut Vec<Pending>,
     deliveries: &[(S, Observable)],
+    traces: &[&str],
     received_at: Instant,
     now: Instant,
 ) -> Vec<Closed> {
     let (mut eligible, dispatched_after): (Vec<Pending>, Vec<Pending>) = std::mem::take(pending)
         .into_iter()
         .partition(|p| p.t0 <= received_at);
-    let mut closed = close_delivered(&mut eligible, deliveries, now);
+    let mut closed = close_delivered(&mut eligible, deliveries, traces, now);
     eligible.extend(dispatched_after);
     for c in &mut closed {
         c.backlog = eligible.len();
@@ -1061,6 +1538,10 @@ fn close_received<S: AsRef<str>>(
 /// is neither closed nor superseded by them — and a write on a page ignores the
 /// page's focus-root rows.
 ///
+/// A clock wins without its own token only when the batch carries it
+/// ([`carried`]): a row another interaction's pass wrote says nothing about an
+/// op still in flight.
+///
 /// Per (target, kind) present in the batch:
 /// 1. **Exact op-instance match** — if the batch delivered a `WriteSeq` equal
 ///    to some pending entry's token, that entry is the winner (the newest such
@@ -1082,14 +1563,15 @@ fn close_received<S: AsRef<str>>(
 fn close_delivered<S: AsRef<str>>(
     pending: &mut Vec<Pending>,
     deliveries: &[(S, Observable)],
+    traces: &[&str],
     now: Instant,
 ) -> Vec<Closed> {
-    let mut by_target: HashMap<(&str, Kind), (Vec<WriteSeq>, bool)> = HashMap::new();
+    let mut by_target: HashMap<(&str, Kind), (Vec<Token>, bool)> = HashMap::new();
     for (id, observable) in deliveries {
         let entry = by_target
             .entry((id.as_ref(), observable.kind()))
             .or_insert((Vec::new(), false));
-        match observable.seq() {
+        match observable.token() {
             Some(s) => entry.0.push(s),
             None => entry.1 = true,
         }
@@ -1103,7 +1585,7 @@ fn close_delivered<S: AsRef<str>>(
             if p.target != target || p.observable.kind() != kind {
                 continue;
             }
-            let matches = p.observable.seq().is_some_and(|s| seqs.contains(&s));
+            let matches = p.observable.token().is_some_and(|s| seqs.contains(&s));
             if matches && winner.is_none_or(|w| p.t0 > pending[w].t0) {
                 winner = Some(i);
             }
@@ -1112,7 +1594,7 @@ fn close_delivered<S: AsRef<str>>(
         if winner.is_none() {
             let mut newest: Option<usize> = None;
             for (i, p) in pending.iter().enumerate() {
-                if p.target != target || p.observable.kind() != kind {
+                if p.target != target || p.observable.kind() != kind || !carried(p, traces) {
                     continue;
                 }
                 if newest.is_none_or(|w| p.t0 > pending[w].t0) {
@@ -1129,7 +1611,7 @@ fn close_delivered<S: AsRef<str>>(
             // row (rule 2), which is what keeps a stale no-op re-commit from
             // stealing.
             if let Some(i) = newest {
-                if has_tokenless || pending[i].observable.seq().is_none() {
+                if has_tokenless || pending[i].observable.token().is_none() {
                     winner = Some(i);
                 }
             }
@@ -1161,6 +1643,7 @@ fn close_delivered<S: AsRef<str>>(
             contended: pending[winner].contended,
             superseded,
             quiet: QuietBatches::default(),
+            span: pending[winner].interaction.as_ref().map(|i| i.span.clone()),
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
