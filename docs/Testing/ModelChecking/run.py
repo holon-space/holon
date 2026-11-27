@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every write-back and settle spec with TLC, and the Quint model.
+"""Check every write-back, settle and work-runtime spec with TLC, and the Quint model.
 
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR]
 
@@ -49,6 +49,23 @@ EXPECTED = {
     "SettleWake_fixed": set(),
     "SettleWake_nowake": {"SettleReturns"},
     "SettleWake_late": {"SettleReturns"},
+}
+# work-runtime config -> property -> (TLC kind, whether TLC must find it
+# violated). WorkRuntimeNet.tla is generated from the net file; every
+# property that holds has a witness row that must be violated.
+WORK_RUNTIME = {
+    "WorkRuntime_exec": {
+        "AtMostPoolJobs": ("INVARIANT", False),
+        "NotAllSlotsBusy": ("INVARIANT", True),
+        "NeverJobAndWaiting": ("INVARIANT", True),
+        "SlotsConserved": ("INVARIANT", True),
+        "JobEndReturnsSlot": ("PROPERTY", True),
+        "NoJobEnds": ("PROPERTY", True),
+    },
+    "WorkRuntime_l0": {
+        "NoJobWhileStarting": ("INVARIANT", False),
+        "JobEndReturnsSlot": ("PROPERTY", False),
+    },
 }
 # specs whose violating returns windows.py counts by pipeline stage
 WINDOWS = ["Writeback_prefix", "Writeback_main"]
@@ -106,7 +123,7 @@ def number(pattern, text, log):
     return int(found[-1].replace(",", ""))
 
 
-def run_tlc(jar, spec, prop, out, extra=(), name=None):
+def run_tlc(jar, spec, prop, out, extra=(), name=None, kind=None):
     """TLC 1.7.4 reads a config only from the spec's own folder, so the specs
     are copied next to the generated config. prop None adds no property to
     the config."""
@@ -117,7 +134,7 @@ def run_tlc(jar, spec, prop, out, extra=(), name=None):
         (specs / tla.name).write_text(tla.read_text())
     base = (HERE / f"{spec}.cfg").read_text()
     name = name or prop or "graph"
-    kind = "INVARIANT" if prop == INVARIANT else "PROPERTY"
+    kind = kind or ("INVARIANT" if prop == INVARIANT else "PROPERTY")
     cfg = f"{spec}-{name}.cfg"
     (specs / cfg).write_text(f"{base}{kind} {prop}\n" if prop else base)
     log = out / f"{spec}.{name}.log"
@@ -159,6 +176,32 @@ def check_tlc(jar, out, numbers):
             print(f"{key}: {numbers[f'{key}.result']}, {numbers[f'{key}.distinct_states']} distinct states, "
                   f"{numbers[f'{key}.seconds']} s, log {log}", flush=True)
             if violated != (prop in expected):
+                mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
+    return mismatches
+
+
+def check_work_runtime(jar, out, numbers):
+    mismatches = []
+    for spec, props in WORK_RUNTIME.items():
+        for prop, (kind, expect_violated) in props.items():
+            code, log, seconds = run_tlc(jar, spec, prop, out, kind=kind)
+            text = log.read_text()
+            violation_code = TLC_SAFETY if kind == "INVARIANT" else TLC_LIVENESS
+            if code == TLC_HOLDS and "No error has been found" in text:
+                violated = False
+            elif code == violation_code and f"{prop} is violated" in text:
+                violated = True
+            else:
+                raise ToolError(f"{log}: TLC exit {code} without a verdict")
+            key = f"{spec}.{prop}"
+            numbers[f"{key}.result"] = "violated" if violated else "holds"
+            numbers[f"{key}.distinct_states"] = number(r"([\d,]+) distinct states found", text, log)
+            numbers[f"{key}.seconds"] = f"{seconds:.1f}"
+            if violated:
+                numbers[f"{key}.trace_states"] = number(r"\nState (\d+):", text, log)
+            print(f"{key}: {numbers[f'{key}.result']}, {numbers[f'{key}.distinct_states']} distinct states, "
+                  f"{numbers[f'{key}.seconds']} s, log {log}", flush=True)
+            if violated != expect_violated:
                 mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
     return mismatches
 
@@ -237,6 +280,7 @@ def main():
     try:
         mismatches = check_tlc(tla_jar(), out, numbers)
         mismatches += check_red_test_oracles(tla_jar(), out, numbers)
+        mismatches += check_work_runtime(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)
         mismatches += check_quint(quint_bin(), out, numbers)
     except Exception as e:
