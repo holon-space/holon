@@ -1,14 +1,14 @@
 # Petri-net layers: petri-net, petri-workflow, holon-net
 
-*Target design, ruled. The executor in `crates/holon-net/src/exec.rs` is one
-crate today; the migration section below carves it into these layers. Ratified
+*Target design, ruled. The executor is in `crates/petri-workflow/src/exec.rs`
+today; the migration section below carves it into these layers. Ratified
 semantics: [ADR 0032](../adr/0032-petri-net-execution-semantics.md) §8, §9.*
 
 The engine has three layers, like UDP, TCP and HTTP:
 
 | Layer | Crate | Knows |
 |---|---|---|
-| L0 | `petri-net` (planned) | an ordinary coloured Petri net |
+| L0 | `petri-net` | an ordinary coloured Petri net |
 | L1 | `petri-workflow` (planned) | workflow features: effects, retry, timers, undo, human tasks; nothing of Holon |
 | L2 | `holon-net` | Holon: values, the Loro store, Holon names |
 
@@ -192,7 +192,10 @@ Constraints:
 
 - `V = holon_pattern::Value`.
 - The Loro data-class store.
-- Holon names: `Answer.T`, `AskRow`, the `TypeHint` table.
+- The host functions of `Host<Value>`: the value encoder, text, probe
+  facts and the answer codec.
+- Holon names: `Answer.T`, `AskRow`, the `TypeHint` table, the `AskMeta`
+  side table that `Asks::asks` reads.
 - The uft lowering.
 - The mapping from header fields to holon-expr fields, so guards read
   `tries` (planned, not in the code) and `cause` (planned, not in the code).
@@ -255,7 +258,7 @@ Laws, checked as PBT invariants:
 - **Crash.** Drop the driver and every cache, rebuild from the marking: the
   observable run is the same. Today the executor PBTs check it with a shadow
   executor that crashes before every call; a drawn `Crash` action is planned.
-  Of the fields of `Executor` (crates/holon-net/src/exec.rs), `net` is the
+  Of the fields of `Executor` (crates/petri-workflow/src/exec.rs), `net` is the
   definition and `tokens` the marking. `crash()` rebuilds the caches
   `watchers`, `preferred`, `waiters`, `pending` and `pending_all`. Every other
   field is state outside the marking that later carve steps compile into
@@ -272,8 +275,15 @@ Laws, checked as PBT invariants:
 Not a strangler rewrite. Each step keeps the existing executor PBT green and
 adds the two laws as invariants.
 
-1. Give today's executor typed bookkeeping tokens. Then it no longer needs
-   Holon, and it moves to `petri-workflow`.
+1. Make today's executor generic over the token value `V` and move it to
+   `petri-workflow`. Done: `crates/petri-workflow` holds the executor, the
+   net file format, the loader and probes. The host passes a `Host<V>` of
+   plain functions in `NetDef` (the value encoder, text in and out of `V`,
+   the probe fact parser, and the answer codec with the keys of an answer
+   token), and an ask is declared by its places and transition. `holon-net`
+   keeps the faces at `V = Value`: type aliases, the host functions, the ask
+   names and `AskMeta` side table, and the `Asks` surface of the UI and MCP.
+   Typed bookkeeping tokens follow in this step.
 2. Carve the kernel under the executor into `petri-net`: marking, stores,
    arcs, atomic fire, level semantics with interleaving.
 3. Compile one feature at a time down to L0: timers, the effect lifecycle,
