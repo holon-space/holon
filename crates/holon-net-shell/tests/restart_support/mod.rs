@@ -597,8 +597,16 @@ pub fn host_main(dir: PathBuf, multi_thread: bool) {
     let mut flavor = Some(multi_thread);
     while let Some(multi_thread) = flavor {
         let rt = host_runtime(multi_thread);
-        flavor = rt.block_on(serve(&dir, &mut rx));
+        let (alive, all_ended) = std::sync::mpsc::channel::<()>();
+        flavor = rt.block_on(serve(&dir, &mut rx, alive));
         rt.shutdown_timeout(Duration::from_millis(500));
+        // A worker the shutdown timeout gave up on may still end a run; its
+        // `ended` must come before `rebooted`. Each run task holds a sender
+        // until it emitted or was dropped.
+        assert!(
+            all_ended.recv().is_err(),
+            "a run task sends nothing on its liveness channel"
+        );
         if flavor.is_some() {
             emit(json!({"ev": "rebooted"}));
         }
@@ -607,7 +615,11 @@ pub fn host_main(dir: PathBuf, multi_thread: bool) {
 
 /// Serves commands until stdin closes (`None`) or a `reboot` names the next
 /// runtime's flavor.
-async fn serve(dir: &Path, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) -> Option<bool> {
+async fn serve(
+    dir: &Path,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    alive: std::sync::mpsc::Sender<()>,
+) -> Option<bool> {
     let mut runner: Option<Arc<Runner>> = None;
     let mut left: Vec<Group> = Vec::new();
     let mut runs: BTreeMap<u64, tokio::task::JoinHandle<()>> = BTreeMap::new();
@@ -641,7 +653,9 @@ async fn serve(dir: &Path, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>)
                     cmd["transition"].as_str().expect("a transition"),
                     cmd["subject"].as_str().expect("a subject"),
                 );
+                let alive = alive.clone();
                 runs.insert(id, tokio::spawn(async move {
+                        let _alive = alive;
                         let result = runner.run(&effect, &req).await;
                         // Read at once: a group that dies only after the return is a finding.
                         let living = std::fs::read_to_string(ctl.with_extension("pgid"))

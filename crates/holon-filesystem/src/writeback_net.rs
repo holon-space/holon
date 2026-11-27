@@ -902,6 +902,8 @@ mod tests {
         use super::*;
 
         pub(super) const DOCS: [&str; 2] = ["doc:a", "doc:b"];
+        /// The tries of one disk read; after them it fails for good.
+        pub(super) const READ_TRIES: u32 = 3;
 
         #[derive(Debug, Clone, Copy)]
         pub(super) enum Outcome {
@@ -951,6 +953,10 @@ mod tests {
             ingest_failed: bool,
             /// The last write attempt failed retryably and no write ran since.
             write_retry_pending: bool,
+            /// The failed tries of the disk read of the last reported change;
+            /// at [`READ_TRIES`] its `DiskChanged` stays and inhibits every
+            /// catch-up until the file changes again.
+            read_failures: u32,
         }
 
         struct Model {
@@ -1056,6 +1062,13 @@ mod tests {
                         let subject = Subject::new(doc);
                         let read = self.fresh("h");
                         let seen = self.seen.get_mut(doc).unwrap();
+                        if &*req.transition == READ_DISK {
+                            seen.read_failures = match outcome {
+                                Outcome::Done => 0,
+                                Outcome::Retryable => seen.read_failures + 1,
+                                Outcome::Definite => READ_TRIES,
+                            };
+                        }
                         let result = match (outcome, &*req.transition) {
                             (Outcome::Done, CATCH_UP_INGEST) => {
                                 seen.ingest_failed = false;
@@ -1134,6 +1147,7 @@ mod tests {
                     let read = |place, field| token_field(&self.net, place, doc, field);
                     let write_can_land = write_running
                         || (seen.write_retry_pending
+                            && seen.read_failures < READ_TRIES
                             && read(ON_DISK, "hash") == read(BASE, "hash")
                             && read(AUTHORITY, "hash") != read(BASE, "authority"));
                     let owed = unsettled.iter().any(|d| d == doc);
@@ -1314,6 +1328,23 @@ mod tests {
                     StoreMoves(0),
                     Complete(11448191397739138975, Definite),
                 ],
+                // A write retry is pending over a file at its base after its
+                // ingest failed, while the disk read failed for good: its
+                // `DiskChanged` inhibits the write, which cannot land.
+                vec![
+                    DiskMoves(1),
+                    Complete(0, Done),
+                    Complete(0, Retryable),
+                    StoreMoves(0),
+                    DiskMoves(1),
+                    StoreReverts(0),
+                    Complete(556302317005511942, Retryable),
+                    Advance(97),
+                    Complete(0, Retryable),
+                    FileChanges(1),
+                    Complete(0, Definite),
+                    DiskReverts(1),
+                ],
             ];
             for steps in &fixed {
                 if let Err(e) = run(steps) {
@@ -1454,6 +1485,7 @@ mod tests {
 
         use super::stop::DOCS;
         use super::stop::Outcome;
+        use super::stop::READ_TRIES;
         use super::stop::Step;
         use super::stop::step;
         use super::*;
@@ -1853,9 +1885,6 @@ mod tests {
                 Ok(())
             }
         }
-
-        /// The tries the net gives one disk read.
-        const READ_TRIES: u32 = 3;
 
         fn doc_named(doc: &str) -> &'static str {
             DOCS.into_iter()

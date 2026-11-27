@@ -318,8 +318,10 @@ async fn wait_for_writeback(
         holon::di::StorageSelector::Turso => Some(injector.resolve::<BackendEngine>()),
     };
 
+    let clock = injector.resolve::<holon_api::InjectedClock>();
     let stage = std::sync::Mutex::new(Stage::SealingBacklog);
-    let settled = tokio::time::timeout(
+    let settled = holon_api::ClockExt::timeout(
+        &*clock.0,
         budget,
         writeback_settles(&idle, loro_sync.as_deref(), engine.as_deref(), &stage),
     )

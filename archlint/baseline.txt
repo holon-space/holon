@@ -5,16 +5,16 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 385 violation(s) across 10 rule(s).
+# Snapshot total: 378 violation(s) across 10 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
 #   fallback: 7
 #   frontend-raw-sql: 2
-#   loro_doc_escape: 17
+#   loro_doc_escape: 16
 #   no-underscore-params: 22
-#   ok: 4
-#   physical_time: 318
+#   ok: 3
+#   physical_time: 313
 #   raw_sql_in_frontend: 3
 #   sole_block_writer: 1
 
@@ -107,11 +107,6 @@ physical_time	crates/holon-app/src/integration_projection.rs	let read_at = std::
 physical_time	crates/holon-app/src/mcp_integrations.rs	let joined = match tokio::time::timeout(KEYCHAIN_SLOW, &mut resolving).await {
 physical_time	crates/holon-app/src/mcp_integrations.rs	match tokio::time::timeout(CONNECT_SLOW, &mut connect).await {
 physical_time	crates/holon-app/src/remote_list.rs	serde_json::json!(chrono::Utc::now().timestamp_millis()),
-physical_time	crates/holon-app/src/session.rs	if tokio::time::Instant::now() >= deadline {
-physical_time	crates/holon-app/src/session.rs	let deadline = tokio::time::Instant::now() + budget;
-physical_time	crates/holon-app/src/session.rs	let mut quiet_since = tokio::time::Instant::now();
-physical_time	crates/holon-app/src/session.rs	quiet_since = tokio::time::Instant::now();
-physical_time	crates/holon-app/src/session.rs	tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 physical_time	crates/holon-app/src/vault_lock.rs	"started_at": chrono::Utc::now().to_rfc3339(),
 physical_time	crates/holon-connections/src/provider.rs	chrono::Utc::now().timestamp_millis()
 physical_time	crates/holon-core/src/operation_log.rs	let now = holon_api::clock::now_millis();

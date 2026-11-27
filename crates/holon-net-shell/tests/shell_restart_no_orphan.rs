@@ -1952,6 +1952,24 @@ fn fixed_scenarios() -> Vec<(&'static str, Scenario)> {
             ]),
         ),
         (
+            "a runtime shut down while its timed run records its group",
+            Scenario {
+                multi: true,
+                ops: vec![Op::Reboot {
+                    multi: false,
+                    run: Some((
+                        ChildPlan {
+                            timeout_ms: Some(1343),
+                            code: 240,
+                            transition: "cjo".to_owned(),
+                            ..plan(Member::None, Leader::Reads)
+                        },
+                        1,
+                    )),
+                }],
+            },
+        ),
+        (
             "a run whose leader the host reaps first",
             one(vec![
                 Op::Run(first(), plan(Member::None, Leader::Reads)),
