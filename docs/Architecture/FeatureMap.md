@@ -407,6 +407,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `no-proptest-regressions-seed-file-under-load`
 - `open-tab-panel-keeps-empty-cursor-subtree`
 - `org-deep-text-ratio-under-load`
+- `org-render-not-fixed-point-rationale-read-back`
+- `org-render-not-fixed-point-rationale-read-back-timeout`
 - `org-writeback-stream-dies-at-delete-document`
 - `owner-heavy-indent-join-receiver-not-converged`
 - `pairing-conflict-badge-conflict-copy-content-unpainted`

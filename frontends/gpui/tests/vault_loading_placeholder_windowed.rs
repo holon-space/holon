@@ -13,7 +13,9 @@
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe), and the failure case arms a process-global crash point.
 
+use std::process::Command;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -29,6 +31,7 @@ use holon_integration_tests::test_environment::TestEnvironmentBuilder;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
 
 const LOADING: &str = "Loading vault…";
 const FAILED: &str = "The vault could not be loaded";
@@ -65,12 +68,46 @@ fn headless_app() -> HeadlessAppContext {
     })
 }
 
+/// Runs `step` and returns its result. If it has not returned after
+/// [`HANG_DEADLINE`], prints the stacks of every thread and aborts: a
+/// deadlocked step cannot fail itself, and a bare nextest TIMEOUT names
+/// nothing.
+fn guarded<R>(what: &str, step: impl FnOnce() -> R) -> R {
+    let (returned, watch) = mpsc::channel::<()>();
+    let what = what.to_string();
+    let watchdog = std::thread::spawn(move || {
+        if watch.recv_timeout(HANG_DEADLINE) == Err(mpsc::RecvTimeoutError::Timeout) {
+            eprintln!(
+                "step `{what}` did not return within {HANG_DEADLINE:?}; stacks of every thread:"
+            );
+            match Command::new("sample")
+                .args([&std::process::id().to_string(), "1", "-file", "/dev/stderr"])
+                .output()
+            {
+                Ok(out) => eprintln!(
+                    "sample exited {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(e) => eprintln!("`sample` could not run: {e}"),
+            }
+            std::process::abort();
+        }
+    });
+    let result = step();
+    drop(returned);
+    watchdog.join().expect("the hang watchdog panicked");
+    result
+}
+
 fn pump(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, runtime: &tokio::runtime::Runtime) {
-    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-    app.run_until_parked();
-    app.advance_clock(Duration::from_secs(1));
-    app.run_until_parked();
-    bounds.flush();
+    guarded("pump", || {
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        app.run_until_parked();
+        app.advance_clock(Duration::from_secs(1));
+        app.run_until_parked();
+        bounds.flush();
+    });
 }
 
 const PUMP_DEADLINE: Duration = Duration::from_secs(30);
@@ -127,8 +164,10 @@ fn launch(
 fn shut_down(app: HeadlessAppContext, rebind: holon_gpui::RebindHandle) {
     let mut app = app;
     drop(rebind);
-    app.update(|cx| cx.shutdown());
-    app.run_until_parked();
+    guarded("shut_down", || {
+        app.update(|cx| cx.shutdown());
+        app.run_until_parked();
+    });
     std::mem::forget(app);
 }
 
