@@ -144,10 +144,12 @@ pub enum Class {
 /// Reads the marking through a [`Reader`], so every read lands in the trace.
 /// A closure (ruling 1.a), so a runtime IR lowers like Rust code. It reads
 /// nothing else: the executor decides it again only when a row it read changes.
-pub type Read = Arc<dyn Fn(&mut Reader<'_>, &Subject) -> Option<Content> + Send + Sync>;
+pub type Read<V = Value> =
+    Arc<dyn Fn(&mut Reader<'_, V>, &Subject) -> Option<Record<V>> + Send + Sync>;
 
 /// A pure firing: its outputs from its bound input, or a definite failure.
-pub type PureBody = Arc<dyn Fn(&Subject, &Content) -> Result<Vec<Output>, Cause> + Send + Sync>;
+pub type PureBody<V = Value> =
+    Arc<dyn Fn(&Subject, &Record<V>) -> Result<Vec<Output<V>>, Cause> + Send + Sync>;
 
 /// The places and transition of an ask on a work transition: the derived
 /// `offer` of the rows a user may answer, the manual `answer` transition that
@@ -195,12 +197,12 @@ impl<V> Copy for AnswerCodec<V> {}
 pub const FAILURE_CAUSE_FIELD: &str = "cause";
 
 #[derive(Clone)]
-pub enum PlaceKind {
+pub enum PlaceKind<V = Value> {
     /// `candidate`: the place declares an apply transition, whose input this
     /// candidate place is (NET-cand.a).
     Stored { candidate: Option<Place> },
     /// No identity or version: a read of it traces its sources' content.
-    Derived(Read),
+    Derived(Read<V>),
 }
 
 /// How many tokens one (place, subject) row holds (REV2-cand.c), and what a
@@ -221,9 +223,9 @@ pub enum Capacity {
 }
 
 #[derive(Clone)]
-pub struct PlaceDef {
+pub struct PlaceDef<V = Value> {
     pub class: Class,
-    pub kind: PlaceKind,
+    pub kind: PlaceKind<V>,
     pub capacity: Capacity,
     /// `N` interchangeable tokens shared by every subject, on a
     /// [`Capacity::Fifo`] place.
@@ -231,14 +233,14 @@ pub struct PlaceDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Output {
+pub struct Output<V = Value> {
     pub place: Place,
     pub subject: Subject,
-    pub content: Content,
+    pub content: Record<V>,
 }
 
-impl Output {
-    pub fn new(place: &str, subject: &Subject, content: Content) -> Self {
+impl<V: Clone + PartialEq + fmt::Debug> Output<V> {
+    pub fn new(place: &str, subject: &Subject, content: Record<V>) -> Self {
         Self {
             place: Place::new(place),
             subject: subject.clone(),
@@ -288,14 +290,14 @@ pub enum Receiver {
 }
 
 #[derive(Clone)]
-pub enum Body {
-    Pure(PureBody),
+pub enum Body<V = Value> {
+    Pure(PureBody<V>),
     Effectful(Receiver),
 }
 
-impl Body {
+impl<V: Clone + PartialEq + fmt::Debug> Body<V> {
     pub fn pure(
-        body: impl Fn(&Subject, &Content) -> Result<Vec<Output>, Cause> + Send + Sync + 'static,
+        body: impl Fn(&Subject, &Record<V>) -> Result<Vec<Output<V>>, Cause> + Send + Sync + 'static,
     ) -> Self {
         Self::Pure(Arc::new(body))
     }
@@ -309,7 +311,7 @@ pub struct Retry {
 }
 
 #[derive(Clone)]
-pub struct TransitionDef {
+pub struct TransitionDef<V = Value> {
     pub name: Arc<str>,
     pub trigger: Trigger,
     pub consumes: Vec<Place>,
@@ -322,8 +324,8 @@ pub struct TransitionDef {
     pub priority: i32,
     /// The guard and the binding in one: `None` is a false guard, `Some` is
     /// the input the body sees. Its reads are the firing's read trace.
-    pub bind: Read,
-    pub body: Body,
+    pub bind: Read<V>,
+    pub body: Body<V>,
     /// Outputs into these places are facts about the outside world: they
     /// commit even when the inputs are stale.
     pub facts: Vec<Place>,
@@ -337,8 +339,8 @@ pub struct TransitionDef {
     pub abandon: Option<Duration>,
 }
 
-impl TransitionDef {
-    pub fn new(name: &str, trigger: Trigger, bind: Read, body: Body) -> Self {
+impl<V: Clone + PartialEq + fmt::Debug> TransitionDef<V> {
+    pub fn new(name: &str, trigger: Trigger, bind: Read<V>, body: Body<V>) -> Self {
         Self {
             name: Arc::from(name),
             trigger,
@@ -449,10 +451,10 @@ impl<V> Copy for Host<V> {}
 
 /// A runtime net, built in Rust. [`Executor::new`] checks it.
 #[derive(Clone)]
-pub struct NetDef {
-    host: Host<Value>,
-    places: BTreeMap<Place, PlaceDef>,
-    transitions: Vec<TransitionDef>,
+pub struct NetDef<V = Value> {
+    host: Host<V>,
+    places: BTreeMap<Place, PlaceDef<V>>,
+    transitions: Vec<TransitionDef<V>>,
     /// Keyed by the work transition.
     asks: BTreeMap<Arc<str>, Ask>,
     /// The places [`NetDef::check`] declares for the executor's own markers.
@@ -462,8 +464,8 @@ pub struct NetDef {
     last_now: Duration,
 }
 
-impl NetDef {
-    pub fn new(host: Host<Value>) -> Self {
+impl<V: Clone + PartialEq + fmt::Debug> NetDef<V> {
+    pub fn new(host: Host<V>) -> Self {
         Self {
             host,
             places: BTreeMap::new(),
@@ -543,7 +545,7 @@ impl NetDef {
         self
     }
 
-    pub fn derived(mut self, name: &str, derive: Read) -> Self {
+    pub fn derived(mut self, name: &str, derive: Read<V>) -> Self {
         self.places.insert(
             Place::new(name),
             PlaceDef {
@@ -556,7 +558,7 @@ impl NetDef {
         self
     }
 
-    pub fn transition(mut self, t: TransitionDef) -> Self {
+    pub fn transition(mut self, t: TransitionDef<V>) -> Self {
         self.transitions.push(t);
         self
     }
@@ -585,17 +587,17 @@ impl NetDef {
             .map(|(w, _)| w.clone())
     }
 
-    fn place_def(&self, place: &str) -> &PlaceDef {
+    fn place_def(&self, place: &str) -> &PlaceDef<V> {
         self.places
             .get(place)
             .unwrap_or_else(|| panic!("the net reads place '{place}', which it does not declare"))
     }
 
-    fn transition_def(&self, name: &str) -> &TransitionDef {
+    fn transition_def(&self, name: &str) -> &TransitionDef<V> {
         self.find_transition(name).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    fn find_transition(&self, name: &str) -> Result<&TransitionDef, UnknownTransition> {
+    fn find_transition(&self, name: &str) -> Result<&TransitionDef<V>, UnknownTransition> {
         self.transitions
             .iter()
             .find(|t| &*t.name == name)
@@ -617,7 +619,7 @@ impl NetDef {
     /// The answer field an `Answered` or `Expired` token in `place` lacks:
     /// the work's firing reads the answer id and the value, the lowering the
     /// seen hash, and the answer's settlement the expiry reason.
-    fn missing_answer_field(&self, place: &str, content: &Content) -> Option<&'static str> {
+    fn missing_answer_field(&self, place: &str, content: &Record<V>) -> Option<&'static str> {
         if self.is_answered(place) {
             (self.host.answer.parse)(content.clone()).err()
         } else if self.asks.values().any(|a| *a.expired == *place) {
@@ -629,7 +631,7 @@ impl NetDef {
 
     /// A token for net data in `place`; an answer must have passed
     /// [`Self::missing_answer_field`].
-    fn payload(&self, place: &str, content: Content) -> Payload {
+    fn payload(&self, place: &str, content: Record<V>) -> Payload<V> {
         if self.is_answered(place) {
             Payload::Answered((self.host.answer.parse)(content).expect("checked at the write"))
         } else {
@@ -639,7 +641,7 @@ impl NetDef {
 
     /// Why a firing may not put `outputs`: a place an outside write may not
     /// write either.
-    fn refused_output(&self, outputs: &[Output]) -> Option<ExecError> {
+    fn refused_output(&self, outputs: &[Output<V>]) -> Option<ExecError> {
         outputs
             .iter()
             .find_map(|o| match self.outside_place(&o.place) {
@@ -783,7 +785,7 @@ impl NetDef {
                 .on_failure
                 .iter()
                 .chain(&t.on_timeout)
-                .find_map(|p| Some((p, self.missing_answer_field(p, &Content::new())?)))
+                .find_map(|p| Some((p, self.missing_answer_field(p, &Record::<V>::new())?)))
             {
                 return Err(LoadError::PortLacksAnswerField {
                     transition: t.name.to_string(),
@@ -832,7 +834,7 @@ impl NetDef {
                     .then_some(())
                     .ok_or_else(|| name.to_string())
             };
-            let transition = |name: &str, ok: &dyn Fn(&TransitionDef) -> bool| {
+            let transition = |name: &str, ok: &dyn Fn(&TransitionDef<V>) -> bool| {
                 self.transitions
                     .iter()
                     .any(|t| *t.name == *name && ok(t))
@@ -929,7 +931,7 @@ pub enum LoadError {
     #[error("'{0}' has a Keyed receiver but no retry count bound")]
     KeyedWithoutCountBound(String),
     #[error(
-        "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered and Expired, a manual Answer, and a work that consumes Answered"
+        "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered<V> and Expired, a manual Answer, and a work that consumes Answered"
     )]
     IncompleteAsk { work: String, missing: String },
     #[error(
@@ -1015,12 +1017,12 @@ pub struct Answered<V = Value> {
 
 /// A field of an `answered` token as a reader sees it: the user value only
 /// when `show_input`.
-fn answered_field(
-    host: &Host<Value>,
-    a: &Answered,
+fn answered_field<V: Clone + PartialEq + fmt::Debug>(
+    host: &Host<V>,
+    a: &Answered<V>,
     field: &str,
     show_input: bool,
-) -> Option<Value> {
+) -> Option<V> {
     let keys = host.answer.keys;
     if field == keys.id {
         Some((host.text)(&a.id))
@@ -1034,7 +1036,7 @@ fn answered_field(
 /// How far an answer got: undone, its work occurrence and that one's
 /// settlement (`None` while it runs), its `expired` token, or waiting.
 #[derive(Debug)]
-pub enum AnswerProgress<'a> {
+pub enum AnswerProgress<'a, V = Value> {
     Undone,
     Work {
         occurrence: OccurrenceId,
@@ -1042,7 +1044,7 @@ pub enum AnswerProgress<'a> {
     },
     Expired {
         place: &'a Place,
-        record: &'a Content,
+        record: &'a Record<V>,
     },
     Waiting,
 }
@@ -1054,7 +1056,7 @@ pub struct Candidate<V = Value> {
     /// The fields the firing read of the row, `None` when it read none.
     pub base: Option<Record<Option<V>>>,
     pub output: Record<V>,
-    pub trace: Trace,
+    pub trace: Trace<V>,
 }
 
 impl<V: fmt::Debug> Token<V> {
@@ -1067,8 +1069,8 @@ impl<V: fmt::Debug> Token<V> {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
-struct Slot {
+#[derive(Debug, PartialEq)]
+struct Slot<V = Value> {
     /// Changes only when a record or an outside write commits a change.
     version: u64,
     /// The transition whose commit set the current version, `None` for a
@@ -1076,12 +1078,23 @@ struct Slot {
     /// row from a later writer (D191-rewritten.a).
     writer: Option<Arc<str>>,
     /// Oldest first; a [`Capacity::Single`] place holds at most one.
-    tokens: VecDeque<Token>,
+    tokens: VecDeque<Token<V>>,
     /// Only the hidden-reservation twin sets it: a real [`Executor::start`]
     /// takes the token out, so no second attempt can bind it and no two
     /// attempts ever hold one slot. That is why
     /// [`Executor::commit_consumption`] needs no owner check.
     reserved: bool,
+}
+
+impl<V> Default for Slot<V> {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            writer: None,
+            tokens: VecDeque::new(),
+            reserved: false,
+        }
+    }
 }
 
 /// Who a commit is by: a transition, or `None` for a write from outside the
@@ -1094,9 +1107,9 @@ struct PoolFull;
 
 /// The owned marking: a token queue and a version per (place, subject). Only
 /// a [`Capacity::Fifo`] place ever holds more than one token.
-#[derive(Debug, Default, PartialEq)]
-pub struct Tokens {
-    slots: BTreeMap<Place, BTreeMap<Subject, Slot>>,
+#[derive(Debug, PartialEq)]
+pub struct Tokens<V = Value> {
+    slots: BTreeMap<Place, BTreeMap<Subject, Slot<V>>>,
     next_id: u64,
     fifo: BTreeSet<Place>,
     /// Pool places and their size: one shared row, whatever the subject.
@@ -1107,14 +1120,27 @@ pub struct Tokens {
     touched: BTreeSet<(Place, Subject)>,
 }
 
-impl Tokens {
+impl<V> Default for Tokens<V> {
+    fn default() -> Self {
+        Self {
+            slots: BTreeMap::new(),
+            next_id: 0,
+            fifo: BTreeSet::new(),
+            pools: BTreeMap::new(),
+            lent: BTreeMap::new(),
+            touched: BTreeSet::new(),
+        }
+    }
+}
+
+impl<V: Clone + PartialEq + fmt::Debug> Tokens<V> {
     /// The oldest token: the one a firing binds and consumes (REV2-cand.c).
-    pub fn token(&self, place: &str, subject: &str) -> Option<&Token> {
+    pub fn token(&self, place: &str, subject: &str) -> Option<&Token<V>> {
         self.slot(place, subject).and_then(|s| s.tokens.front())
     }
 
     /// Every token the row holds, oldest first.
-    pub fn row(&self, place: &str, subject: &str) -> impl Iterator<Item = &Token> {
+    pub fn row(&self, place: &str, subject: &str) -> impl Iterator<Item = &Token<V>> {
         self.slot(place, subject)
             .into_iter()
             .flat_map(|s| &s.tokens)
@@ -1154,7 +1180,7 @@ impl Tokens {
         }
     }
 
-    fn slot(&self, place: &str, subject: &str) -> Option<&Slot> {
+    fn slot(&self, place: &str, subject: &str) -> Option<&Slot<V>> {
         self.slots
             .get(place)
             .and_then(|m| m.get(self.row_subject(place, subject)))
@@ -1168,7 +1194,7 @@ impl Tokens {
             .is_some_and(|s| !s.tokens.is_empty())
     }
 
-    fn slot_mut(&mut self, place: &Place, subject: &Subject) -> &mut Slot {
+    fn slot_mut(&mut self, place: &Place, subject: &Subject) -> &mut Slot<V> {
         let subject = Subject::new(self.row_subject(place, subject));
         self.touched.insert((place.clone(), subject.clone()));
         self.slots
@@ -1186,7 +1212,7 @@ impl Tokens {
         &mut self,
         place: &Place,
         subject: &Subject,
-        content: Content,
+        content: Record<V>,
         by: Writer,
     ) -> Result<(), PoolFull> {
         self.put_with(place, subject, Payload::Record(content), by)
@@ -1198,7 +1224,7 @@ impl Tokens {
         &mut self,
         place: &Place,
         subject: &Subject,
-        payload: Payload,
+        payload: Payload<V>,
         by: Writer,
     ) -> Result<(), PoolFull> {
         if let Some(&size) = self.pools.get(place) {
@@ -1235,7 +1261,7 @@ impl Tokens {
     /// An input goes back with no version change: into a FIFO at the front,
     /// where it was taken from. A single-token place that holds a token
     /// written meanwhile keeps it and the taken one is dropped.
-    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token) {
+    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token<V>) {
         self.unlend(place);
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
@@ -1277,7 +1303,7 @@ impl Tokens {
 
     /// Places an executor-owned token (Running, OutcomeUnknown): a move, not
     /// a commit, so no version changes.
-    fn mark_slot(&mut self, place: &Place, subject: &Subject, payload: Option<Payload>) {
+    fn mark_slot(&mut self, place: &Place, subject: &Subject, payload: Option<Payload<V>>) {
         assert!(
             !matches!(payload, Some(Payload::Record(_))),
             "{place} of {subject} is an executor place and holds no record"
@@ -1296,9 +1322,9 @@ impl Tokens {
 }
 
 /// Everything a firing's enabledness check read, captured once.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Trace {
-    rows: BTreeMap<(Place, Subject), RowRead>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trace<V = Value> {
+    rows: BTreeMap<(Place, Subject), RowRead<V>>,
     /// The first place read that the net does not declare.
     undeclared: Option<Place>,
     /// The derived rows being evaluated, outermost first.
@@ -1307,19 +1333,42 @@ pub struct Trace {
     cycle: Option<Vec<Place>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-struct RowRead {
+#[derive(Clone, Debug, PartialEq)]
+struct RowRead<V = Value> {
     version: u64,
     present: bool,
-    fields: BTreeMap<String, Option<Value>>,
+    fields: BTreeMap<String, Option<V>>,
     /// The header cause, when a reader asked for it.
     cause: Option<Option<Cause>>,
     /// The output of a candidate token, when a reader asked for it.
-    candidate: Option<Option<Content>>,
+    candidate: Option<Option<Record<V>>>,
 }
 
-impl Trace {
-    fn row(&mut self, tokens: &Tokens, place: &str, subject: &str) -> &mut RowRead {
+impl<V> Default for Trace<V> {
+    fn default() -> Self {
+        Self {
+            rows: BTreeMap::new(),
+            undeclared: None,
+            evaluating: Vec::new(),
+            cycle: None,
+        }
+    }
+}
+
+impl<V> Default for RowRead<V> {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            present: false,
+            fields: BTreeMap::new(),
+            cause: None,
+            candidate: None,
+        }
+    }
+}
+
+impl<V: Clone + PartialEq + fmt::Debug> Trace<V> {
+    fn row(&mut self, tokens: &Tokens<V>, place: &str, subject: &str) -> &mut RowRead<V> {
         self.rows
             .entry((Place::new(place), Subject::new(subject)))
             .or_insert_with(|| RowRead {
@@ -1335,7 +1384,7 @@ impl Trace {
     /// fields read (`None` for an absent field).
     pub fn rows(
         &self,
-    ) -> impl Iterator<Item = (&Place, &Subject, u64, &BTreeMap<String, Option<Value>>)> {
+    ) -> impl Iterator<Item = (&Place, &Subject, u64, &BTreeMap<String, Option<V>>)> {
         self.rows
             .iter()
             .map(|((p, s), r)| (p, s, r.version, &r.fields))
@@ -1343,16 +1392,16 @@ impl Trace {
 }
 
 /// The view a guard, a binding or a derived place reads the marking through.
-pub struct Reader<'a> {
-    net: &'a NetDef,
-    tokens: &'a Tokens,
-    trace: &'a mut Trace,
+pub struct Reader<'a, V = Value> {
+    net: &'a NetDef<V>,
+    tokens: &'a Tokens<V>,
+    trace: &'a mut Trace<V>,
     /// The value of an `Answered` token reads as absent.
     hide_value: bool,
 }
 
-impl Reader<'_> {
-    pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
+impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
+    pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<V> {
         let net = self.net;
         if !self.declared(place) {
             return None;
@@ -1425,7 +1474,7 @@ impl Reader<'_> {
 
     /// The output of the oldest token of a candidate place when it is a
     /// candidate; the apply transition reads it (NET-cand.a).
-    pub fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
+    pub fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Record<V>> {
         if !self.declared(place) {
             return None;
         }
@@ -1464,7 +1513,7 @@ impl Reader<'_> {
 
     /// A derived row that reads itself reads as empty and refuses what
     /// evaluated it.
-    fn derived(&mut self, place: &str, s: &Subject) -> Option<Content> {
+    fn derived(&mut self, place: &str, s: &Subject) -> Option<Record<V>> {
         let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
             panic!("'{place}' is no derived place");
         };
@@ -1498,7 +1547,7 @@ impl Reader<'_> {
 
     /// Runs `f` and returns, besides its result, the trace of what `f` read,
     /// e.g. for an [`ask_hash`] of a binding. The reads stay in this trace too.
-    pub fn traced<R>(&mut self, f: impl FnOnce(&mut Reader<'_>) -> R) -> (R, Trace) {
+    pub fn traced<R>(&mut self, f: impl FnOnce(&mut Reader<'_, V>) -> R) -> (R, Trace<V>) {
         let mut sub = Trace {
             evaluating: self.trace.evaluating.clone(),
             ..Trace::default()
@@ -1612,19 +1661,19 @@ pub enum Route {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct EffectRequest {
+pub struct EffectRequest<V = Value> {
     pub attempt: AttemptId,
     pub occurrence: OccurrenceId,
     pub transition: Arc<str>,
     pub subject: Subject,
-    pub input: Content,
+    pub input: Record<V>,
     /// A `StateProbe` check: answer `Done` when the goal holds.
     pub probe: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum EffectResult {
-    Done(Vec<Output>),
+pub enum EffectResult<V = Value> {
+    Done(Vec<Output<V>>),
     Failed(Cause),
     Unknown(Cause),
 }
@@ -1640,9 +1689,9 @@ pub enum Completion {
 }
 
 #[derive(Clone)]
-pub enum Resolution {
+pub enum Resolution<V = Value> {
     /// The effect happened: record these outputs.
-    Verify(Vec<Output>),
+    Verify(Vec<Output<V>>),
     /// Run the effect again under the same occurrence id.
     Retry,
     /// Discard the inputs.
@@ -1656,9 +1705,9 @@ pub struct Accepted(pub OccurrenceId);
 /// transitions it caused, run to quiescence.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use = "the effect requests must run"]
-pub struct Quiesced<T> {
+pub struct Quiesced<T, V = Value> {
     pub value: T,
-    pub requests: Vec<EffectRequest>,
+    pub requests: Vec<EffectRequest<V>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -2048,24 +2097,24 @@ impl fmt::Display for Condition {
 }
 
 #[derive(Clone)]
-struct Attempt {
+struct Attempt<V = Value> {
     occurrence: OccurrenceId,
     transition: Arc<str>,
     subject: Subject,
-    taken: Vec<(Place, Token)>,
-    trace: Trace,
-    input: Content,
+    taken: Vec<(Place, Token<V>)>,
+    trace: Trace<V>,
+    input: Record<V>,
     started: Duration,
     probe: bool,
 }
 
-pub struct Executor {
-    net: NetDef,
-    tokens: Tokens,
+pub struct Executor<V = Value> {
+    net: NetDef<V>,
+    tokens: Tokens<V>,
     marks: BTreeMap<(Arc<str>, Subject), Mark>,
     runs: BTreeMap<(Arc<str>, Subject), Run>,
-    in_flight: BTreeMap<AttemptId, Attempt>,
-    parked: BTreeMap<OccurrenceId, Attempt>,
+    in_flight: BTreeMap<AttemptId, Attempt<V>>,
+    parked: BTreeMap<OccurrenceId, Attempt<V>>,
     attempts: BTreeMap<OccurrenceId, BTreeMap<AttemptId, Seen>>,
     // ponytail: settled occurrences are kept forever; add retention with the
     // first long-running user.
@@ -2073,9 +2122,9 @@ pub struct Executor {
     /// Answer id → (work transition, subject).
     answers: BTreeMap<Arc<str>, (Arc<str>, Subject)>,
     undone: BTreeSet<Arc<str>>,
-    deltas: BTreeMap<OccurrenceId, Delta>,
+    deltas: BTreeMap<OccurrenceId, Delta<V>>,
     conditions: Vec<Condition>,
-    requests: Vec<EffectRequest>,
+    requests: Vec<EffectRequest<V>>,
     /// The auto transitions whose enabledness reads each place for the
     /// subject it decides (its inputs, inhibitors and run state).
     watchers: Watchers,
@@ -2104,7 +2153,7 @@ type Decision = (Arc<str>, Subject);
 
 /// What the commit of a work occurrence of an ask changed: the content before
 /// it and the version after it, per (place, subject).
-type Delta = BTreeMap<(Place, Subject), (Option<Payload>, u64)>;
+type Delta<V = Value> = BTreeMap<(Place, Subject), (Option<Payload<V>>, u64)>;
 
 /// The work occurrence of an answer (ruling 3.b): derived from the answer
 /// id, so a Keyed receiver dedups it and the settled chain finds it.
@@ -2123,11 +2172,11 @@ pub fn ask_hash(transition: &str, subject: &Subject, trace: &Trace) -> AskHash {
 }
 
 /// [`ask_hash`] with the host's value encoder.
-pub fn ask_hash_with(
-    encode: fn(&Value) -> Vec<u8>,
+pub fn ask_hash_with<V: Clone + PartialEq + fmt::Debug>(
+    encode: fn(&V) -> Vec<u8>,
     transition: &str,
     subject: &Subject,
-    trace: &Trace,
+    trace: &Trace<V>,
 ) -> AskHash {
     let mut h = blake3::Hasher::new();
     encode_str(&mut h, transition);
@@ -2147,7 +2196,7 @@ pub fn hash_from_text(text: &str) -> Result<AskHash, blake3::HexError> {
 
 /// Per place, the auto transitions that watch it; per transition, its
 /// preferred producers.
-fn caches(net: &NetDef) -> (Watchers, Vec<Vec<usize>>) {
+fn caches<V: Clone + PartialEq + fmt::Debug>(net: &NetDef<V>) -> (Watchers, Vec<Vec<usize>>) {
     let mut watchers = Watchers::new();
     for t in net
         .transitions
@@ -2187,8 +2236,8 @@ fn caches(net: &NetDef) -> (Watchers, Vec<Vec<usize>>) {
     (watchers, preferred)
 }
 
-impl Executor {
-    pub fn new(mut net: NetDef) -> Result<Self, LoadError> {
+impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
+    pub fn new(mut net: NetDef<V>) -> Result<Self, LoadError> {
         net.check()?;
         let exec = Self::on(net);
         exec.refuse_derived_cycles()?;
@@ -2196,7 +2245,7 @@ impl Executor {
     }
 
     /// The executor of a checked net, on its initial marking.
-    fn on(net: NetDef) -> Self {
+    fn on(net: NetDef<V>) -> Self {
         let fifo = net
             .places
             .iter()
@@ -2216,7 +2265,7 @@ impl Executor {
         for (place, size) in &pools {
             for _ in 0..*size {
                 tokens
-                    .put(place, &Subject::new(POOL_SUBJECT), Content::new(), None)
+                    .put(place, &Subject::new(POOL_SUBJECT), Record::<V>::new(), None)
                     .expect("an empty pool takes its size");
             }
         }
@@ -2318,11 +2367,11 @@ impl Executor {
         false
     }
 
-    pub fn host(&self) -> Host<Value> {
+    pub fn host(&self) -> Host<V> {
         self.net.host
     }
 
-    pub fn tokens(&self) -> &Tokens {
+    pub fn tokens(&self) -> &Tokens<V> {
         &self.tokens
     }
 
@@ -2462,9 +2511,9 @@ impl Executor {
         work: &str,
         subject: &str,
         id: &str,
-        value: Content,
+        value: Record<V>,
         now: Duration,
-    ) -> Result<Quiesced<()>, FireError> {
+    ) -> Result<Quiesced<(), V>, FireError> {
         self.advance::<FireError>(now)?;
         let Some(ask) = self.net.asks.get(work) else {
             return Err(UnknownTransition(work.to_string()).into());
@@ -2493,7 +2542,7 @@ impl Executor {
 
     /// How far the answer `id` got; `None` for an answer this executor
     /// never took.
-    pub fn answer_progress(&self, id: &str) -> Option<AnswerProgress<'_>> {
+    pub fn answer_progress(&self, id: &str) -> Option<AnswerProgress<'_, V>> {
         let (work, _) = self.answers.get(id)?;
         if self.undone.contains(id) {
             return Some(AnswerProgress::Undone);
@@ -2523,7 +2572,7 @@ impl Executor {
     }
 
     /// Evaluates the derived `place` for one subject, outside any firing.
-    pub fn derive(&self, place: &str, subject: &Subject) -> Result<Option<Content>, DeriveError> {
+    pub fn derive(&self, place: &str, subject: &Subject) -> Result<Option<Record<V>>, DeriveError> {
         self.derived_place(place)?;
         let mut trace = Trace::default();
         let row = self.reader(&mut trace).derived(place, subject);
@@ -2549,7 +2598,7 @@ impl Executor {
     }
 
     /// Evaluates the derived `place` for every subject a stored place holds.
-    pub fn derive_all(&self, place: &str) -> Result<Vec<(Subject, Content)>, DeriveError> {
+    pub fn derive_all(&self, place: &str) -> Result<Vec<(Subject, Record<V>)>, DeriveError> {
         self.derived_place(place)?;
         let subjects: BTreeSet<Subject> = self
             .net
@@ -2578,7 +2627,7 @@ impl Executor {
         &mut self,
         answer: &OccurrenceId,
         now: Duration,
-    ) -> Result<Quiesced<Undone>, UndoError> {
+    ) -> Result<Quiesced<Undone, V>, UndoError> {
         self.advance::<UndoError>(now)?;
         if !self.occurrences.contains_key(answer) {
             return Err(UndoError::UnknownOccurrence(answer.clone()));
@@ -2663,9 +2712,9 @@ impl Executor {
         &mut self,
         place: &str,
         subject: &str,
-        content: Content,
+        content: Record<V>,
         now: Duration,
-    ) -> Result<Quiesced<()>, ExecError> {
+    ) -> Result<Quiesced<(), V>, ExecError> {
         self.advance::<ExecError>(now)?;
         self.net.outside_place(place)?;
         if let Some(field) = self.net.missing_answer_field(place, &content) {
@@ -2690,7 +2739,7 @@ impl Executor {
         place: &str,
         subject: &str,
         now: Duration,
-    ) -> Result<Quiesced<()>, ExecError> {
+    ) -> Result<Quiesced<(), V>, ExecError> {
         self.advance::<ExecError>(now)?;
         self.net.outside_place(place)?;
         if self.tokens.token(place, subject).is_none() {
@@ -2715,18 +2764,18 @@ impl Executor {
 
     /// Runs timers due at `now`, then the auto transitions to quiescence.
     /// Returns the effects to run.
-    pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
+    pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest<V>>, ExecError> {
         self.advance::<ExecError>(now)?;
         self.timers(now);
         self.quiesce(now).map_err(ExecError::NoQuiescence)
     }
 
-    fn quiesced<T>(&mut self, value: T, now: Duration) -> Result<Quiesced<T>, ExecError> {
+    fn quiesced<T>(&mut self, value: T, now: Duration) -> Result<Quiesced<T, V>, ExecError> {
         let requests = self.quiesce(now).map_err(ExecError::NoQuiescence)?;
         Ok(Quiesced { value, requests })
     }
 
-    fn takes_failure_port(&self, t: &TransitionDef) -> bool {
+    fn takes_failure_port(&self, t: &TransitionDef<V>) -> bool {
         self.net
             .transitions
             .iter()
@@ -2736,7 +2785,7 @@ impl Executor {
 
     /// Fires every enabled auto transition until none is enabled, and takes
     /// the effect requests; `Err` holds the rounds run. It fires no timer.
-    fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
+    fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest<V>>, usize> {
         if self.twin(Twin::NoQuiescence) {
             return Ok(std::mem::take(&mut self.requests));
         }
@@ -2919,9 +2968,9 @@ impl Executor {
         transition: &str,
         subject: &str,
         occurrence: OccurrenceId,
-        value: Content,
+        value: Record<V>,
         now: Duration,
-    ) -> Result<Quiesced<Accepted>, FireError> {
+    ) -> Result<Quiesced<Accepted, V>, FireError> {
         self.advance::<FireError>(now)?;
         let t = self.net.find_transition(transition)?;
         if t.trigger != Trigger::Manual {
@@ -2981,9 +3030,9 @@ impl Executor {
     pub fn complete(
         &mut self,
         attempt: AttemptId,
-        result: EffectResult,
+        result: EffectResult<V>,
         now: Duration,
-    ) -> Result<Quiesced<Completion>, ExecError> {
+    ) -> Result<Quiesced<Completion, V>, ExecError> {
         self.advance::<ExecError>(now)?;
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
@@ -3012,8 +3061,8 @@ impl Executor {
         occurrence: &OccurrenceId,
         id: AttemptId,
         seen: Seen,
-        live: Option<Attempt>,
-        result: EffectResult,
+        live: Option<Attempt<V>>,
+        result: EffectResult<V>,
         now: Duration,
     ) -> Completion {
         let (seen, result) = match result {
@@ -3105,7 +3154,7 @@ impl Executor {
 
     /// The new attempt the receiver kind runs after an unknown outcome:
     /// `Some(probe)`, or `None` when the outcome parks.
-    fn continuation(&mut self, a: &Attempt) -> Option<bool> {
+    fn continuation(&mut self, a: &Attempt<V>) -> Option<bool> {
         let t = self.net.transition_def(&a.transition);
         let Body::Effectful(receiver) = &t.body else {
             panic!("a pure firing of '{}' has an unknown outcome", a.transition);
@@ -3130,7 +3179,7 @@ impl Executor {
 
     /// The attempt an occurrence settles with: the live one, else the parked
     /// one, else a copy of the one still in flight.
-    fn attempt_of(&mut self, occurrence: &OccurrenceId, live: Option<Attempt>) -> Attempt {
+    fn attempt_of(&mut self, occurrence: &OccurrenceId, live: Option<Attempt<V>>) -> Attempt<V> {
         if let Some(a) = live {
             return a;
         }
@@ -3147,7 +3196,7 @@ impl Executor {
     }
 
     /// Takes a parked occurrence out of [`OUTCOME_UNKNOWN`].
-    fn unpark(&mut self, occurrence: &OccurrenceId) -> Result<Attempt, ExecError> {
+    fn unpark(&mut self, occurrence: &OccurrenceId) -> Result<Attempt<V>, ExecError> {
         let a = self
             .parked
             .remove(occurrence)
@@ -3166,9 +3215,9 @@ impl Executor {
     pub fn resolve(
         &mut self,
         occurrence: &OccurrenceId,
-        resolution: Resolution,
+        resolution: Resolution<V>,
         now: Duration,
-    ) -> Result<Quiesced<()>, ExecError> {
+    ) -> Result<Quiesced<(), V>, ExecError> {
         self.advance::<ExecError>(now)?;
         if let (Resolution::Retry, Some(a)) = (&resolution, self.parked.get(occurrence))
             && self
@@ -3281,7 +3330,7 @@ impl Executor {
     }
 
     /// The subjects `t` may fire for.
-    fn subjects(&self, t: &TransitionDef) -> Vec<Subject> {
+    fn subjects(&self, t: &TransitionDef<V>) -> Vec<Subject> {
         let all = t
             .consumes
             .iter()
@@ -3293,7 +3342,7 @@ impl Executor {
 
     /// A firing that takes from a pool serves the subject with the oldest
     /// waiting token first.
-    fn in_pool_order(&self, t: &TransitionDef, subjects: BTreeSet<Subject>) -> Vec<Subject> {
+    fn in_pool_order(&self, t: &TransitionDef<V>, subjects: BTreeSet<Subject>) -> Vec<Subject> {
         let mut subjects: Vec<_> = subjects.into_iter().collect();
         if t.consumes.iter().any(|p| self.tokens.pools.contains_key(p)) {
             subjects.sort_by_key(|s| {
@@ -3315,7 +3364,8 @@ impl Executor {
     }
 
     pub(crate) fn holder(&self, place: &Place, subject: &Subject) -> Option<Holder> {
-        let holds = |a: &Attempt| &a.subject == subject && a.taken.iter().any(|(p, _)| p == place);
+        let holds =
+            |a: &Attempt<V>| &a.subject == subject && a.taken.iter().any(|(p, _)| p == place);
         if let Some(a) = self.in_flight.values().find(|a| holds(a)) {
             return Some(Holder::Running(a.transition.clone()));
         }
@@ -3327,7 +3377,7 @@ impl Executor {
 
     /// The enabledness check that decides a firing: its read trace and its
     /// bound input, or the first reason it cannot fire.
-    fn decide(&self, t: &TransitionDef, s: &Subject) -> Result<(Trace, Content), WhyNot> {
+    fn decide(&self, t: &TransitionDef<V>, s: &Subject) -> Result<(Trace<V>, Record<V>), WhyNot> {
         let mut trace = Trace::default();
         let input = self.decide_into(t, s, &mut trace)?;
         Ok((trace, input))
@@ -3337,10 +3387,10 @@ impl Executor {
     /// beyond the transition's own rows of `s`.
     fn decide_into(
         &self,
-        t: &TransitionDef,
+        t: &TransitionDef<V>,
         s: &Subject,
-        trace: &mut Trace,
-    ) -> Result<Content, WhyNot> {
+        trace: &mut Trace<V>,
+    ) -> Result<Record<V>, WhyNot> {
         if self.tokens.token(&t.running(), s).is_some() {
             return Err(WhyNot::InFlight);
         }
@@ -3381,10 +3431,10 @@ impl Executor {
     /// with every row read in `trace`.
     fn bind_input(
         &self,
-        t: &TransitionDef,
+        t: &TransitionDef<V>,
         s: &Subject,
-        trace: &mut Trace,
-    ) -> Result<Content, WhyNot> {
+        trace: &mut Trace<V>,
+    ) -> Result<Record<V>, WhyNot> {
         let present = |p: &Place| self.tokens.token(p, s).is_some();
         if let Some(p) = t.consumes.iter().find(|p| !self.available(p, s)) {
             return Err(WhyNot::Needs {
@@ -3423,7 +3473,7 @@ impl Executor {
     }
 
     /// The `Answered` token a work firing consumes.
-    fn answered(&self, place: &Place, subject: &Subject) -> &Answered {
+    fn answered(&self, place: &Place, subject: &Subject) -> &Answered<V> {
         let token = self
             .tokens
             .token(place, subject)
@@ -3434,7 +3484,7 @@ impl Executor {
         }
     }
 
-    fn reader<'a>(&'a self, trace: &'a mut Trace) -> Reader<'a> {
+    fn reader<'a>(&'a self, trace: &'a mut Trace<V>) -> Reader<'a, V> {
         Reader {
             net: &self.net,
             tokens: &self.tokens,
@@ -3445,7 +3495,7 @@ impl Executor {
 
     /// The content hash of a read trace: blake3 over a canonical encoding of
     /// what was read, never of versions.
-    fn key(&self, trace: &Trace) -> blake3::Hash {
+    fn key(&self, trace: &Trace<V>) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
         encode_rows(
             &mut h,
@@ -3462,8 +3512,8 @@ impl Executor {
         transition: &Arc<str>,
         subject: Subject,
         occurrence: OccurrenceId,
-        trace: Trace,
-        input: Content,
+        trace: Trace<V>,
+        input: Record<V>,
         now: Duration,
     ) -> AttemptId {
         let t = self.net.transition_def(transition);
@@ -3528,7 +3578,7 @@ impl Executor {
         self.set_retry_due(key, None);
     }
 
-    fn occupy_running(&mut self, a: &Attempt) {
+    fn occupy_running(&mut self, a: &Attempt<V>) {
         self.tokens.mark_slot(
             &Place::running(&a.transition),
             &a.subject,
@@ -3554,7 +3604,7 @@ impl Executor {
         }
     }
 
-    fn insert_attempt(&mut self, a: Attempt) -> AttemptId {
+    fn insert_attempt(&mut self, a: Attempt<V>) -> AttemptId {
         let id = AttemptId(self.next_attempt);
         self.next_attempt += 1;
         self.in_flight.insert(id, a);
@@ -3580,7 +3630,7 @@ impl Executor {
         }
     }
 
-    fn request(&mut self, id: AttemptId, a: &Attempt) {
+    fn request(&mut self, id: AttemptId, a: &Attempt<V>) {
         self.attempts
             .entry(a.occurrence.clone())
             .or_default()
@@ -3596,7 +3646,7 @@ impl Executor {
     }
 
     /// A new attempt of an occurrence that is already in `<T>.Running`.
-    fn issue(&mut self, mut a: Attempt, probe: bool, now: Duration) {
+    fn issue(&mut self, mut a: Attempt<V>, probe: bool, now: Duration) {
         a.started = now;
         a.probe = probe;
         let id = self.insert_attempt(a.clone());
@@ -3611,7 +3661,7 @@ impl Executor {
     /// the firing read.
     ///
     /// [`start`]: Executor::start
-    fn stale(&self, a: &Attempt) -> Option<(Place, Subject)> {
+    fn stale(&self, a: &Attempt<V>) -> Option<(Place, Subject)> {
         if self.twin(Twin::NoCas) {
             return None;
         }
@@ -3630,7 +3680,7 @@ impl Executor {
     /// each row goes to its place's candidate, applies on a data-class place,
     /// or is withheld, and a mark on its input stays: the effect never runs
     /// twice on it.
-    fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
+    fn record(&mut self, a: Attempt<V>, outputs: Vec<Output<V>>, now: Duration) {
         if let Some(e) = self.net.refused_output(&outputs) {
             let cause = Cause::definite(format!("'{}' output refused: {e}", a.transition));
             return self.fail(a, cause, now);
@@ -3748,7 +3798,7 @@ impl Executor {
     /// (322/E3.c). A fact into any other row carries no comparison: the
     /// place's declaration alone says whether it may replace what it finds
     /// (322/E3.b).
-    fn put_fact(&mut self, a: &Attempt, f: Output) {
+    fn put_fact(&mut self, a: &Attempt<V>, f: Output<V>) {
         if !self.read_row(a, &f) {
             self.refuse_blind_overwrite(&f);
         }
@@ -3757,12 +3807,18 @@ impl Executor {
 
     /// A firing's put; a token into a full pool is not put, and the net
     /// discloses it once per place and transition.
-    fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
+    fn put_by(&mut self, place: &Place, subject: &Subject, content: Record<V>, by: &Arc<str>) {
         let payload = self.net.payload(place, content);
         self.put_by_with(place, subject, payload, by);
     }
 
-    fn put_by_with(&mut self, place: &Place, subject: &Subject, payload: Payload, by: &Arc<str>) {
+    fn put_by_with(
+        &mut self,
+        place: &Place,
+        subject: &Subject,
+        payload: Payload<V>,
+        by: &Arc<str>,
+    ) {
         if let Err(PoolFull) = self.tokens.put_with(place, subject, payload, Some(by)) {
             self.disclose(Condition::PoolFull {
                 place: place.clone(),
@@ -3787,7 +3843,7 @@ impl Executor {
     /// fact is not put (322/E3.c). Another input of the same firing having
     /// changed does not withhold this fact — the comparison is against the row
     /// the fact writes.
-    fn moved_read_row(&self, a: &Attempt, o: &Output) -> bool {
+    fn moved_read_row(&self, a: &Attempt<V>, o: &Output<V>) -> bool {
         self.read_row(a, o)
             && self.tokens.version(&o.place, &o.subject)
                 != a.trace.rows[&(o.place.clone(), o.subject.clone())].version
@@ -3799,7 +3855,7 @@ impl Executor {
     /// is nothing to compare (REV11-running.a), and one it only inhibited held
     /// nothing, so no token can be lost and the declaration decides
     /// (322/E3.b).
-    fn read_row(&self, a: &Attempt, o: &Output) -> bool {
+    fn read_row(&self, a: &Attempt<V>, o: &Output<V>) -> bool {
         let t = self.net.transition_def(&a.transition);
         let inhibit_only = t.inhibits.contains(&o.place)
             && !t.reads.contains(&o.place)
@@ -3821,7 +3877,7 @@ impl Executor {
     /// (NET-fire.a). Only [`put_fact`] calls this.
     ///
     /// [`put_fact`]: Executor::put_fact
-    fn refuse_blind_overwrite(&self, o: &Output) {
+    fn refuse_blind_overwrite(&self, o: &Output<V>) {
         let def = &self.net.places[&o.place];
         if def.capacity != Capacity::Single || def.class == Class::Data {
             return;
@@ -3839,7 +3895,7 @@ impl Executor {
         }
     }
 
-    fn commit(&mut self, a: Attempt, rows: Vec<(Place, Subject, Payload)>) {
+    fn commit(&mut self, a: Attempt<V>, rows: Vec<(Place, Subject, Payload<V>)>) {
         let mut before = BTreeMap::new();
         if let OccurrenceId::Work { .. } = &a.occurrence {
             let answered = self.net.answered_of(&a.transition);
@@ -3901,14 +3957,14 @@ impl Executor {
     }
 
     /// The inputs go back with no version change: see [`Tokens::restore`].
-    fn rollback(&mut self, a: &Attempt) {
+    fn rollback(&mut self, a: &Attempt<V>) {
         for (p, token) in &a.taken {
             self.tokens.restore(p, &a.subject, token);
         }
         self.release_running(&a.transition, &a.subject);
     }
 
-    fn set_mark(&mut self, a: &Attempt, cause: &Cause) {
+    fn set_mark(&mut self, a: &Attempt<V>, cause: &Cause) {
         if self.twin(Twin::NoMark) {
             return;
         }
@@ -3925,7 +3981,7 @@ impl Executor {
     }
 
     /// A definite failure: the inputs go back and the failure mark is set.
-    fn fail(&mut self, a: Attempt, cause: Cause, now: Duration) {
+    fn fail(&mut self, a: Attempt<V>, cause: Cause, now: Duration) {
         self.rollback(&a);
         self.set_mark(&a, &cause);
         self.occurrences
@@ -3963,7 +4019,7 @@ impl Executor {
         }
     }
 
-    fn park(&mut self, a: Attempt, cause: Cause, now: Duration) {
+    fn park(&mut self, a: Attempt<V>, cause: Cause, now: Duration) {
         self.release_running(&a.transition, &a.subject);
         self.tokens.mark_slot(
             &Place::new(OUTCOME_UNKNOWN),
@@ -4050,11 +4106,11 @@ impl Executor {
     }
 }
 
-fn encode_rows(
+fn encode_rows<V: Clone + PartialEq + fmt::Debug>(
     h: &mut blake3::Hasher,
-    trace: &Trace,
+    trace: &Trace<V>,
     with_version: bool,
-    encode: fn(&Value) -> Vec<u8>,
+    encode: fn(&V) -> Vec<u8>,
 ) {
     for ((p, s), row) in &trace.rows {
         encode_str(h, p.as_str());
