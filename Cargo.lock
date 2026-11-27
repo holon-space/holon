@@ -5907,6 +5907,7 @@ dependencies = [
  "holon-storage-provider",
  "holon-transition-contract",
  "indexmap 2.14.2",
+ "petri-workflow",
  "proptest 1.11.0",
  "proptest-state-machine",
  "serde",
@@ -10138,6 +10139,19 @@ version = "0.1.0"
 dependencies = [
  "petri-net",
  "proptest 1.11.0",
+]
+
+[[package]]
+name = "petri-workflow"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "holon-transition-contract",
+ "indexmap 2.14.2",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -66,6 +66,35 @@ fn archlint_all_passes() {
 /// Checked at the manifest, not at `use` sites: without the dependency no
 /// `use holon_loro` can exist, so this is the edge itself rather than one of
 /// its symptoms.
+/// petri-workflow is the L1 layer of docs/Architecture/PetriNetLayers.md: it
+/// builds without Holon; only the ids it shares with the transition contract
+/// come from there.
+#[test]
+fn petri_workflow_depends_on_no_holon_crate_but_the_contract() {
+    let manifest = repo_root().join("crates/petri-workflow/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+
+    let offenders: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| !line.starts_with("holon-transition-contract"))
+        .filter(|line| {
+            ["holon", "workspace-hack"].iter().any(|name| {
+                line.starts_with(name)
+                    || line.contains(&format!("dep:{name}"))
+                    || line.contains(&format!(r#"package = "{name}"#))
+            })
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "crates/petri-workflow/Cargo.toml declares a Holon or workspace-hack dependency: {offenders:?}"
+    );
+}
+
 #[test]
 fn holon_frontend_does_not_depend_on_holon_loro() {
     let manifest = repo_root().join("crates/holon-frontend/Cargo.toml");

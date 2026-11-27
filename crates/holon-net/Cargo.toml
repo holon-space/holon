@@ -18,6 +18,7 @@ holon-transition-contract.workspace = true
 holon-net-layout.workspace = true
 holon-pattern.workspace = true
 holon-rules.workspace = true
+petri-workflow.workspace = true
 indexmap = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -36,7 +37,7 @@ holon-storage-provider.workspace = true
 
 [features]
 # Each twin breaks one executor rule, so a property test shows red for that rule.
-naive-twins = []
+naive-twins = ["petri-workflow/naive-twins"]
 
 [[test]]
 name = "main"
