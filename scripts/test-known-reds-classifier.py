@@ -12,7 +12,8 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
   the message a cut location leaves it;
 - P4: without the `--no-capture` marker no panic leaves the output;
 - P6: when several registry rows match one panic, the first row that accepts its site is named, else the first row is cross-family (synthetic registry in a copied tree);
-- P5: a flow job capture of the log (a timestamp before every line) gets the same verdict word and exit code as the raw capture.
+- P5: a flow job capture of the log (a timestamp before every line) gets the same verdict word and exit code as the raw capture;
+- P7: when the output lists any entry, exactly one of them is the `PRIMARY: ` line.
 Before the CASES draws it checks base draws, drawn until each case of `kinds` below is reached at least once, so every case
 is checked in every run; it fails when ATTEMPTS draws leave a case unreached. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
@@ -75,8 +76,10 @@ def check(work, text, want, label):
     out = classify(log)[1]
     if classify(log, env=env, cwd=work)[1] != out:
         failures.append(f"P2 {label}: LC_ALL / TMPDIR / cwd changed the output")
-    if len(re.findall(r"^PRIMARY: ", out, re.M)) > 1:
-        failures.append(f"P7 {label}: more than one PRIMARY line:\n{out}")
+    entries = len(re.findall(r"^(?:PRIMARY: |  \[)", out, re.M))
+    primaries = len(re.findall(r"^PRIMARY: ", out, re.M))
+    if entries and primaries != 1:
+        failures.append(f"P7 {label}: {primaries} PRIMARY lines among {entries} entries:\n{out}")
     return failures, got
 
 
@@ -87,7 +90,108 @@ def one_primary_examples():
     def rendered(*runs):
         return logs.render([logs.Run(shape, unit[0], [logs.Test(unit[1], status, False, [logs.Panic("known", unit[1], *pm) for pm in ps])]) for shape, status, ps in runs],
                            random.Random(0), interleave=False)
-    return [rendered(("serial", "TIMEOUT", [cycle])), rendered(("captured", "TIMEOUT", []), ("captured", "TIMEOUT", [cycle] * 3))]
+    return [rendered(("serial", "TIMEOUT", [cycle])), rendered(("captured", "TIMEOUT", [cycle] * 3)),
+            rendered(("captured", "TIMEOUT", []), ("captured", "TIMEOUT", [cycle] * 3))]
+
+
+# Logs a random draw once made the classifier and its model answer differently on.
+DRAWN_CUT_OFF_LOGS = [
+    ("cut-off-instance-then-passing-tests-and-a-failing-one", r'''warning: ignoring --test-threads because --no-capture is specified
+    Starting 3 tests across 1 binary
+       START [   0.010s] (1/3) holon-bgpjwzg::acia nemaenv::case_gxwxjo
+
+running 1 test
+thread 'nemaenv::case_gxwxjo' (7) panicked at crates/kbygkg/tests/ollepcz.rs:484:1:
+novel defect vkns iqinsbev wknw
+thread 'nemaenv::case_gxwxjo' (7) panicked at crates/mbnpotu/tests/kszhc.rs:734:38:
+novel defect rvfd fajmtwd zwcfm
+test nemaenv::case_gxwxjo - should panic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+        PASS [   0.010s] (1/3) holon-bgpjwzg::acia nemaenv::case_gxwxjo
+       START [   0.010s] (2/3) holon-bgpjwzg::acia vzgagepu::case_vzyvsvuj
+
+running 1 test
+thread 'vzgagepu::case_vzyvsvuj' (7) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
+test vzgagepu::case_vzyvsvuj - should panic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+TIMEOUT-PASS [   0.010s] (2/3) holon-bgpjwzg::acia vzgagepu::case_vzyvsvuj
+       START [   0.010s] (3/3) holon-bgpjwzg::acia clboq::case_kastw
+
+running 1 test
+thread 'clboq::case_kastw' (7) panicked at crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:789:5:
+generated (shrunk): Test failed: after Restart { peer: 0 }: ["peer 0 trimmed below VersionVector({1000: 2}), which peer 1 at VersionVector({1000: 1}) lacks"]
+thread 'clboq::case_kastw' (7) panicked at /Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src/sync.rs:34:31:
+poisoned LoroMutex
+     Running tests/main.rs (target/debug/deps/holon-fmes-urijwixl)
+
+running 1 tests
+thread 'ghgoaz::case_edxbbx' (101) panicked at crates/jvxlfqqt/tests/hygu.rs:1:1:
+novel defect dngecm
+test ghgoaz::case_edxbbx ... FAILED
+
+failures:
+    ghgoaz::case_edxbbx
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+''', 1, r"^\[known-reds\] FAIL: 1 novel panic\(s\), 1 known-red panic\(s\), 1 collateral \(ignored\)\.$"),
+    ("cut-off-instance-then-a-run-with-its-own-collateral", r'''warning: ignoring --test-threads because --no-capture is specified
+    Starting 1 tests across 1 binary
+       START [   0.010s] (1/1) holon-ytqjz::azja xfpga::case_yejyq
+
+running 1 test
+thread 'tokio-runtime-worker' (7) panicked at crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:789:5:
+generated (shrunk): Test failed: after Restart { peer: 0 }: ["peer 0 trimmed below VersionVector({1000: 2}), which peer 1 at VersionVector({1000: 1}) lacks"]
+thread 'tokio-runtime-worker' (7) panicked at /Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src/oplog/pending_changes.rs:338:62:
+called `Result::unwrap()` on an `Err` value: ()
+     Running tests/main.rs (target/debug/deps/holon-qwyeahra-vwxskqv)
+
+running 2 tests
+thread 'rkgu::case_wddu' (101) panicked at crates/pztazgu/tests/nmmhmux.rs:1:1:
+novel defect jpfqcuhf
+thread 'rkgu::case_wddu' (102) panicked at crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5:
+keystone boot fault: injected task panic
+test rkgu::case_wddu ... FAILED
+thread 'rkgu::case_wdduFAILED' (104) panicked at /Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src/oplog/pending_changes.rs:338:62:
+called `Result::unwrap()` on an `Err` value: ()
+thread 'rkgu::case_wdduFAILED' (105) panicked at crates/lmqo/tests/bozcewym.rs:1:1:
+novel defect ejtjzr
+thread 'rkgu::case_wdduFAILED' (106) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
+test rkgu::case_wdduFAILED ... FAILED
+
+failures:
+    rkgu::case_wddu
+    rkgu::case_wdduFAILED
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+''', 1, r"^\[known-reds\] FAIL: 3 novel panic\(s\), 2 known-red panic\(s\), 1 collateral \(ignored\)\.$"),
+]
+
+
+def cut_off_examples():
+    """Static examples of a serial instance cut off after its row's panic and collateral, followed by a run of its own.
+
+    The later run's panics belong to no instance the text proves, so they neither prove the cut instance
+    unclean nor take its collateral with them: the cut instance's collateral is attributed to its row, the
+    later run's collateral stays novel.
+    """
+    cut = "warning: ignoring --test-threads because --no-capture is specified\n    Starting 1 tests across 1 binary\n       START [   0.010s] (1/1) holon-x::main a::case_cut\n\nrunning 1 test\n"
+    row = "thread 'a::case_cut' (7) panicked at crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:789:5:\n" \
+          "generated (shrunk): Test failed: after Restart { peer: 0 }: [\"peer 0 trimmed below VersionVector({1000: 2}), which peer 1 at VersionVector({1000: 1}) lacks\"]\n"
+    poisoned = "thread 'a::case_cut' (7) panicked at /Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src/sync.rs:34:31:\npoisoned LoroMutex\n"
+    later = "     Running tests/main.rs (target/debug/deps/holon-x)\n\nrunning 1 tests\n" \
+            "thread 'b::case_later' (101) panicked at crates/pztazgu/tests/nmmhmux.rs:1:1:\nnovel defect jpfqcuhf\n" \
+            "test b::case_later ... FAILED\n\nfailures:\n    b::case_later\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+    later_poisoned = later.replace("novel defect jpfqcuhf", "poisoned LoroMutex").replace("crates/pztazgu/tests/nmmhmux.rs:1:1", "/Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src/sync.rs:34:31")
+    verdict = r"^\[known-reds\] FAIL: %d novel panic\(s\), 1 known-red panic\(s\), %d collateral \(ignored\)\.$"
+    return DRAWN_CUT_OFF_LOGS + [
+        ("cut-off-instance-collateral-then-later-novel-run", cut + row + poisoned + later, 1, verdict % (1, 1)),
+        ("cut-off-instance-collateral-then-later-collateral-run", cut + row + poisoned + later_poisoned, 1, verdict % (1, 1)),
+        ("cut-off-instance-without-its-row-then-later-run", cut + poisoned + later, 1, r"^\[known-reds\] FAIL: 2 novel panic\(s\), 0 known-red panic\(s\), 0 collateral \(ignored\)\.$"),
+    ]
 
 
 def report(text, failures):
@@ -119,6 +223,13 @@ def kinds(runs, clean, mixed):
     k["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary
     k["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
     k["a serial run cut off after a panic"] += any(r.cut for r in runs)
+    for what, has_row in (("a cut-off serial instance with a collateral panic beside its row's panic, then a later run with a panic", True),
+                          ("a cut-off serial instance with a collateral panic and no row's panic, then a later run with a panic", False)):
+        k[what] += any(
+            a.cut and any(p.kind == "collateral" for p in a.tests[-1].panics)
+            and any(p.kind == "row" for p in a.tests[-1].panics) == has_row
+            and any(t.panics for t in b.tests)
+            for a, b in zip(runs, runs[1:]))
     k["a run without the marker after a serial run"] += any(
         a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
     return k
@@ -276,7 +387,7 @@ def main():
     reached = Counter()
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        for name, text, want_exit, line in logs.examples():
+        for name, text, want_exit, line in logs.examples() + cut_off_examples():
             log = work / f"{name}.log"
             log.write_text(text)
             code, out = classify(log)
@@ -295,6 +406,8 @@ def main():
 
         def draw():
             runs = logs.draw(rng)
+            for r in runs:
+                assert len({t.name for t in r.tests}) == len(r.tests), f"a run draws one test name twice: {[t.name for t in r.tests]}"
             render_seed = rng.randrange(1 << 30)
             clean = logs.render(runs, random.Random(render_seed), interleave=False)
             mixed = logs.render(runs, random.Random(render_seed), interleave=True)

@@ -532,7 +532,8 @@ for log in "$@"; do
         # The marker comes before the `Starting` of its run; a run cut off before
         # its `Summary` does not carry it into the next run.
         index($0, "ignoring --test-threads because --no-capture is specified") { marked = 1 }
-        /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = FNR ": " $0 }
+        # The header of a cargo run ends any nextest instance, so a cut-off one owns none of the panics of the later run.
+        /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = FNR ": " $0; live = ""; captured = ""; serial = 0 }
         /^ +Starting [0-9]+ tests? across / { run++; serial = marked; marked = 0 }
         # A location cut before its `<line>:<col>:` continues on the first later
         # line that completes it, before the next head, verdict line or run.

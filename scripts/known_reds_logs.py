@@ -256,9 +256,10 @@ def draw(rng):
         for _ in range(rng.randint(1, 5)):
             again = [n for n in earlier if n not in {t.name for t in tests}]
             tests.append(draw_test(rng, used, shape, rng.choice(again) if again and rng.random() < 0.6 else None))
-        # A name that is another's with a verdict word glued behind it.
-        if shape == "libtest" and len(tests) > 1 and rng.random() < 0.7:
-            tests[1] = draw_test(rng, used, shape, tests[0].name + rng.choice(GLUED_WORD[1:]))
+        # A name that is another's with a verdict word glued behind it; libtest names are unique within a run.
+        glued = tests[0].name + rng.choice(GLUED_WORD[1:])
+        if shape == "libtest" and len(tests) > 1 and rng.random() < 0.7 and glued not in {t.name for t in tests}:
+            tests[1] = draw_test(rng, used, shape, glued)
             for t in tests[:2]:
                 t.panics.append(draw_panic(rng, used, t.name))
         runs.append(Run(shape, binary, tests))
@@ -266,7 +267,27 @@ def draw(rng):
     # outcome, which the classifier reports as no verdict (exit 3).
     if len(runs) == 2 and runs[0].shape == "serial" and runs[0].tests[-1].panics:
         runs[0].cut = rng.random() < 0.7
+    if rng.random() < CUT_OFF_SHARE:
+        runs = draw_cut_off(rng, used)
     return runs
+
+
+CUT_OFF_SHARE = 0.15
+
+
+def draw_cut_off(rng, used):
+    """A serial run cut off inside its last test, which printed collateral with or without its row's panic, then a later run with panics."""
+    tests = [draw_test(rng, used, "serial") for _ in range(rng.randint(0, 2))]
+    last = draw_test(rng, used, "serial")
+    last.panics = [Panic("collateral", rng.choice([last.name, WORKER]), *rng.choice(COLLATERAL)) for _ in range(rng.choice([1, 2]))]
+    if rng.random() < 0.5:
+        last.panics.insert(0, Panic("row", last.name, ROW_SITE, ROW_MSG))
+    first = Run("serial", f"holon-{word(rng, used)}::{word(rng, used)}", tests + [last], cut=True)
+    shape = rng.choice(["libtest", "captured", "parallel", "serial"])
+    later = [draw_test(rng, used, shape) for _ in range(rng.randint(1, 3))]
+    if not any(t.panics for t in later):
+        later[0].panics.append(Panic("novel", later[0].name, f"crates/{word(rng, used)}/tests/{word(rng, used)}.rs:1:1", "novel defect " + word(rng, used)))
+    return [first, Run(shape, f"holon-{word(rng, used)}::{word(rng, used)}", later)]
 
 
 def verdict_line(t, verdict):
