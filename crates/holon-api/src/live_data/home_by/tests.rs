@@ -2079,4 +2079,8 @@ mod supervision {
             );
         }
     }
+
+    mod settle_spec {
+        include!("settle_spec.rs");
+    }
 }

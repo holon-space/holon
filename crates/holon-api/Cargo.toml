@@ -60,6 +60,7 @@ ctor = "0.4"
 proptest.workspace = true
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true
+tla-checker = "0.24.11"
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = "0.4"
