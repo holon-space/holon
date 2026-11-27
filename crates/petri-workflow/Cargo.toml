@@ -8,7 +8,6 @@ description = "Workflow nets over a token value V: effects, retry, timers, undo 
 
 [dependencies]
 blake3.workspace = true
-holon-transition-contract.workspace = true
 indexmap = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true

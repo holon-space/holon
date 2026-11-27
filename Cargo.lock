@@ -6234,6 +6234,7 @@ name = "holon-transition-contract"
 version = "0.1.0"
 dependencies = [
  "holon-api",
+ "petri-workflow",
  "proptest 1.11.0",
  "serde",
  "serde_json",
@@ -10146,7 +10147,6 @@ name = "petri-workflow"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "holon-transition-contract",
  "indexmap 2.14.2",
  "serde",
  "serde_json",

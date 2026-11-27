@@ -1,6 +1,6 @@
 //! The #167 contract docs name executor-side symbols in backticks, not as
-//! intra-doc links, because the declaring crate does not depend on the crate
-//! that owns them. Rustdoc therefore cannot catch the drift; this test does.
+//! intra-doc links: no gate runs rustdoc, and holon-net depends on the
+//! contract, not the other way round. This test catches the drift.
 //!
 //! The scan set is keyed on the contract SYMBOLS, not on a file list: a root
 //! may be a directory, and `every_contract_symbol_has_its_doc_in_the_scan_set`
@@ -12,8 +12,9 @@ use std::path::PathBuf;
 /// The files and directories whose backticked forward references must resolve.
 /// A directory root covers every `.rs` file under it, so a new contract module
 /// is scanned the day it is created.
-const CONTRACT_DOC_ROOTS: [&str; 4] = [
+const CONTRACT_DOC_ROOTS: [&str; 5] = [
     "crates/holon-transition-contract/src/lib.rs",
+    "crates/petri-workflow/src/exec.rs",
     "crates/holon-net/src/uft.rs",
     "crates/holon-net/src/uft",
     "crates/holon-net/src/exec.rs",
@@ -24,7 +25,7 @@ const CONTRACT_DOC_ROOTS: [&str; 4] = [
 const CONTRACT_SYMBOLS: [&str; 3] = ["work_occurrence", "ask_hash", "lower"];
 
 /// The crates that declare the contract and its executor side.
-const CONTRACT_CRATES: [&str; 2] = ["holon-transition-contract", "holon-net"];
+const CONTRACT_CRATES: [&str; 3] = ["holon-transition-contract", "petri-workflow", "holon-net"];
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(
