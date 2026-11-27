@@ -431,6 +431,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shadow-clock-ahead-of-fed-height`
 - `shell-effect-stubborn-member-pid-race`
 - `shell-log-paths-plant-under-a-planted-file`
+- `shell-restart-pbt-load-timeout`
+- `shell-restart-pid-file-held-by-live-runner`
+- `shell-restart-readonly-pid-dir-ends-run`
 - `shopping-mapping-cost-slo`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
