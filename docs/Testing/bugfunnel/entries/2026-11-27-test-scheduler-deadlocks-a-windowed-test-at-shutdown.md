@@ -13,7 +13,7 @@ summary: >-
 ## Bug
 Found by the windowed gate: `vault_loading_placeholder_windowed` hit the
 nextest TIMEOUT now and then, with no message. A hang loop on that binary
-caught one hang after 147 clean runs; two `sample` stacks 30 s apart showed
+caught one hang in round 147, after 146 clean rounds (439 clean test runs); two `sample` stacks 30 s apart showed
 the same frozen threads.
 
 ## Root cause
