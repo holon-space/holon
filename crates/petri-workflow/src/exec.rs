@@ -11,14 +11,14 @@
 //! The executor implements no special case for producer order, run state or
 //! failure ports. Those are places and arcs of the net (§9 intro, NET-run.a).
 //!
-//! Answers (UFT-adopt.a): [`Executor::answer`] fires the manual `Answer.T`
+//! Answers (UFT-adopt.a): [`Executor::answer_ask`] fires the manual `Answer.T`
 //! with the user value. The value joins the input of the work `T` after its
 //! bind, so no guard reads it. The answer id is in the read trace of `T`, so a
 //! new answer is a new failure mark key. [`Executor::settled`] of an answer
 //! follows its work occurrence ([`work_occurrence`]), and [`Executor::undo`]
 //! withdraws the answer and reverses its work's process-class delta in one
-//! step. [`Executor::derive`], [`Executor::asks`] and [`ask_hash`] read the
-//! derived places outside a firing.
+//! step. [`Executor::derive`] and [`ask_hash_with`] read the derived places
+//! outside a firing.
 
 use std::borrow::Borrow;
 use std::cmp::Reverse;
@@ -29,9 +29,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_transition_contract::AnswerId;
-use holon_transition_contract::AskHash;
-pub use holon_transition_contract::OccurrenceId;
+use crate::ids::AnswerId;
+use crate::ids::AskHash;
+pub use crate::ids::OccurrenceId;
 
 /// A round fires every transition its marking enables. A net still enabled
 /// after this many rounds of one call does not terminate.
@@ -1529,7 +1529,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
     }
 
     /// Runs `f` and returns, besides its result, the trace of what `f` read,
-    /// e.g. for an [`ask_hash`] of a binding. The reads stay in this trace too.
+    /// e.g. for an [`ask_hash_with`] of a binding. The reads stay in this trace
+    /// too.
     pub fn traced<R>(&mut self, f: impl FnOnce(&mut Reader<'_, V>) -> R) -> (R, Trace<V>) {
         let mut sub = Trace {
             evaluating: self.trace.evaluating.clone(),
@@ -2940,7 +2941,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     /// `value` is the user input (UFT-adopt.a; empty for none). It joins the
     /// bound input after the bind, so no guard reads it; a field the bind
     /// also produces is an impossible state and panics. A fire of `Answer.T`
-    /// takes a [`OccurrenceId::Caller`] id equal to its [`answer::answer_id`].
+    /// takes a [`OccurrenceId::Caller`] id equal to its [`AnswerId`].
     pub fn fire(
         &mut self,
         transition: &str,

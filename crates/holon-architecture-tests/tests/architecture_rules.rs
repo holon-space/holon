@@ -54,23 +54,10 @@ fn archlint_all_passes() {
     }
 }
 
-/// `holon-frontend` must never depend on `holon-loro` (D172.a, F1a layering).
-///
-/// The read model's port lives in `holon-api`, which already owns `LiveData`,
-/// `group_by` and `home_by`; `holon-loro` implements it and `holon-app` wires
-/// it. A frontend that reached for the producer directly would bind the UI to
-/// one storage backend and make the SqlOnly producer (F3) unimplementable —
-/// and it would do so invisibly, because the code would compile and work in
-/// the Loro config that every developer runs.
-///
-/// Checked at the manifest, not at `use` sites: without the dependency no
-/// `use holon_loro` can exist, so this is the edge itself rather than one of
-/// its symptoms.
 /// petri-workflow is the L1 layer of docs/Architecture/PetriNetLayers.md: it
-/// builds without Holon; only the ids it shares with the transition contract
-/// come from there.
+/// builds without Holon.
 #[test]
-fn petri_workflow_depends_on_no_holon_crate_but_the_contract() {
+fn petri_workflow_depends_on_no_holon_crate() {
     let manifest = repo_root().join("crates/petri-workflow/Cargo.toml");
     let text = std::fs::read_to_string(&manifest)
         .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
@@ -79,7 +66,6 @@ fn petri_workflow_depends_on_no_holon_crate_but_the_contract() {
         .lines()
         .map(str::trim)
         .filter(|line| !line.starts_with('#'))
-        .filter(|line| !line.starts_with("holon-transition-contract"))
         .filter(|line| {
             ["holon", "workspace-hack"].iter().any(|name| {
                 line.starts_with(name)
@@ -95,6 +81,18 @@ fn petri_workflow_depends_on_no_holon_crate_but_the_contract() {
     );
 }
 
+/// `holon-frontend` must never depend on `holon-loro` (D172.a, F1a layering).
+///
+/// The read model's port lives in `holon-api`, which already owns `LiveData`,
+/// `group_by` and `home_by`; `holon-loro` implements it and `holon-app` wires
+/// it. A frontend that reached for the producer directly would bind the UI to
+/// one storage backend and make the SqlOnly producer (F3) unimplementable —
+/// and it would do so invisibly, because the code would compile and work in
+/// the Loro config that every developer runs.
+///
+/// Checked at the manifest, not at `use` sites: without the dependency no
+/// `use holon_loro` can exist, so this is the edge itself rather than one of
+/// its symptoms.
 #[test]
 fn holon_frontend_does_not_depend_on_holon_loro() {
     let manifest = repo_root().join("crates/holon-frontend/Cargo.toml");

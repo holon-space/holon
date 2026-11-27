@@ -9,7 +9,7 @@ The engine has three layers, like UDP, TCP and HTTP:
 | Layer | Crate | Knows |
 |---|---|---|
 | L0 | `petri-net` | an ordinary coloured Petri net |
-| L1 | `petri-workflow` (planned) | workflow features: effects, retry, timers, undo, human tasks; nothing of Holon |
+| L1 | `petri-workflow` | workflow features: effects, retry, timers, undo, human tasks; nothing of Holon |
 | L2 | `holon-net` | Holon: values, the Loro store, Holon names |
 
 ## Worked example: one effectful transition
@@ -283,6 +283,8 @@ adds the two laws as invariants.
    token), and an ask is declared by its places and transition. `holon-net`
    keeps the faces at `V = Value`: type aliases, the host functions, the ask
    names and `AskMeta` side table, and the `Asks` surface of the UI and MCP.
+   `petri-workflow` depends on no Holon crate: it owns the occurrence, answer
+   and ask-hash ids, and `holon-transition-contract` re-exports them.
    Typed bookkeeping tokens follow in this step.
 2. Carve the kernel under the executor into `petri-net`: marking, stores,
    arcs, atomic fire, level semantics with interleaving.
