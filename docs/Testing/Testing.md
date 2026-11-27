@@ -424,13 +424,25 @@ shrunk output shows exactly which operations in which order triggered the failur
 ## Running mutation testing
 
 ```sh
-cargo mutants --manifest-path crates/holon/Cargo.toml \
-  --file crates/holon/src/petri.rs \
-  --timeout 60 --build-timeout 300 \
-  --output /tmp/mutants-output
+cargo mutants -p holon-filesystem \
+  --file crates/holon-filesystem/src/vault_path.rs \
+  --timeout 300 \
+  --output target/gate-logs/mutants-out
 ```
 
-Configuration lives in `.cargo/mutants.toml`.
+Configuration lives in `.cargo/mutants.toml`, the only file cargo-mutants reads. It
+holds the workspace-wide excludes and the test tool, and no crate-specific flags. Pass
+the flags of the crate under mutation on the command line:
+
+| Crate | Flags | Where the killing tests run |
+|---|---|---|
+| `holon-filesystem` | `-p holon-filesystem` | its own lib and integration tests |
+| `holon-orgmode` | `-p holon-orgmode --features di` | its `main` test target, whose tests need `di` |
+| any other crate | `-p <crate>`, plus `--features <f>` when its tests are gated on `<f>` | its own tests |
+
+The run starts with a baseline: the unmutated tests must pass, or cargo-mutants stops.
+Killers in another package need `--test-package <pkg>`; add a row here only after one
+run proves the invocation builds and its baseline is green.
 
 ---
 

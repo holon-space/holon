@@ -92,11 +92,11 @@ to add `SutQueryResults` to `sut_present`; degraded half = new `viewmodel_shows_
 with `sut_absent: [SutQueryResults]`, `ref_present: []` (§5.2: the Ref must NOT model query results
 or you manufacture false divergence — assert SUT-internal `root_render_kind == "source_editor"` only).
 
-**MUT — cargo-mutants quality gate (the new philosophy's actual teeth).** Two stale `mutants.toml`
-(`.cargo/mutants.toml` + `crates/holon/mutants.toml`) pin `petri_e2e_pbt` — wrong test. Add a
-workspace-root `mutants.toml` gating on `general_e2e_composed_pbt`, `exclude_globs` the entire PBT
-instrument (`holon-pbt-core`, `holon-integration-tests`, macros), `examine_globs` start at
-`holon-frontend/src/editor_caret.rs`. First run: mutate editor_caret against the editor lib slices
+**MUT — cargo-mutants quality gate (the new philosophy's actual teeth).** cargo-mutants reads
+only `.cargo/mutants.toml`: it pins no test target and `exclude_globs` the entire PBT instrument
+(`holon-pbt-core`, `holon-integration-tests`, macros). Per-crate flags (`-p`, `--features`) are
+in the table of `docs/Testing/Testing.md` ("Running mutation testing"). Start at
+`holon-frontend/src/editor_caret.rs`, gating on `general_e2e_composed_pbt`. First run: mutate editor_caret against the editor lib slices
 (Tier A, seconds/mutant). Survivor → work (Recipe 1: widen a generator or add a `wire()`), never a
 tautological assertion. `general_e2e_composed_pbt` hardcodes `cases:16` — add a `PROPTEST_CASES`
 env-honor edit so mutation runs can drop cases; add the binary to `.config/nextest.toml`'s 20-min

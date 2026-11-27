@@ -946,13 +946,13 @@ pbt-lib-slices:
 
 # --- Mutation Testing -------------------------------------------------------
 
-# Run cargo-mutants on a specific file (defaults to petri.rs)
-mutants file='crates/holon/src/petri.rs' timeout='300':
+# Run cargo-mutants on one file of one crate; per-crate flags: docs/Testing/Testing.md
+mutants pkg='holon-filesystem' file='crates/holon-filesystem/src/vault_path.rs' timeout='300' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
     cargo mutants \
-        --manifest-path crates/holon/Cargo.toml \
+        -p {{pkg}} {{FLAGS}} \
         --file {{file}} \
         --timeout {{timeout}} \
         --output target/gate-logs/mutants-out 2>&1 | tee target/gate-logs/mutants.log
