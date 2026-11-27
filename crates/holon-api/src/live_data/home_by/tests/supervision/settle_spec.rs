@@ -16,17 +16,21 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::*;
 use crate::delivery_ledger::DeliveryLedger;
 use crate::delivery_ledger::Seq;
+use crate::delivery_ledger::SettleVerdict;
 use crate::delivery_ledger::ViewKey;
+use crate::delivery_ledger::settle_verdict;
 use crate::live_data::DeliveryCursor;
+use crate::live_data::reporting_cursor;
+use crate::live_data::reporting_to;
 use crate::streaming::Batch;
 use crate::streaming::BatchMetadata;
 use crate::streaming::BatchWithMetadata;
 use crate::streaming::WithMetadata;
 
-const MODEL_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/Testing/ModelChecking"
-);
+fn model_dir() -> std::path::PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    Path::new(&manifest).join("../../docs/Testing/ModelChecking")
+}
 
 /// The reference authority behind a hold: while held, every read parks, so a
 /// poll leaves the fold inside its burst.
@@ -209,7 +213,9 @@ struct Slice {
 }
 
 impl Slice {
-    fn boot() -> Self {
+    /// `feed_taken`: a subscription took the write-back cursor, as the matview
+    /// manager does for a reporting subscription.
+    fn boot(feed_taken: bool) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("a current-thread runtime builds");
@@ -221,9 +227,19 @@ impl Slice {
         });
         let feed = test_feed();
         seed_root(&tree, &feed);
-        // Every block starts in the snapshot, so most drawn ops change the feed.
+        // Every block starts in the snapshot, so most drawn ops change the
+        // feed.
         for k in 0..BLOCKS.len() as u8 {
-            step(&tree, &feed, &Op::Set { k, parent: 0, after: 0, content: 0 });
+            step(
+                &tree,
+                &feed,
+                &Op::Set {
+                    k,
+                    parent: 0,
+                    after: 0,
+                    content: 0,
+                },
+            );
         }
         let (batches, batch_rx) = tokio::sync::mpsc::unbounded_channel();
         {
@@ -262,6 +278,13 @@ impl Slice {
             cons: 0,
             trace: Trace::default(),
         };
+        if feed_taken {
+            let cursor = slice.cursor.clone();
+            slice
+                .rt
+                .block_on(reporting_to(cursor, async { reporting_cursor() }))
+                .expect("reporting_to scopes a cursor");
+        }
         slice.poll();
         match slice.rx.try_recv() {
             Ok(Supervised::Reset) => {}
@@ -319,7 +342,8 @@ impl Slice {
                 .keys()
                 .any(|k| !entries.iter().any(|(e, _)| e == k)),
         };
-        let fold_idle = self.feed.consumed_seq() == self.taken && !self.authority.blocked.load(SeqCst);
+        let fold_idle =
+            self.feed.consumed_seq() == self.taken && !self.authority.blocked.load(SeqCst);
         if removes && !fold_idle {
             return false;
         }
@@ -376,19 +400,24 @@ impl Slice {
         }
     }
 
-    /// The delivery-ledger verdict that the session settle
-    /// (`MatviewManager::complete_through_for`) and the harness settle (its
-    /// CDC stage) both rest on, fed by the write-back cursor as the matview
-    /// manager feeds a reporting subscription.
+    /// The session's settle verdict (`settle_verdict`) over the values the
+    /// code gives: the ledger the matview manager builds from the write-back
+    /// cursor answers `complete_through_for`. No write-back owes anything: the
+    /// slice writes no documents.
     fn settled(&self) -> bool {
-        let mut ledger = DeliveryLedger::default();
-        ledger.emitted(Seq(self.emitted));
         let view = ViewKey {
             name: VIEW.into(),
-            instance: 0,
+            instance: Arc::as_ptr(&self.cursor) as usize as u64,
         };
-        self.cursor.feed(&mut ledger, view, true);
-        ledger.owed().is_empty()
+        let mut ledger = DeliveryLedger::default();
+        ledger.emitted(Seq(self.emitted));
+        self.cursor.feed(&mut ledger, view.clone(), true);
+        settle_verdict(
+            self.cursor.is_taken(),
+            Some(self.emitted),
+            || ledger.complete_through_view(&view),
+            || true,
+        ) == SettleVerdict::Settled
     }
 
     /// Runs one step; `false` when a `FeedChange` changes nothing (no step).
@@ -470,7 +499,7 @@ impl SpecModel {
     }
 
     fn home_by_settle() -> Self {
-        let dir = Path::new(MODEL_DIR);
+        let dir = model_dir();
         Self::load(
             &dir.join("HomeBySettle.tla"),
             &dir.join("HomeBySettle_trace.cfg"),
@@ -481,7 +510,12 @@ impl SpecModel {
     /// The names of the action definitions `Next` is a disjunction of.
     fn actions(&self) -> BTreeSet<String> {
         use tla_checker::ast::Expr;
-        let next = self.prepared.spec.next.as_ref().expect("the spec has a Next");
+        let next = self
+            .prepared
+            .spec
+            .next
+            .as_ref()
+            .expect("the spec has a Next");
         let mut out = BTreeSet::new();
         let mut disjuncts = vec![next];
         while let Some(e) = disjuncts.pop() {
@@ -631,11 +665,21 @@ fn run_slice(
     each_step: impl Fn(&Slice) -> std::result::Result<(), String>,
     at_end: impl Fn(&Slice) -> std::result::Result<(), String>,
 ) {
+    run_slice_of(test, false, each_step, at_end)
+}
+
+/// [`run_slice`] over a write-back cursor that a subscription `feed_taken`.
+fn run_slice_of(
+    test: &str,
+    feed_taken: bool,
+    each_step: impl Fn(&Slice) -> std::result::Result<(), String>,
+    at_end: impl Fn(&Slice) -> std::result::Result<(), String>,
+) {
     let counts = RefCell::new(BTreeMap::<Action, u64>::new());
     let runs = Cell::new(0u64);
     let run = |drawn: &[Drawn], every_step_counts: bool| -> std::result::Result<(), String> {
         runs.set(runs.get() + 1);
-        let mut slice = Slice::boot();
+        let mut slice = Slice::boot(feed_taken);
         for (i, d) in drawn.iter().enumerate() {
             if !slice.act(d) {
                 if every_step_counts {
@@ -676,8 +720,9 @@ fn every_run_is_a_behaviour_of_the_spec() {
     let spec = SpecModel::home_by_settle();
     let check = check_on();
     eprintln!("SPEC_CHECK {}", if check { "on" } else { "off" });
-    run_slice(
+    run_slice_of(
         "conformance",
+        true,
         |_| Ok(()),
         |slice| {
             if !check {
@@ -691,11 +736,11 @@ fn every_run_is_a_behaviour_of_the_spec() {
 
 /// SettleProperties!SettledReadsNewest on the code: a settle read that finds
 /// nothing owed sees the consumer hold the newest documents.
-#[test]
-fn a_quiet_settle_read_sees_the_newest_documents() {
+fn a_quiet_settle_read_sees_the_newest_documents(test: &str, feed_taken: bool) {
     let quiet_after_change = Cell::new(0u64);
-    run_slice(
-        "property",
+    run_slice_of(
+        test,
+        feed_taken,
         |slice| {
             let last = slice.trace.steps.last().expect("a step was recorded");
             if !last.state.returned {
@@ -722,6 +767,16 @@ fn a_quiet_settle_read_sees_the_newest_documents() {
         quiet_after_change.get() > 0,
         "no settle read found nothing owed after a feed change: the property held vacuously"
     );
+}
+
+#[test]
+fn a_quiet_settle_read_of_an_untaken_feed_sees_the_newest_documents() {
+    a_quiet_settle_read_sees_the_newest_documents("untaken feed", false);
+}
+
+#[test]
+fn a_quiet_settle_read_of_a_taken_feed_sees_the_newest_documents() {
+    a_quiet_settle_read_sees_the_newest_documents("taken feed", true);
 }
 
 #[test]
@@ -772,4 +827,26 @@ fn a_spec_the_tool_cannot_read_is_an_error() {
             Refusal::Step(s) => panic!("{name}: a tool failure read as a refused step: {s:?}"),
         }
     }
+}
+
+/// The session settle reads the write-back cursor only once a subscription
+/// took it (`DeliveryCursor::is_taken`); a settle read of a cursor no
+/// subscription took is no read of the production settle predicate.
+#[test]
+fn a_settle_read_reads_the_cursor_the_session_settle_reads() {
+    run_slice(
+        "session cursor",
+        |slice| {
+            let last = slice.trace.steps.last().expect("a step was recorded");
+            if last.action == Action::SettleRead && !slice.cursor.is_taken() {
+                return Err(format!(
+                    "SettleRead read a delivery cursor that no subscription took; the session \
+                     settle skips its feed stage for such a cursor\n  trace: {:#?}",
+                    slice.trace
+                ));
+            }
+            Ok(())
+        },
+        |_| Ok(()),
+    );
 }

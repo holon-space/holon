@@ -2,9 +2,9 @@
 (***************************************************************************)
 (* The home_by fold of the org write-back, its supervisor channel, the     *)
 (* write-back consumer and the block feed's delivery cursor, read by one   *)
-(* settle. Each action is one step of the PBT in                           *)
-(* crates/holon-api/src/live_data/home_by/settle_spec.rs; the variables    *)
-(* are the abstract state that test records after each step.               *)
+(* settle. Each action is one step of the PBT in settle_spec.rs            *)
+(* (crates/holon-api/src/live_data/home_by/tests/supervision/); the        *)
+(* variables are the abstract state that test records after each step.     *)
 (*                                                                         *)
 (* A version is a CDC batch seq: FeedChange number k delivers batch k.     *)
 (* A supervised restart (Supervised::Reset) is not modelled.               *)
@@ -87,9 +87,10 @@ DeliverCursor ==
     /\ returned' = FALSE
     /\ UNCHANGED <<feed, taken, mid, busy, chan, cons>>
 
-\* Models, Design "through": crates/holon-app/src/session.rs:writeback_settles
-\* (the feed stage waits until complete_through_for(writeback_feed) reaches
-\* the emitted seq) and crates/holon-api/src/delivery_ledger.rs:owed.
+\* Models, Design "through": crates/holon-api/src/delivery_ledger.rs:settle_verdict,
+\* which crates/holon-app/src/session.rs:writeback_settles calls (the feed
+\* stage waits until complete_through_for(writeback_feed) reaches the
+\* emitted seq).
 \* Models, Design "flag": the write-back stage of
 \* crates/holon-integration-tests/src/pbt/convergence.rs:writeback_owed
 \* (writeback_fold_in_flight) without a delivery cursor.

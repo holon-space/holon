@@ -233,6 +233,32 @@ impl View {
     }
 }
 
+/// What a settle read of the block feed's write-back consumer finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettleVerdict {
+    Settled,
+    /// The consumer has not applied through this emitted seq.
+    FeedBehind(u64),
+    WritebackOwes,
+}
+
+/// The settle read of the write-back feed. `start` is the seq emitted when the
+/// read began, `None` without a database. `applied` reads the seq through
+/// which the feed's view is complete; it is only valid for a taken cursor, so
+/// it runs only then. A feed nothing took is not waited on.
+pub fn settle_verdict(
+    feed_taken: bool,
+    start: Option<u64>,
+    applied: impl FnOnce() -> Seq,
+    writeback_owes_empty: impl FnOnce() -> bool,
+) -> SettleVerdict {
+    match start {
+        Some(start) if feed_taken && applied() < Seq(start) => SettleVerdict::FeedBehind(start),
+        _ if writeback_owes_empty() => SettleVerdict::Settled,
+        _ => SettleVerdict::WritebackOwes,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     CdcRouted,

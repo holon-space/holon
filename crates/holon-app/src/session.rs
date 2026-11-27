@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use holon::api::BackendEngine;
+use holon_api::delivery_ledger::SettleVerdict;
+use holon_api::delivery_ledger::settle_verdict;
 use holon_frontend::FrontendSession;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
@@ -402,17 +404,21 @@ async fn writeback_settles(
             delivered.borrow_and_update();
         }
         net.borrow_and_update();
-        let behind = match (engine, start) {
-            (Some(engine), Some(start)) if feed.is_taken() => {
-                let applied = engine.matview_manager().complete_through_for(feed);
-                (applied < holon_api::delivery_ledger::Seq(start)).then_some(start)
-            }
-            _ => None,
-        };
-        match behind {
-            Some(start) => set(Stage::FeedBehind(start)),
-            None if idle.writeback_owes_handed_over().is_empty() => return Ok(()),
-            None => set(Stage::WritebackOwes),
+        let verdict = settle_verdict(
+            feed.is_taken(),
+            start,
+            || {
+                engine
+                    .expect("a settle start is read from an engine")
+                    .matview_manager()
+                    .complete_through_for(feed)
+            },
+            || idle.writeback_owes_handed_over().is_empty(),
+        );
+        match verdict {
+            SettleVerdict::Settled => return Ok(()),
+            SettleVerdict::FeedBehind(start) => set(Stage::FeedBehind(start)),
+            SettleVerdict::WritebackOwes => set(Stage::WritebackOwes),
         }
         let delivery = async {
             match delivered.as_mut() {

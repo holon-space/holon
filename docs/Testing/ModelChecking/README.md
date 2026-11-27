@@ -10,7 +10,7 @@ use, checked with TLC. One model is also written in Quint.
 | `SettleProperties.tla` | The user-level properties every spec checks |
 | `Writeback.tla` | Org write-back of one block, a test that settles and reads the file |
 | `SettleWake.tla` | A windowed settle that waits on `UiWatermark::changed` |
-| `HomeBySettle.tla` | The `home_by` fold, its write-back consumer and the delivery cursor; the action alphabet of the PBT in `crates/holon-api/src/live_data/home_by/settle_spec.rs` |
+| `HomeBySettle.tla` | The `home_by` fold, its write-back consumer and the delivery cursor; the action alphabet of the PBT in `crates/holon-api/src/live_data/home_by/tests/supervision/settle_spec.rs` |
 | `HomeBySettle_trace.cfg` | The design that PBT replays its recorded runs against, in process (tla-checker) |
 | `Writeback.qnt` | The pre-fix settle of `Writeback.tla` in Quint |
 | `*.cfg` | One design of a spec each: constants only |
