@@ -732,6 +732,9 @@
                 "name": "malformed_reference_engine_route.rs"
               },
               {
+                "name": "marks_survive_warm_boot_pbt.rs"
+              },
+              {
                 "name": "merge_blocks_in_shared_pages.rs"
               },
               {
@@ -769,6 +772,9 @@
               },
               {
                 "name": "shopping_authoring_door_e2e.rs"
+              },
+              {
+                "name": "sql_provider_atomic_writes.rs"
               },
               {
                 "name": "sql_write_authority_previous_sibling.rs"
@@ -1175,6 +1181,15 @@
               {
                 "name": "content_canonical",
                 "path": "holon-api/src/content_canonical",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "delivery_ledger",
+                "path": "holon-api/src/delivery_ledger",
                 "files": [
                   {
                     "name": "tests.rs"
@@ -1609,6 +1624,12 @@
                 "name": "decision_block.rs"
               },
               {
+                "name": "delivery_ledger.rs"
+              },
+              {
+                "name": "duration_budget.rs"
+              },
+              {
                 "name": "edge_field.rs"
               },
               {
@@ -1763,6 +1784,9 @@
               },
               {
                 "name": "theme_token.rs"
+              },
+              {
+                "name": "timing_mode.rs"
               },
               {
                 "name": "type_services.rs"
@@ -2009,6 +2033,10 @@
             "path": "holon-app/tests",
             "dirs": [
               {
+                "name": "fixtures",
+                "path": "holon-app/tests/fixtures"
+              },
+              {
                 "name": "session_shutdown",
                 "path": "holon-app/tests/session_shutdown",
                 "files": [
@@ -2057,6 +2085,12 @@
               },
               {
                 "name": "core_schema_failure_boots_degraded.rs"
+              },
+              {
+                "name": "dangling_config_link_boots_degraded.rs"
+              },
+              {
+                "name": "database_format_check_at_boot.rs"
               },
               {
                 "name": "database_open_disclosure.rs"
@@ -2128,6 +2162,12 @@
                 "name": "is_program_net_agrees_with_the_profile.rs"
               },
               {
+                "name": "isolated_boot.rs"
+              },
+              {
+                "name": "kill_session_stops_every_writer.rs"
+              },
+              {
                 "name": "loro_document_manager_page_position.rs"
               },
               {
@@ -2183,6 +2223,9 @@
               },
               {
                 "name": "root_slot_pending_while_seeding.rs"
+              },
+              {
+                "name": "runtime_type_survives_restart.rs"
               },
               {
                 "name": "search_deep_script_query_does_not_overflow.rs"
@@ -2352,7 +2395,7 @@
         "description": "Capability profiles: what each durable FORMAT can carry without loss.",
         "pattern": "Specification",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Specification\n@c4 uses holon-api \"the Value carriers a profile constrains\" \"Rust\"\n\nCapability profiles: what each durable FORMAT can carry without loss.\n\nA profile is DATA — a yaml file next to the adapter, parsed here into\nclosed enums — not a type parameter. Datatypes are runtime-declared, so\ncapability cannot be monomorphized (design Fork 2).\n\nThe point of the crate is that a clause can be FALSIFIED: [`certify`]\ndrives the format's real round trip and reports a [`Violation`] for each\ndeclared restriction that is not real, and a [`TighteningPrompt`] for each\nrestriction the format does not actually need.\n\n**Every CERTIFIED clause is falsifiable; uncertified clauses are marked as\nsuch in the yaml.** Increment 2b.1 certifies three:\n`property_keys.reserved_prefixes`, `property_values.types` and\n`property_values.empty_string`. The rest of axes 3 and 4 are declared with a\n`file:line` citation and carry `# NOT YET CERTIFIED (2b.2)` — a citation is\nEVIDENCE, not a gate, and a reader must not mistake one for the other. A\nprofile is only as trustworthy as the clauses the certifier actually drives.\n\n## Dependency direction, both ways\n\nThis crate depends on `holon-api` and on NO format crate. The reverse is\nequally forbidden: a format crate must not gain a non-test dependency on\nthis one, or it starts reading its own profile at runtime and the profile\nstops being an independent statement ABOUT it. Each [`CertifiableFormat`]\nimpl therefore lives in the format crate's `tests/` directory. Both\ndirections are pinned by\n`crates/holon-architecture-tests/tests/architecture_rules.rs`.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Specification\n@c4 uses holon-api \"the Value carriers a profile constrains\" \"Rust\"\n\nCapability profiles: what each durable FORMAT can carry without loss.\n\nA profile is DATA — a yaml file next to the adapter, parsed here into\nclosed enums — not a type parameter. Datatypes are runtime-declared, so\ncapability cannot be monomorphized (design Fork 2).\n\nThe point of the crate is that a clause can be FALSIFIED: [`certify`]\ndrives the format's real round trip and reports a [`Violation`] for each\ndeclared restriction that is not real, and a [`TighteningPrompt`] for each\nrestriction the format does not actually need.\n\n**Every CERTIFIED clause is falsifiable; uncertified clauses are marked as\nsuch in the yaml** (`not_yet_certified`, each with a reason). A profile is\nonly as trustworthy as the clauses the certifier actually drives.\n\n## Dependency direction, both ways\n\nThis crate depends on `holon-api` and on NO format crate. The reverse is\nequally forbidden: a format crate must not gain a non-test dependency on\nthis one, or it starts reading its own profile at runtime and the profile\nstops being an independent statement ABOUT it. Each [`CertifiableFormat`]\nimpl therefore lives in the format crate's `tests/` directory. Both\ndirections are pinned by\n`crates/holon-architecture-tests/tests/architecture_rules.rs`.",
         "source_file": "holon-capability/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3581,6 +3624,9 @@
                 "name": "render_context.rs"
               },
               {
+                "name": "render_epoch.rs"
+              },
+              {
                 "name": "render_interpreter.rs"
               },
               {
@@ -3682,6 +3728,9 @@
                 "name": "drawer_open_state.rs"
               },
               {
+                "name": "driver_settle_schedule.rs"
+              },
+              {
                 "name": "every_builder_survives_authored_args.rs"
               },
               {
@@ -3697,6 +3746,9 @@
                 "name": "main.rs"
               },
               {
+                "name": "mutable_cross_thread_set.rs"
+              },
+              {
                 "name": "numeric_column_text.rs"
               },
               {
@@ -3706,7 +3758,13 @@
                 "name": "panic_record_child_process.rs"
               },
               {
+                "name": "panic_record_serial.rs"
+              },
+              {
                 "name": "pending_question_render.rs"
+              },
+              {
+                "name": "prop_wait.rs"
               },
               {
                 "name": "render_binary_op_non_finite.rs"
@@ -3752,6 +3810,9 @@
               },
               {
                 "name": "text_style_kwarg.rs"
+              },
+              {
+                "name": "ui_watermark_schedule.rs"
               },
               {
                 "name": "unknown_function_call_is_an_error_node.rs"
@@ -3973,6 +4034,16 @@
             "files": [
               {
                 "name": "martin-vault-2026-07-23.json"
+              }
+            ]
+          },
+          {
+            "name": "proptest-regressions",
+            "path": "holon-integration-tests/proptest-regressions",
+            "dirs": [
+              {
+                "name": "pbt",
+                "path": "holon-integration-tests/proptest-regressions/pbt"
               }
             ]
           },
@@ -4320,6 +4391,9 @@
                         "name": "builder.rs"
                       },
                       {
+                        "name": "case_budget.rs"
+                      },
+                      {
                         "name": "catalog.rs"
                       },
                       {
@@ -4386,10 +4460,16 @@
                         "name": "slo_probe.rs"
                       },
                       {
+                        "name": "snapshot_boot.rs"
+                      },
+                      {
                         "name": "soak_seed.rs"
                       },
                       {
                         "name": "span_metrics.rs"
+                      },
+                      {
+                        "name": "static_examples.rs"
                       },
                       {
                         "name": "subsystem_seed.rs"
@@ -5476,9 +5556,6 @@
                     "name": "sut_row_parsing.rs"
                   },
                   {
-                    "name": "timing_mode.rs"
-                  },
-                  {
                     "name": "transition_budgets.rs"
                   },
                   {
@@ -5593,7 +5670,7 @@
                 "c4_level": "unknown",
                 "description": "Cold-boot, restart, and boot-time ingest regressions.",
                 "pattern_status": "planned",
-                "content": "Cold-boot, restart, and boot-time ingest regressions.\n\nSix members install a `tracing_subscriber::fmt()` subscriber of their own\n(`init_tracing`), which claims the process-global default. That is why no\n`SpanCollector`-based test may join this suite — see `span_capture_suite`.",
+                "content": "Cold-boot, restart, and boot-time ingest regressions.\n\nSeven members install a `tracing_subscriber::fmt()` subscriber of their own\n(`init_tracing`), which claims the process-global default. That is why no\n`SpanCollector`-based test may join this suite — see `span_capture_suite`.",
                 "source_file": "holon-integration-tests/tests/boot_suite/mod.rs",
                 "parent": "holon-integration-tests",
                 "files": [
@@ -5607,7 +5684,16 @@
                     "name": "boot_seed_outcome.rs"
                   },
                   {
+                    "name": "boot_step_fault_degrades.rs"
+                  },
+                  {
                     "name": "cold_boot_share_disclosure.rs"
+                  },
+                  {
+                    "name": "device_key_entry_boot.rs"
+                  },
+                  {
+                    "name": "failed_ingest_disclosed_across_restarts.rs"
                   },
                   {
                     "name": "forward_edge_ingest_regression.rs"
@@ -5635,6 +5721,9 @@
                   },
                   {
                     "name": "phantom_loro_exists_repro.rs"
+                  },
+                  {
+                    "name": "stop_writes_late_delivered_edits.rs"
                   },
                   {
                     "name": "watch_context_boot_purge.rs"
@@ -5683,6 +5772,9 @@
                   },
                   {
                     "name": "holon_rule_runtime_discovery_prod_session.rs"
+                  },
+                  {
+                    "name": "invariant_doc_links.rs"
                   },
                   {
                     "name": "live_self_check_suite.rs"
@@ -5909,6 +6001,9 @@
                     "name": "render_source_panels.rs"
                   },
                   {
+                    "name": "router_settle_waits_for_delivery.rs"
+                  },
+                  {
                     "name": "sidebar_modifier_click_open_tab_probe.rs"
                   },
                   {
@@ -6050,6 +6145,9 @@
                     "name": "convert_block_to_page_materializes_child_file.rs"
                   },
                   {
+                    "name": "copied_heading_children_keep_their_rows.rs"
+                  },
+                  {
                     "name": "doc_id_writeback_stability.rs"
                   },
                   {
@@ -6087,6 +6185,9 @@
                   },
                   {
                     "name": "reparent_clears_removed_values.rs"
+                  },
+                  {
+                    "name": "settle_reaches_write_targets.rs"
                   },
                   {
                     "name": "writeback_stale_cross_doc_prune.rs"
@@ -6167,6 +6268,9 @@
                     "name": "ref_entity_lookup_parity.rs"
                   },
                   {
+                    "name": "sql_store_stamps_the_injected_clock.rs"
+                  },
+                  {
                     "name": "tag_with_comma_drops_whole_set.rs"
                   },
                   {
@@ -6195,6 +6299,15 @@
                 "name": "advice_live_mcp_gate.rs"
               },
               {
+                "name": "attestation_counter_reader.rs"
+              },
+              {
+                "name": "attestation_oracle.rs"
+              },
+              {
+                "name": "attestation_zero_draw_refusal.rs"
+              },
+              {
                 "name": "authority_name_chain_under_lag.rs"
               },
               {
@@ -6205,6 +6318,9 @@
               },
               {
                 "name": "bisection_pbt.rs"
+              },
+              {
+                "name": "breach_summary_pbt.rs"
               },
               {
                 "name": "capability_hop_cost.rs"
@@ -6225,6 +6341,9 @@
                 "name": "dense_patch_tags_properties.rs"
               },
               {
+                "name": "duration_budget_pbt.rs"
+              },
+              {
                 "name": "enabledness_query_production_cost.rs"
               },
               {
@@ -6232,6 +6351,12 @@
               },
               {
                 "name": "general_e2e_composed_pbt.rs"
+              },
+              {
+                "name": "hand_authored_fakes.rs"
+              },
+              {
+                "name": "hand_authored_refusals.rs"
               },
               {
                 "name": "hand_authored_regressions.rs"
@@ -6315,6 +6440,9 @@
                 "name": "slot_convergence_pbt.rs"
               },
               {
+                "name": "snapshot_boot_pbt.rs"
+              },
+              {
                 "name": "stale_rewrite_sibling_order.rs"
               },
               {
@@ -6328,6 +6456,9 @@
               },
               {
                 "name": "template_instantiation_under_lag.rs"
+              },
+              {
+                "name": "timing_assertion_scanner_pbt.rs"
               },
               {
                 "name": "two_instance_composed_pbt.rs"
@@ -6869,7 +7000,7 @@
                 "c4_level": "unknown",
                 "description": "Owner-identity key: the durable authority root for sharing (ADR 0028 D1/OQ4).",
                 "pattern_status": "planned",
-                "content": "Owner-identity key: the durable authority root for sharing (ADR 0028\nD1/OQ4).\n\n# Why this is distinct from the device key\n\n`device_key` ([`crate::device_key_store`]) is a *transport/session*\nidentity: it authenticates a QUIC connection and seeds per-share CRDT peer\nids. It is low-value and stored as a plaintext file beside the vault. The\n**owner key** is different: it *signs durable authority objects* — the\ndevice roster (B1) and the crossing/policy log ([`holon_sharing`]'s\n`SigningAuthority`). If it leaks, an attacker can mint fleet membership; if\nit is lost, the owner can no longer enroll devices. It therefore:\n\n- lives in the OS keychain, not a plaintext file ([`holon_secrets`]);\n- has a one-time [`recovery::RecoveryCode`] so a lost founding device is\n  recoverable;\n- is generated **lazily** — on the first share/enrollment, never at first\n  launch (ADR 0028 D1 \"prompt DEFERRED to first sharing/enrollment use\").\n\nRotation is out of scope here and rides the H4 succession-pointer machinery.\n\n# Secret hygiene\n[`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this\nmodule except into the keychain. Signatures and public keys are safe to log.",
+                "content": "Owner-identity key: the durable authority root for sharing (ADR 0028\nD1/OQ4).\n\n# Why this is distinct from the device key\n\n`device_key` ([`crate::device_key_custody`]) is a *transport/session*\nidentity: it authenticates a QUIC connection and seeds per-share CRDT peer\nids. It lives in the OS keychain under its own service. The\n**owner key** is different: it *signs durable authority objects* — the\ndevice roster (B1) and the crossing/policy log ([`holon_sharing`]'s\n`SigningAuthority`). If it leaks, an attacker can mint fleet membership; if\nit is lost, the owner can no longer enroll devices. It therefore:\n\n- lives in the OS keychain, not a plaintext file ([`holon_secrets`]);\n- has a one-time [`recovery::RecoveryCode`] so a lost founding device is\n  recoverable;\n- is generated **lazily** — on the first share/enrollment, never at first\n  launch (ADR 0028 D1 \"prompt DEFERRED to first sharing/enrollment use\").\n\nRotation is out of scope here and rides the H4 succession-pointer machinery.\n\n# Secret hygiene\n[`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this\nmodule except into the keychain. Signatures and public keys are safe to log.",
                 "source_file": "holon-loro/src/owner_identity/mod.rs",
                 "parent": "holon-loro",
                 "files": [
@@ -6908,7 +7039,7 @@
                 "name": "deleted_container_purge.rs"
               },
               {
-                "name": "device_key_store.rs"
+                "name": "device_key_custody.rs"
               },
               {
                 "name": "device_pairing.rs"
@@ -6927,6 +7058,9 @@
               },
               {
                 "name": "event_ring.rs"
+              },
+              {
+                "name": "foreign_root.rs"
               },
               {
                 "name": "import_atomicity_probe.rs"
@@ -6995,6 +7129,9 @@
                 "name": "peer_import.rs"
               },
               {
+                "name": "peer_versions.rs"
+              },
+              {
                 "name": "revert_to_rollback_probe.rs"
               },
               {
@@ -7010,7 +7147,7 @@
                 "name": "share_enrollment.rs"
               },
               {
-                "name": "share_peer_id.rs"
+                "name": "share_identity.rs"
               },
               {
                 "name": "shared_snapshot_store.rs"
@@ -7020,6 +7157,9 @@
               },
               {
                 "name": "stable_id_index.rs"
+              },
+              {
+                "name": "stored_iroh_formats.rs"
               },
               {
                 "name": "sync_transport.rs"
@@ -7075,6 +7215,9 @@
                 "name": "block_source_boundaries.rs"
               },
               {
+                "name": "compacted_peer_receives_concurrent_edits.rs"
+              },
+              {
                 "name": "field_write_cost.rs"
               },
               {
@@ -7088,6 +7231,9 @@
               },
               {
                 "name": "pairing_boot_degraded.rs"
+              },
+              {
+                "name": "pairing_refuses_trimmed_owner.rs"
               },
               {
                 "name": "persisted_read_is_consistent.rs"
@@ -7130,6 +7276,12 @@
               },
               {
                 "name": "typed_entity_purge_recreate.rs"
+              },
+              {
+                "name": "typed_entity_read_scale.rs"
+              },
+              {
+                "name": "typed_entity_replace_scope_equivalence.rs"
               },
               {
                 "name": "typed_entity_scale.rs"
@@ -7229,6 +7381,9 @@
                     "name": "create_stale_loro.rs"
                   },
                   {
+                    "name": "doc_churn.rs"
+                  },
+                  {
                     "name": "merge_from_peer.rs"
                   },
                   {
@@ -7308,7 +7463,7 @@
         "description": "The wiring that binds the Loro CRDT backend to the `holon` engine.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-net \"transition-net executor\" \"Rust\"\n@c4 uses holon-net-shell \"async net driver\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
         "source_file": "holon-loro-wiring/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -7351,6 +7506,16 @@
             "target": "holon-profiles",
             "label": "entity profile resolution",
             "protocol": "Rust"
+          },
+          {
+            "target": "holon-net",
+            "label": "transition-net executor",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-net-shell",
+            "label": "async net driver",
+            "protocol": "Rust"
           }
         ],
         "dirs": [
@@ -7358,6 +7523,9 @@
             "name": "src",
             "path": "holon-loro-wiring/src",
             "files": [
+              {
+                "name": "device_key_net.rs"
+              },
               {
                 "name": "event_infra_module.rs"
               },
@@ -7375,6 +7543,9 @@
               },
               {
                 "name": "loro_ui_watcher.rs"
+              },
+              {
+                "name": "loro_ui_watcher_refresh_pbt.rs"
               },
               {
                 "name": "memory_backend.rs"
@@ -7524,7 +7695,7 @@
         "description": "`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"FileFormatAdapter port\" \"Rust\"\n@c4 uses holon-org-format \"shared Block/MarkSpan substrate\" \"Rust\"\n\n`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:\nObsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`\n+ `MarkSpan` substrate as org (see\n  `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).\n\nBoth adapters implement `holon_core::FileFormatAdapter`. They are **read\nonly**: `render_document` / `render_blocks` panic (a write to a foreign file\nis loss by definition under ADR 0025 until anchored write-back lands), and\n`writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the\ncontroller-level gate that must veto any write to a foreign-vault doc before\na renderer is ever reached.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"FileFormatAdapter port\" \"Rust\"\n@c4 uses holon-org-format \"shared Block/MarkSpan substrate\" \"Rust\"\n\n`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:\nObsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`\n+ `MarkSpan` substrate as org (see\n  `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).\n\nBoth adapters implement `holon_core::FileFormatAdapter`. They are **read\nonly**: `render_document` / `render_blocks` return an error (a write to a\nforeign file is loss by definition under ADR 0025 until anchored write-back\nlands), and `writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is\nthe controller-level gate that must veto any write to a foreign-vault doc\nbefore a renderer is ever reached.",
         "source_file": "holon-markdown/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -7630,7 +7801,13 @@
             ],
             "files": [
               {
+                "name": "documents.rs"
+              },
+              {
                 "name": "explicit_id_contract.rs"
+              },
+              {
+                "name": "inline_scan_properties.rs"
               },
               {
                 "name": "logseq_ingest.rs"
@@ -7645,7 +7822,19 @@
                 "name": "planning_property_reingest.rs"
               },
               {
+                "name": "reingest_support.rs"
+              },
+              {
+                "name": "scan_lookup.rs"
+              },
+              {
+                "name": "store_params_contract.rs"
+              },
+              {
                 "name": "task_marker_reingest.rs"
+              },
+              {
+                "name": "total_parse.rs"
               },
               {
                 "name": "write_guard.rs"
@@ -8182,6 +8371,9 @@
                 "path": "holon-net/src/uft",
                 "files": [
                   {
+                    "name": "answer.rs"
+                  },
+                  {
                     "name": "lower.rs"
                   }
                 ]
@@ -8294,7 +8486,16 @@
                 "name": "analysis_soundness.rs"
               },
               {
+                "name": "answer_bind_probe.rs"
+              },
+              {
+                "name": "caller_input_refusals.rs"
+              },
+              {
                 "name": "caller_inputs.rs"
+              },
+              {
+                "name": "caller_inputs_wide.rs"
               },
               {
                 "name": "catalog_totality.rs"
@@ -8343,6 +8544,9 @@
               },
               {
                 "name": "main.rs"
+              },
+              {
+                "name": "nested_ask_probe.rs"
               },
               {
                 "name": "net_file.rs"
@@ -8541,6 +8745,9 @@
             ],
             "files": [
               {
+                "name": "leaderless_group_identity.rs"
+              },
+              {
                 "name": "probe_run.rs"
               },
               {
@@ -8627,6 +8834,12 @@
               },
               {
                 "name": "netd_origin.rs"
+              },
+              {
+                "name": "netd_start_pid_file.rs"
+              },
+              {
+                "name": "netd_why_not_refusal.rs"
               }
             ]
           }
@@ -8724,10 +8937,16 @@
                 "name": "comma_escape.rs"
               },
               {
+                "name": "decision_block.rs"
+              },
+              {
                 "name": "dense.rs"
               },
               {
                 "name": "drawer.rs"
+              },
+              {
+                "name": "encodable.rs"
               },
               {
                 "name": "inline_marks.rs"
@@ -8982,6 +9201,18 @@
             ],
             "files": [
               {
+                "name": "a_deleted_page_leaves_no_file.rs"
+              },
+              {
+                "name": "a_lagging_page_registry_keeps_the_page_header.rs"
+              },
+              {
+                "name": "a_retracted_page_root_keeps_the_page_header.rs"
+              },
+              {
+                "name": "a_vanished_file_asks_no_bulk_pass.rs"
+              },
+              {
                 "name": "asset_seed_header_pass_cost.rs"
               },
               {
@@ -9046,6 +9277,9 @@
               },
               {
                 "name": "proposal_writes_do_not_amplify.rs"
+              },
+              {
+                "name": "refused_writeback_is_disclosed.rs"
               },
               {
                 "name": "reingest_task_promotion_idempotent.rs"
@@ -9540,6 +9774,9 @@
                 "name": "cook_ingest.rs"
               },
               {
+                "name": "cook_metadata_pbt.rs"
+              },
+              {
                 "name": "cook_rows.rs"
               },
               {
@@ -9666,6 +9903,9 @@
               },
               {
                 "name": "type_services_declaration.rs"
+              },
+              {
+                "name": "ui_condition_split.rs"
               },
               {
                 "name": "vault_profile_admission_is_history_free.rs"
@@ -9827,10 +10067,10 @@
         "name": "holon-sharing",
         "path": "holon-sharing",
         "c4_level": "component",
-        "description": "`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2 owner-scoped, totally-ordered crossing log + its migration/undo/enforcement seams; the D4/H8 owner-signed policy objects + lease membership; and the H4 owner-private alias ledger / re-encode baseline).",
+        "description": "`holon-sharing` — the ADR 0028 sharing machinery: the owner-scoped, totally-ordered crossing log, owner-signed policy with lease membership, the receiver-side admission of synced envelopes, and the owner-private alias ledger.",
         "pattern": "Policy",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Policy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-loro \"CRDT substrate for the owner log\" \"Rust\"\n\n`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2\nowner-scoped, totally-ordered crossing log + its migration/undo/enforcement\nseams; the D4/H8 owner-signed policy objects + lease membership; and the H4\nowner-private alias ledger / re-encode baseline).\n\n## What lands here (Inc 5 — [`policy`], [`lease`])\n- [`policy::Policy`] — owner-signed `{selector: stable block id (H6, never a\n  name), principals, capabilities, delegation, lease}`; committed through\n  [`policy::PolicySet`], which enforces the **A7 disjointness invariant**\n  (nested/overlapping selectors rejected loud at commit) and mirrors each\n  commit as a `PolicyEdit` into the Inc-4 log.\n- [`lease`] — lease-based membership (H8): short-lived certs measured on the\n  injected [`holon_api::Clock`] seam (NO `SystemTime::now`), **revocation =\n  non-renewal**, and owner→delegate→peer chain verification\n  ([`lease::verify_membership`]) — else membership is unclaimable.\n- [`policy::evaluate_grant`] — a non-owner grant without delegation rights\n  becomes a **pending request** (D4).\n\n## What lands here (Inc 6 — [`alias_ledger`])\n- [`alias_ledger::AliasLedger`] — owner-private,\n  [`alias_ledger::NonReplicated`] (OQ3) `old-id → new-id` chains; re-encode\n  and owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner\n  backlinks rewrite through the SQL `block_links` junction; recipients get\n  fresh public ids with no correlation handle and their dangling refs render\n  loud (fail-loud).\n\nHome ratified by OQ2: a NEW crate (not an extension of `holon-loro`) — the\nlog arbitrates *policy*, which is not Loro's concern. It reuses the Loro\nsubstrate (`doc_lamport_height` for the dedicated owner-log clock, delta\nexport/import for merge) and the `share_peer_id` device-key derivation, but\nowns the sharing domain types and arbitration rule.\n\n## What lands here (Inc 4)\n- [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope, one clock,\n  entries stamped with the FROZEN tuple `(lamport_height(log_doc) at append,\n  stable_peer_id)`; both crossings and policy edits in the one log.\n- [`arbitration`] — concurrent divergent crossings ordered\n  deterministically; the loser is rejected loudly and returned as a\n  *keepable divergent copy*.\n- [`journal`] — idempotent, resumable migration; the journal is the unit of\n  atomicity; leak-direction contract (widen = create-shared-first, narrow =\n  delete-shared-first).\n- [`undo`] — inverse-crossing undo through the same log; a rejected loser\n  NEVER enters the undo stack.\n- [`projection`] — SQL projection semantics across the migration window +\n  the orphan-row tripwire (wired at Inc 3).\n- [`boundary`] — the first runtime consumer of\n  [`holon_api::BoundaryBehavior`]: the allow/reject-loud decision function,\n  incl. the `Unclassified` fail-closed contract and the descriptor-less-op\n  classification design.\n\n## Signature shape (OQ4) — REAL as of the W4 ceremony work\nEvery entry carries an [`types::OwnerSig`] produced by a\n[`types::SigningAuthority`]. The production impl is\n[`types::OwnerKeyAuthority`], backed by the durable Ed25519\n[`holon_loro::owner_identity::OwnerIdentityKey`]; its signatures verify\nunder the owner's public key via [`types::OwnerSig::verify`] and\n[`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] (a blake3\nstand-in) remains ONLY as a test double and its output is REJECTED by\nverification. Swapping authorities required no log-layout change (the field\nshape was committed at Inc 4).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Policy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-loro \"CRDT substrate for the owner log\" \"Rust\"\n\n`holon-sharing` — the ADR 0028 sharing machinery: the owner-scoped,\ntotally-ordered crossing log, owner-signed policy with lease membership,\nthe receiver-side admission of synced envelopes, and the owner-private\nalias ledger.\n\nThe log arbitrates *policy*, which is not Loro's concern, so this is its own\ncrate on top of the Loro substrate (`doc_lamport_height` for the owner-log\nclock, delta export/import for merge).\n\n## Modules\n- [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope; entries\n  are stamped with the frozen tuple `(lamport_height(log_doc) at append,\n  stable_peer_id)`; crossings and policy edits share the one log.\n- [`arbitration`] — concurrent divergent crossings ordered\n  deterministically; the loser is rejected loudly and returned as a\n  *keepable divergent copy*.\n- [`journal`] — idempotent, resumable migration; the journal is the unit of\n  atomicity; leak direction: widen = create-shared-first, narrow =\n  delete-shared-first.\n- [`undo`] — inverse-crossing undo through the same log; a rejected loser\n  never enters the undo stack.\n- [`policy`] — owner-signed `{selector: stable block id, principals,\n  capabilities, delegation, lease}` committed through [`policy::PolicySet`],\n  which rejects nested or overlapping selectors at commit and mirrors each\n  commit as a `PolicyEdit` into the log. [`policy::evaluate_grant`] turns a\n  non-owner grant without delegation rights into a pending request.\n- [`lease`] — short-lived membership certs measured on the injected\n  [`holon_api::Clock`]; revocation = non-renewal; owner→delegate→peer chain\n  verification ([`lease::verify_membership`]).\n- [`acceptor`] and [`sync`] — the receiver's admit/refuse decision for one\n  envelope, and the push/pull round over a [`holon_loro`] sync transport.\n- [`enforcement`], [`boundary`] — the [`holon_core`] boundary-enforcer\n  implementation over the policy set, and the allow/reject-loud decision for\n  one [`holon_api::BoundaryBehavior`] (`Unclassified` fails closed).\n- [`projection`], [`registry_binding`] — SQL projection semantics across the\n  migration window and the orphan-row tripwire, bound to the container\n  registry.\n- [`alias_ledger::AliasLedger`] — owner-private, never replicated `old-id →\n  new-id` chains and the owner-signed [`alias_ledger::SuccessionPointer`];\n  recipients get fresh public ids with no correlation handle.\n\n## Signatures\nEvery log entry carries a [`types::OwnerSig`] from a\n[`types::SigningAuthority`]. [`types::OwnerKeyAuthority`] signs with the\ndurable Ed25519 owner key and verifies via [`types::OwnerSig::verify`] and\n[`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] is a blake3\ntest double whose output verification rejects.",
         "source_file": "holon-sharing/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -10292,6 +10532,9 @@
                 "name": "backlinks_section_matview.rs"
               },
               {
+                "name": "block_with_path_upkeep_scaling.rs"
+              },
+              {
                 "name": "cdc_batch_trace_links.rs"
               },
               {
@@ -10406,6 +10649,9 @@
                 "name": "schema_source_ddl_lock.rs"
               },
               {
+                "name": "scoped_tracing.rs"
+              },
+              {
                 "name": "sidecar_views.rs"
               },
               {
@@ -10433,6 +10679,9 @@
                 "name": "upgrade_rebuilds_views_and_derived.rs"
               },
               {
+                "name": "views_of_another_engine_build.rs"
+              },
+              {
                 "name": "warm_reboot_keeps_matviews.rs"
               },
               {
@@ -10450,6 +10699,9 @@
         "files": [
           {
             "name": "Cargo.toml"
+          },
+          {
+            "name": "build.rs"
           }
         ]
       },
@@ -10570,6 +10822,89 @@
               },
               {
                 "name": "views_law.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "petri-net",
+        "path": "petri-net",
+        "c4_level": "component",
+        "description": "A coloured Petri-net kernel. Tokens live in rows addressed by (place, key); each place has a discipline. Transitions declare their arcs, and one bind function per transition is guard, binding and fire in one. The net fires with level semantics: one enabled (transition, key) pair at a time, then check again from scratch.",
+        "pattern": "Interpreter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Interpreter\n\nA coloured Petri-net kernel. Tokens live in rows addressed by (place, key);\neach place has a discipline. Transitions declare their arcs, and one bind\nfunction per transition is guard, binding and fire in one. The net fires\nwith level semantics: one enabled (transition, key) pair at a time, then\ncheck again from scratch.\n\nEvery change of the marking is a firing of a declared transition. This is a\nsingle-replica law: a replicated store that merges rows needs its own entry\nand a settle after it.",
+        "source_file": "petri-net/src/lib.rs",
+        "layer": "Core",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "petri-net/src",
+            "dirs": [
+              {
+                "name": "testkit",
+                "path": "petri-net/src/testkit",
+                "c4_level": "unknown",
+                "description": "Shared generators and laws, for this crate's tests and for stores in other crates (behind the `testkit` feature).",
+                "pattern_status": "planned",
+                "content": "Shared generators and laws, for this crate's tests and for stores in other\ncrates (behind the `testkit` feature).",
+                "source_file": "petri-net/src/testkit/mod.rs",
+                "parent": "petri-net",
+                "files": [
+                  {
+                    "name": "laws.rs"
+                  },
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "nets.rs"
+                  },
+                  {
+                    "name": "store_laws.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "bound.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "mem.rs"
+              },
+              {
+                "name": "net.rs"
+              },
+              {
+                "name": "store.rs"
+              },
+              {
+                "name": "view.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "petri-net/tests",
+            "files": [
+              {
+                "name": "net_laws.rs"
+              },
+              {
+                "name": "scenarios.rs"
+              },
+              {
+                "name": "store_laws.rs"
               }
             ]
           }

@@ -557,7 +557,13 @@
             ],
             "files": [
               {
+                "name": "boot_error_view.rs"
+              },
+              {
                 "name": "breadcrumb.rs"
+              },
+              {
+                "name": "bridge_hold.rs"
               },
               {
                 "name": "di.rs"
@@ -585,6 +591,9 @@
               },
               {
                 "name": "oracles_ui.rs"
+              },
+              {
+                "name": "prewarm_seam.rs"
               },
               {
                 "name": "reactive_vm_poc.rs"
@@ -647,6 +656,9 @@
                   },
                   {
                     "name": "mod.rs"
+                  },
+                  {
+                    "name": "settle.rs"
                   },
                   {
                     "name": "sim_windowed_replay.rs"
@@ -772,6 +784,9 @@
               },
               {
                 "name": "executor_bridge_test.rs"
+              },
+              {
+                "name": "foreground_wake_order.rs"
               },
               {
                 "name": "gpui_capture_replay.rs"
@@ -979,6 +994,12 @@
               },
               {
                 "name": "settings_stored_secret_windowed.rs"
+              },
+              {
+                "name": "settle_waits_for_late_row_bridge.rs"
+              },
+              {
+                "name": "settle_window_fixed_point.rs"
               },
               {
                 "name": "sidebar_disclosure_affordance.rs"
@@ -1276,6 +1297,9 @@
                 "name": "foreign_host_or_origin_is_refused.rs"
               },
               {
+                "name": "http_bind_refuses_non_loopback.rs"
+              },
+              {
                 "name": "main.rs"
               },
               {
@@ -1401,6 +1425,9 @@
                 "source_file": "tui/tests/tui_process/mod.rs",
                 "parent": "tui",
                 "files": [
+                  {
+                    "name": "isolation.rs"
+                  },
                   {
                     "name": "mod.rs"
                   }
