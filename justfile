@@ -1543,6 +1543,15 @@ cargo-free-checks:
     nextest_no_tests() {
         ./scripts/check-nextest-no-tests.py && ./scripts/test-check-nextest-no-tests.py && ./scripts/test-no-tests-check-reach.py
     }
+    # Runs the TLA+ specs when the diff touches a modelled file or the spec folder, else logs the skip.
+    # MODEL_CHECK_CHANGED names a file of changed paths; without it they are the diff from the fork point of
+    # MODEL_CHECK_BASE (default main).
+    model_checking() {
+        local changed=${MODEL_CHECK_CHANGED:-target/gate-logs/model-checking-changed.txt}
+        [ -n "${MODEL_CHECK_CHANGED:-}" ] || python3 scripts/select-tests.py --changed-paths "${MODEL_CHECK_BASE:-main}" >"$changed" || return
+        python3 docs/Testing/ModelChecking/run.py --out target/model-checking/logs --if-touched "$changed"
+    }
+    check model-checking target/gate-logs/gate-arch-model-checking.log model_checking
     check admission-sites-count target/gate-logs/gate-arch-admission-sites-count.log ./scripts/test-admission-sites-count.sh
     check check-target-leftovers target/gate-logs/gate-arch-check-target-leftovers.log ./scripts/test-check-target-leftovers.sh
     check admission-sites target/gate-logs/gate-arch-admission-sites.log ./scripts/check-admission-sites.sh
@@ -1601,7 +1610,7 @@ lane-checks base:
             failed+=" $name"
         fi
     }
-    run cargo-free-checks just cargo-free-checks
+    run cargo-free-checks env MODEL_CHECK_BASE={{base}} just cargo-free-checks
     run machete just machete
     advisories=$(./scripts/lane-check-map.py deny-advisories <<<"$changed")
     if [ "$advisories" = run ]; then

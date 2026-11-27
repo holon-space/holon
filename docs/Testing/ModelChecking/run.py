@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Check every write-back and settle spec with TLC, and the Quint model.
 
-Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR]
+Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR] [--if-touched FILE]
+
+With --if-touched FILE (changed paths, one per line) the specs run only when a
+path is a file named by a `Models:` comment of a spec or lies in this folder;
+otherwise it prints `SKIP: no modelled file touched` and exits 0.
 
 Each spec is checked once per shared property (SettleProperties.tla) and the
 outcome is compared with EXPECTED. The oracle of a red test is checked on the
@@ -15,20 +19,26 @@ target/model-checking/ (checksum pinned) and Quint is installed there by npm.
 Exit codes:
   0  every outcome is the expected one
   1  an outcome differs from EXPECTED (a green spec violates, a red one holds)
-  2  no verdict: a tool failed (download, checksum, TLC or Quint error,
-     unreadable log), the command line is wrong, or this script crashed
+  2  no verdict: a tool failed (missing java or jar, download, checksum, TLC or
+     Quint error, unreadable log), a `Models:` anchor names a missing file or
+     function, the changed-paths file is unreadable or empty, the command line
+     is wrong, or this script crashed
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import traceback
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 TOOLS = Path("target/model-checking")
@@ -62,6 +72,69 @@ TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
 
 class ToolError(Exception):
     pass
+
+
+class Anchor(NamedTuple):
+    path: str
+    function: str
+    spec: str
+    line: int
+
+
+MODELS_ANCHOR = re.compile(r"([\w./-]+\.rs):(\w+(?:::\w+)*)")
+SKIP_MESSAGE = "SKIP: no modelled file touched"
+
+
+def modelled_files(specs_dir: Path) -> set[Anchor]:
+    """The `path:function` anchors of every `Models:` comment in the specs: the
+    comment from the `Models:` line to the end of its block of `\\*` lines. Raises
+    ToolError for an anchor whose file or function is missing, naming the spec line."""
+    anchors = set()
+    for tla in sorted(specs_dir.glob("*.tla")):
+        lines = tla.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if not line.lstrip().startswith("\\*") or "Models:" not in line:
+                continue
+            end = i + 1
+            while end < len(lines) and lines[end].lstrip().startswith("\\*"):
+                end += 1
+            found = MODELS_ANCHOR.findall(line.split("Models:", 1)[1] + "\n" + "\n".join(lines[i + 1:end]))
+            if not found:
+                raise ToolError(f"{tla.name}:{i + 1}: `Models:` names no <file>.rs:<function>")
+            for path, function in found:
+                anchors.add(Anchor(path, function, tla.name, i + 1))
+    for a in anchors:
+        where = f"{a.spec}:{a.line}: {a.path}:{a.function}"
+        if not Path(a.path).is_file():
+            raise ToolError(f"{where}: file {a.path} does not exist")
+        name = a.function.split("::")[-1]
+        if not re.search(rf"\bfn\s+{name}\b", Path(a.path).read_text()):
+            raise ToolError(f"{where}: no `fn {name}` in {a.path}")
+    return anchors
+
+
+def touch_reason(changed_file: Path) -> str | None:
+    """Why the specs must run for these changed paths, None when no modelled file is touched."""
+    try:
+        changed = [p for p in changed_file.read_text().splitlines() if p.strip()]
+    except OSError as e:
+        raise ToolError(f"changed-paths file {changed_file}: {e}")
+    if not changed:
+        raise ToolError(f"changed-paths file {changed_file} lists no path")
+    anchors = modelled_files(HERE)
+    folder = HERE.relative_to(Path.cwd().resolve()).as_posix() + "/"
+    for path in changed:
+        if path.startswith(folder):
+            return f"RUN: {path} is in {folder}"
+        for a in sorted(anchors):
+            if a.path == path:
+                return f"RUN: {path} is modelled by {a.spec}:{a.line} ({a.function})"
+    return None
+
+
+def require_java():
+    if shutil.which("java") is None:
+        raise ToolError(f"java not found on PATH={os.environ.get('PATH', '')}")
 
 
 def tla_jar() -> Path:
@@ -231,10 +304,22 @@ def check_quint(quint, out, numbers):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(TOOLS / "logs"))
-    out = Path(parser.parse_args().out)
+    parser.add_argument("--if-touched", metavar="FILE", help="changed paths, one per line; run only when one is modelled")
+    args = parser.parse_args()
+    if args.if_touched:
+        try:
+            reason = touch_reason(Path(args.if_touched))
+        except ToolError as e:
+            print(f"TOOL ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
+        print(reason or SKIP_MESSAGE)
+        if reason is None:
+            sys.exit(0)
+    out = Path(args.out)
     (out / "states").mkdir(parents=True, exist_ok=True)
     numbers = {}
     try:
+        require_java()
         mismatches = check_tlc(tla_jar(), out, numbers)
         mismatches += check_red_test_oracles(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)

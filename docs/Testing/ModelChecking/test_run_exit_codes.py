@@ -1,6 +1,11 @@
 """run.py keeps its exit codes apart: 2 for every crash of the script itself,
-never the 1 that means an outcome differs."""
+never the 1 that means an outcome differs. Its --if-touched gate runs the specs
+for a modelled file, skips otherwise, and never reads a broken anchor, a missing
+tool or an empty path list as "nothing touched"."""
 
+from __future__ import annotations
+
+import importlib.util
 import os
 import subprocess
 import sys
@@ -8,6 +13,32 @@ import tempfile
 from pathlib import Path
 
 RUN = Path(__file__).resolve().parent / "run.py"
+ROOT = RUN.parents[3]
+MODELLED = "crates/holon-orgmode/src/di.rs"
+SPEC_ANCHOR = "crates/holon-api/src/live_data/home_by.rs:home_diffs_with_progress"
+
+
+def load_run():
+    spec = importlib.util.spec_from_file_location("run", RUN)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def gate(root: Path, paths: str | None, env_extra=None):
+    """run.py --if-touched with a stub `java` on PATH and a missing TLC jar, from the repo root:
+    a run that starts TLC ends with exit 2 naming the jar, so it is told apart from a skip."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    java = bin_dir / "java"
+    java.write_text("#!/bin/sh\nexit 0\n")
+    java.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TLA2TOOLS_JAR=str(root / "no-jar"), **(env_extra or {}))
+    changed = root / "changed.txt"
+    if paths is not None:
+        changed.write_text(paths)
+    return subprocess.run([sys.executable, str(RUN), "--out", str(root / "out"), "--if-touched", str(changed)],
+                          capture_output=True, text=True, env=env, cwd=ROOT)
 
 
 def crash_shapes(root: Path):
@@ -33,6 +64,68 @@ def test_a_crash_before_any_tool_exits_2():
         (root / "read-only").chmod(0o700)
 
 
+def test_a_modelled_file_runs_the_specs():
+    with tempfile.TemporaryDirectory() as tmp:
+        done = gate(Path(tmp), f"README.md\n{MODELLED}\n")
+        assert done.returncode == 2 and f"{tmp}/no-jar" in done.stderr, (done.returncode, done.stdout, done.stderr)
+        assert done.stdout.startswith(f"RUN: {MODELLED} is modelled by Writeback.tla:"), done.stdout
+
+
+def test_a_change_in_the_spec_folder_runs_the_specs():
+    with tempfile.TemporaryDirectory() as tmp:
+        done = gate(Path(tmp), "docs/Testing/ModelChecking/run.py\n")
+        assert done.returncode == 2 and done.stdout.startswith("RUN: "), (done.returncode, done.stdout, done.stderr)
+
+
+def test_a_diff_touching_nothing_modelled_skips():
+    with tempfile.TemporaryDirectory() as tmp:
+        done = gate(Path(tmp), "docs/other.md\ncrates/holon-orgmode/src/lib.rs\n")
+        assert (done.returncode, done.stdout.strip()) == (0, "SKIP: no modelled file touched"), (done.stdout, done.stderr)
+
+
+def test_an_empty_or_missing_path_list_is_an_error_not_a_skip():
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, paths in (("empty", ""), ("blank lines", "\n\n"), ("missing", None)):
+            done = gate(Path(tmp), paths)
+            assert done.returncode == 2 and "SKIP" not in done.stdout, (name, done.returncode, done.stdout, done.stderr)
+
+
+def test_missing_java_exits_2_naming_the_search_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "changed.txt").write_text(f"{MODELLED}\n")
+        env = dict(os.environ, PATH=str(root), TLA2TOOLS_JAR=str(root / "no-jar"))
+        done = subprocess.run([sys.executable, str(RUN), "--out", str(root / "out"), "--if-touched", str(root / "changed.txt")],
+                              capture_output=True, text=True, env=env, cwd=ROOT)
+        assert done.returncode == 2 and f"PATH={root}" in done.stderr, (done.returncode, done.stderr)
+
+
+def test_the_anchors_of_the_repo_specs_resolve_and_cover_continuation_lines():
+    os.chdir(ROOT)
+    anchors = load_run().modelled_files(RUN.parent)
+    assert {a.path for a in anchors} >= {MODELLED, "crates/holon-filesystem/src/file_sync_controller/writeback.rs",
+                                         "crates/holon/src/api/ui_watcher.rs"}, sorted(anchors)
+
+
+def test_an_anchor_with_a_renamed_function_or_missing_file_names_its_spec_line():
+    os.chdir(ROOT)
+    run = load_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        specs = Path(tmp)
+        for anchor, text in ((SPEC_ANCHOR.replace("home_diffs_with_progress", "renamed_fn"), "no `fn renamed_fn`"),
+                             ("crates/gone.rs:f", "does not exist")):
+            (specs / "A.tla").write_text(f"---- MODULE A ----\n\\* Models: {anchor} (x)\nAct == TRUE\n")
+            try:
+                run.modelled_files(specs)
+            except run.ToolError as e:
+                assert str(e).startswith(f"A.tla:2: {anchor}") and text in str(e), str(e)
+            else:
+                raise AssertionError(f"{anchor}: no error")
+
+
 if __name__ == "__main__":
     test_a_crash_before_any_tool_exits_2()
+    for name, test in sorted(globals().items()):
+        if name.startswith("test_") and name != "test_a_crash_before_any_tool_exits_2":
+            test()
     print("PASS")

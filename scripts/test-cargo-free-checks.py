@@ -136,7 +136,9 @@ def main():
         tree, calls = scratch / "tree", scratch / "cargo-calls"
         copy_tree(tree)
         cargo_stub(scratch / "stubs", calls)
-        env = {**os.environ, "PATH": f"{scratch / 'stubs'}:{os.environ['PATH']}"}
+        untouched = scratch / "changed-paths"
+        untouched.write_text("README.md\n")
+        env = {**os.environ, "PATH": f"{scratch / 'stubs'}:{os.environ['PATH']}", "MODEL_CHECK_CHANGED": str(untouched)}
 
         for _ in range(cases):
             subs = [rng.choice(CARGO_SUBCOMMANDS) for _ in range(rng.randrange(1, 5))]
@@ -152,6 +154,8 @@ def main():
             failures.append(f"the unchanged tree fails the recipe:\n{tail(out)}")
         if forbidden_cargo(called):
             failures.append(f"the recipe calls cargo: {called}")
+        if "model-checking" not in passed or "SKIP: no modelled file touched" not in out:
+            failures.append(f"the recipe does not pass model-checking with its skip reason named:\n{tail(out)}")
         drawn_line = re.search(rf"drawn with seed \d+ \({property_checks.CLASSIFIER_CASES} classifier cases", out)
         if PROPERTY_CHECK not in passed or not drawn_line:
             failures.append(f"the recipe does not pass {PROPERTY_CHECK} with its seed and draw count named:\n{tail(out)}")
