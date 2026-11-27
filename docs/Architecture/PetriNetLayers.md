@@ -174,6 +174,12 @@ Constraints:
   every other transition. A reader that saw the hole of an open take may run
   its effect, but its commit waits until the take commits or fails. When the
   take fails and restores the token, the reader is stale and binds again.
+  - In the code: the stale half. A reader whose read row gets back a token
+    that an open take held at its bind is stale when it records after the
+    restore (the edge `waits_on` and `stale_row` in
+    `crates/petri-workflow/src/exec.rs`).
+  - Open: the commit wait. A reader that records before the take fails
+    commits on the dirty read.
   Ruled in
   [holon-work#1474](https://github.com/holon-space/holon-work/issues/1474#issuecomment-7212524683).
 - **Typed place ids.** A user place, or (transition, role).

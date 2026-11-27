@@ -194,6 +194,11 @@ struct Occ {
     /// The cause it parked in `OutcomeUnknown` with.
     parked: Option<String>,
     attempts: BTreeMap<AttemptId, Answer>,
+    /// The open takes that held a token of a row it read, at its bind: the
+    /// row and the taking occurrence (one token per place and occurrence).
+    waits_on: BTreeSet<(Key, OccurrenceId)>,
+    /// A read row that a failed take put such a token back into.
+    stale_row: Option<Key>,
 }
 
 /// An attempt in flight.
@@ -290,6 +295,9 @@ impl Reads for Reader<'_> {
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
         if let Some(held) = model.executor_place_held(place, subject) {
+            // The executor traces a run-state read like any row: its presence
+            // is part of the failure mark's key.
+            model.row(self.trace, place, subject).present = held;
             return held;
         }
         match model.place(place) {
@@ -1266,6 +1274,20 @@ impl Model {
             .occs
             .get(&occ)
             .map_or_else(BTreeMap::new, |o| o.attempts.clone());
+        let waits_on = trace
+            .rows
+            .keys()
+            .filter(|(p, rs)| rs != s || !t.consumes.contains(p))
+            .flat_map(|row| {
+                self.occs
+                    .iter()
+                    .filter(|(_, o)| o.settled.is_none() || o.parked.is_some())
+                    .filter(|(_, o)| {
+                        o.subject == row.1 && o.taken.iter().any(|(tp, _)| *tp == row.0)
+                    })
+                    .map(|(id, _)| (row.clone(), id.clone()))
+            })
+            .collect();
         self.occs.insert(
             occ.clone(),
             Occ {
@@ -1277,6 +1299,8 @@ impl Model {
                 settled: None,
                 parked: None,
                 attempts,
+                waits_on,
+                stale_row: None,
             },
         );
         self.launch(occ, now, false)
@@ -1451,6 +1475,9 @@ impl Model {
     /// firing (REV11-running.a) and cannot be stale.
     fn stale(&self, occ: &OccurrenceId) -> Option<Key> {
         let o = &self.occs[occ];
+        if o.stale_row.is_some() {
+            return o.stale_row.clone();
+        }
         o.trace
             .rows
             .iter()
@@ -1647,11 +1674,18 @@ impl Model {
         for (p, c) in taken {
             let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
+            let back = fifo || slot.content.is_empty();
             if fifo {
                 // The taken token was the oldest, so it goes back in front.
                 slot.content.push_front(c);
-            } else if slot.content.is_empty() {
+            } else if back {
                 slot.content.push_back(c);
+            }
+            let edge = (key(&p, &s), occ.clone());
+            for o in self.occs.values_mut() {
+                if o.waits_on.remove(&edge) && back {
+                    o.stale_row.get_or_insert(edge.0.clone());
+                }
             }
         }
     }

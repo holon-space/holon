@@ -9,6 +9,7 @@ mod correlated_hop;
 mod enabledness;
 mod exec_answer;
 mod exec_cas;
+mod exec_isolation;
 mod exec_marks;
 mod exec_order;
 mod exec_pool;
