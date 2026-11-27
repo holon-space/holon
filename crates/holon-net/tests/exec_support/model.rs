@@ -1160,6 +1160,9 @@ impl Model {
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance(now);
+        if self.requests.iter().any(|r| r.attempt == attempt) {
+            return Err(ExecError::UnknownAttempt(attempt));
+        }
         let live = self.in_flight.remove(&attempt);
         let occ = match &live {
             Some(l) => l.occ.clone(),

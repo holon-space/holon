@@ -2742,8 +2742,9 @@ impl Executor {
     }
 
     /// The requests issued since the last hand-out whose attempt still runs.
-    /// A refused call keeps its requests here; by the next hand-out a caller
-    /// result or an abandon timer may have closed their attempts.
+    /// A refused call keeps its requests until the next Ok return. An abandon
+    /// timer may close their attempts first; it settled them, so nothing is
+    /// lost.
     fn hand_out(&mut self) -> Vec<EffectRequest> {
         let mut requests = std::mem::take(&mut self.requests);
         requests.retain(|r| self.in_flight.contains_key(&r.attempt));
@@ -2983,7 +2984,8 @@ impl Executor {
         })
     }
 
-    /// Hands back the result of an effect request. The result
+    /// Hands back the result of an effect request; an attempt whose request
+    /// was not handed out yet is unknown to the caller. The result
     /// closes only its own attempt; the occurrence settles by `outcome` over
     /// all its attempts. A late result of an abandoned attempt counts the same
     /// way, and a late `Unknown` keeps that attempt open.
@@ -2994,6 +2996,9 @@ impl Executor {
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance::<ExecError>(now)?;
+        if self.requests.iter().any(|r| r.attempt == attempt) {
+            return Err(ExecError::UnknownAttempt(attempt));
+        }
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
             Some(a) => a.occurrence.clone(),

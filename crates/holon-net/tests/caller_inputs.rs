@@ -1869,7 +1869,14 @@ impl Machine {
                     || exec.complete(attempt, result, now),
                 )?;
                 self.take_requests(r.as_ref().ok().map(|q| &q.requests));
-                self.check_clock("complete", now, &before, &r)?;
+                if !self.check_clock("complete", now, &before, &r)?
+                    && !self.requests.iter().any(|q| q.attempt == attempt)
+                {
+                    prop_assert!(
+                        names_error(&r, "UnknownAttempt"),
+                        "complete({attempt:?}) of an attempt never handed out was not refused: {r:?}"
+                    );
+                }
             }
             Op::Resolve {
                 occurrence,
@@ -2484,8 +2491,8 @@ fn a_retry_input_consumed_by_another_keeps_the_run() -> FoundCase {
 
 /// A generator find, kept as its state: a write starts T0's effect, but T1
 /// appends to P1 in every round, so the call is refused for no quiescence
-/// and hands out no request. The caller completes attempt 0, which it was
-/// never handed; the retract then lets the net quiesce.
+/// and hands out no request. A result for attempt 0, which the caller was
+/// never handed, is refused; the retract then lets the net quiesce.
 fn a_result_for_an_attempt_never_handed_out() -> FoundCase {
     let t = |roles, produces, effect, body| TransGen {
         trigger: Trigger::Auto,
