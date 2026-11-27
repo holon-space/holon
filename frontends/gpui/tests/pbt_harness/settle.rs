@@ -276,6 +276,19 @@ pub fn settle_window(
     settle_engine: &mut dyn FnMut(),
     deadline: Duration,
 ) -> Result<RenderEpoch, SettleError> {
+    watermark.poke();
+    settle_window_poked(app, bounds, watermark, settle_engine, deadline)
+}
+
+/// [`settle_window`] after its caller poked the watermark.
+#[allow(clippy::result_large_err)]
+fn settle_window_poked(
+    app: &impl Pump,
+    bounds: &BoundsRegistry,
+    watermark: &UiWatermark,
+    settle_engine: &mut dyn FnMut(),
+    deadline: Duration,
+) -> Result<RenderEpoch, SettleError> {
     assert!(
         deadline <= HANG_DEADLINE,
         "a settle deadline of {deadline:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
@@ -297,7 +310,6 @@ pub fn settle_window(
             runnable,
         }))
     };
-    watermark.poke();
     loop {
         let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
         let mut forced_frame_changed_screen = false;
@@ -377,9 +389,11 @@ pub fn settle_window_until(
     let clock = app.clock();
     let start = clock.now();
     loop {
+        // Subscribed after the poke, so only a change after it wakes the wait.
+        watermark.poke();
         let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
         let left = deadline.saturating_sub(clock.now() - start);
-        let epoch = settle_window(app, bounds, watermark, &mut || {}, left)?;
+        let epoch = settle_window_poked(app, bounds, watermark, &mut || {}, left)?;
         if delivered(bounds) {
             return Ok(epoch);
         }

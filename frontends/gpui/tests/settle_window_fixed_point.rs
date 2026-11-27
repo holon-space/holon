@@ -1795,3 +1795,114 @@ mod driver_hop {
         .unwrap();
     }
 }
+
+/// Every settle wait loop on a window at rest that never settles: nothing
+/// changes, so the loop tries, waits out its deadline, and gives up.
+mod waits_at_rest {
+    use super::*;
+    use crate::pbt_harness::settle::settle_window_until;
+
+    /// One try before the wait and one after it, plus a spurious unpark or
+    /// two; a loop that does not wait tries thousands of times.
+    const MAX_TRIES: usize = 4;
+
+    /// The wait loops: `settle_window` itself, and `settle_window_until`
+    /// around it, whose own wait must not see the inner settle's poke.
+    #[derive(Clone, Copy, Debug)]
+    enum Waiter {
+        /// A subscription that never applies its first snapshot holds it.
+        Settle,
+        /// A settled window whose delivery never comes.
+        SettleUntil,
+    }
+
+    #[derive(Default)]
+    struct AtRest {
+        pumps: AtomicUsize,
+    }
+
+    impl Pump for AtRest {
+        fn clock(&self) -> &dyn Clock {
+            &holon_api::SystemClock
+        }
+
+        fn run_until_parked(&self, _: &mut dyn FnMut() -> bool) -> bool {
+            self.pumps.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+
+        fn pending_views(&self) -> Vec<EntityId> {
+            Vec::new()
+        }
+
+        fn force_frame(&self, _: &mut dyn FnMut() -> bool) -> bool {
+            true
+        }
+
+        fn park(&self, timeout: Duration) {
+            std::thread::park_timeout(timeout);
+        }
+    }
+
+    fn tries_until_deadline(waiter: Waiter, deadline: Duration) -> usize {
+        let watermark = UiWatermark::new(None);
+        let bounds = BoundsRegistry::new();
+        let window = AtRest::default();
+        match waiter {
+            Waiter::Settle => {
+                let _never_applies = watermark.register("view".to_string());
+                let result = settle_window(&window, &bounds, &watermark, &mut || {}, deadline);
+                assert!(
+                    matches!(result, Err(SettleError::Timeout(_))),
+                    "a first snapshot that never comes ends as Timeout"
+                );
+                window.pumps.load(Ordering::Relaxed)
+            }
+            Waiter::SettleUntil => {
+                let tries = AtomicUsize::new(0);
+                let delivered = |_: &BoundsRegistry| {
+                    tries.fetch_add(1, Ordering::Relaxed);
+                    false
+                };
+                let result =
+                    settle_window_until(&window, &bounds, &watermark, &delivered, deadline);
+                assert!(
+                    matches!(result, Err(SettleError::Undelivered(_))),
+                    "a delivery that never comes ends as Undelivered"
+                );
+                tries.load(Ordering::Relaxed)
+            }
+        }
+    }
+
+    fn waits_while_nothing_changes(waiter: Waiter, deadline_ms: u64) -> Result<(), TestCaseError> {
+        let tries = tries_until_deadline(waiter, Duration::from_millis(deadline_ms));
+        prop_assert!(
+            tries <= MAX_TRIES,
+            "{waiter:?} tried {tries} times in {deadline_ms} ms with nothing changing: \
+             it tries again without waiting for a change"
+        );
+        Ok(())
+    }
+
+    /// The fixed cases run first, then the drawn ones.
+    #[test]
+    fn settle_wait_loops_wait_while_nothing_changes() {
+        for waiter in [Waiter::Settle, Waiter::SettleUntil] {
+            waits_while_nothing_changes(waiter, 50).unwrap_or_else(|e| panic!("{e}"));
+        }
+        proptest::test_runner::TestRunner::new(ProptestConfig {
+            cases: 8,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })
+        .run(
+            &(
+                prop_oneof![Just(Waiter::Settle), Just(Waiter::SettleUntil)],
+                20u64..120,
+            ),
+            |(waiter, deadline_ms)| waits_while_nothing_changes(waiter, deadline_ms),
+        )
+        .unwrap();
+    }
+}
