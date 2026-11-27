@@ -1243,20 +1243,24 @@ impl<V: Clone + PartialEq + fmt::Debug> Tokens<V> {
 
     /// An input goes back with no version change: into a FIFO at the front,
     /// where it was taken from. A single-token place that holds a token
-    /// written meanwhile keeps it and the taken one is dropped.
-    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token<V>) {
+    /// written meanwhile keeps it and the taken one is dropped. Returns
+    /// whether the token went back into the row.
+    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token<V>) -> bool {
         self.unlend(place);
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
         slot.reserved = false;
         if slot.tokens.iter().any(|t| t.id == token.id) {
-            return;
+            return false;
         }
         if fifo {
             slot.tokens.push_front(token.clone());
         } else if slot.tokens.is_empty() {
             slot.tokens.push_back(token.clone());
+        } else {
+            return false;
         }
+        true
     }
 
     fn lend(&mut self, place: &Place) {
@@ -2090,6 +2094,12 @@ struct Attempt<V> {
     input: Record<V>,
     started: Duration,
     probe: bool,
+    /// The tokens that open takes held from a row this attempt read, at its
+    /// bind: (place, subject, token id).
+    waits_on: BTreeSet<(Place, Subject, u64)>,
+    /// A read row that a failed take put one of those tokens back into: the
+    /// read is no longer true in the committed state.
+    stale_row: Option<(Place, Subject)>,
 }
 
 pub struct Executor<V> {
@@ -3515,6 +3525,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             self.tokens.lend(&p);
             taken.push((p, token));
         }
+        let waits_on = self.held_from_read_rows(&trace, &taken, &subject, now);
         let run = self.runs.entry(key).or_insert(Run {
             started: now,
             attempts: 0,
@@ -3531,9 +3542,42 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             input,
             started: now,
             probe: false,
+            waits_on,
+            stale_row: None,
         };
         self.occupy_running(&a);
         self.insert_attempt(a)
+    }
+
+    /// The tokens that open takes hold from the rows `trace` read, except
+    /// the rows the new attempt consumes itself and pools.
+    fn held_from_read_rows(
+        &self,
+        trace: &Trace<V>,
+        taken: &[(Place, Token<V>)],
+        subject: &Subject,
+        now: Duration,
+    ) -> BTreeSet<(Place, Subject, u64)> {
+        let mut held = BTreeSet::new();
+        for (p, s) in trace.rows.keys() {
+            if s == subject && taken.iter().any(|(own, _)| own == p)
+                || self.tokens.pools.contains_key(p)
+            {
+                continue;
+            }
+            for o in self.in_flight.values().chain(self.parked.values()) {
+                assert!(o.started <= now, "a take open at a bind started after it");
+                if &o.subject == s {
+                    held.extend(
+                        o.taken
+                            .iter()
+                            .filter(|(tp, _)| tp == p)
+                            .map(|(_, t)| (p.clone(), s.clone(), t.id)),
+                    );
+                }
+            }
+        }
+        held
     }
 
     fn retry_due(&self, transition: &str, subject: &Subject) -> Option<Duration> {
@@ -3632,7 +3676,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         self.request(id, &a);
     }
 
-    /// The first READ row of the trace whose version moved since it was read.
+    /// The READ row a failed take put a missed token back into, else the
+    /// first READ row of the trace whose version moved since it was read.
     ///
     /// A consumed row cannot be stale (REV11-running.a): the firing holds it,
     /// because [`start`] took its token out of the place. A write that lands
@@ -3643,6 +3688,9 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     fn stale(&self, a: &Attempt<V>) -> Option<(Place, Subject)> {
         if self.twin(Twin::NoCas) {
             return None;
+        }
+        if a.stale_row.is_some() {
+            return a.stale_row.clone();
         }
         a.trace
             .rows
@@ -3936,9 +3984,18 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     }
 
     /// The inputs go back with no version change: see [`Tokens::restore`].
+    /// A reader that bound while this take held a token goes stale when the
+    /// token is back in the row it read; a token dropped for a newer one
+    /// leaves the version check to decide.
     fn rollback(&mut self, a: &Attempt<V>) {
         for (p, token) in &a.taken {
-            self.tokens.restore(p, &a.subject, token);
+            let back = self.tokens.restore(p, &a.subject, token);
+            let edge = (p.clone(), a.subject.clone(), token.id);
+            for r in self.in_flight.values_mut().chain(self.parked.values_mut()) {
+                if r.waits_on.remove(&edge) && back {
+                    r.stale_row.get_or_insert((p.clone(), a.subject.clone()));
+                }
+            }
         }
         self.release_running(&a.transition, &a.subject);
     }
