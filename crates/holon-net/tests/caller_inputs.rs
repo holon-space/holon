@@ -1568,10 +1568,6 @@ impl Machine {
 
     fn take_requests(&mut self, requests: Option<&Vec<EffectRequest>>) {
         for r in requests.into_iter().flatten() {
-            assert!(
-                self.exec.in_flight().any(|(id, ..)| id == r.attempt),
-                "a request just handed out is in flight"
-            );
             let n = self
                 .exec
                 .attempt_numbers()
@@ -1837,16 +1833,10 @@ impl Machine {
                 result,
                 dt,
             } => {
-                // A caller may name an attempt it was never handed: one
-                // running now, or one whose request a refused call kept.
-                let known: Vec<AttemptId> = self
-                    .requests
-                    .iter()
-                    .map(|r| r.attempt)
-                    .chain(self.exec.in_flight().map(|(id, ..)| id))
-                    .collect();
                 let attempt = match attempt {
-                    Pick::Known(i) if !known.is_empty() => known[i % known.len()],
+                    Pick::Known(i) if !self.requests.is_empty() => {
+                        self.requests[i % self.requests.len()].attempt
+                    }
                     Pick::Known(_) => AttemptId(0),
                     Pick::Bogus(n) => AttemptId(*n),
                 };
@@ -1869,14 +1859,7 @@ impl Machine {
                     || exec.complete(attempt, result, now),
                 )?;
                 self.take_requests(r.as_ref().ok().map(|q| &q.requests));
-                if !self.check_clock("complete", now, &before, &r)?
-                    && !self.requests.iter().any(|q| q.attempt == attempt)
-                {
-                    prop_assert!(
-                        names_error(&r, "UnknownAttempt"),
-                        "complete({attempt:?}) of an attempt never handed out was not refused: {r:?}"
-                    );
-                }
+                self.check_clock("complete", now, &before, &r)?;
             }
             Op::Resolve {
                 occurrence,
@@ -2165,7 +2148,7 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
 fn no_sequence_of_caller_calls_panics() {
     // The third field: the attempt number of each of T0's requests; a retry
     // of the same run counts on, a new run starts at 1 again.
-    let found: [(&str, FoundCase, Option<&[u32]>); 11] = [
+    let found: [(&str, FoundCase, Option<&[u32]>); 9] = [
         (
             "free_of_an_answer_place_counts_its_answer",
             free_of_an_answer_place_counts_its_answer(),
@@ -2210,16 +2193,6 @@ fn no_sequence_of_caller_calls_panics() {
             "a_retry_input_consumed_by_another_keeps_the_run",
             a_retry_input_consumed_by_another_keeps_the_run(),
             Some(&[1, 2]),
-        ),
-        (
-            "a_result_for_an_attempt_never_handed_out",
-            a_result_for_an_attempt_never_handed_out(),
-            None,
-        ),
-        (
-            "an_attempt_abandoned_before_its_hand_out",
-            an_attempt_abandoned_before_its_hand_out(),
-            None,
         ),
     ];
     for (name, (net, ops), t0_attempts) in found {
@@ -2486,91 +2459,6 @@ fn a_retry_input_consumed_by_another_keeps_the_run() -> FoundCase {
         },
         write(),
     ];
-    (net, ops)
-}
-
-/// A generator find, kept as its state: a write starts T0's effect, but T1
-/// appends to P1 in every round, so the call is refused for no quiescence
-/// and hands out no request. A result for attempt 0, which the caller was
-/// never handed, is refused; the retract then lets the net quiesce.
-fn a_result_for_an_attempt_never_handed_out() -> FoundCase {
-    let t = |roles, produces, effect, body| TransGen {
-        trigger: Trigger::Auto,
-        priority: 0,
-        roles,
-        produces,
-        facts: vec![],
-        on_failure: None,
-        on_timeout: None,
-        effect,
-        timers: None,
-        bind: BindProg {
-            reads: vec![],
-            out: Some(vec![]),
-        },
-        body,
-    };
-    let net = NetGen {
-        places: vec![
-            PlaceGen {
-                capacity: PlaceCapacity::Single,
-                pool: None,
-            },
-            PlaceGen {
-                capacity: PlaceCapacity::Fifo,
-                pool: None,
-            },
-        ],
-        transitions: vec![
-            t(
-                vec![Role::Reads, Role::None],
-                vec![],
-                Some(Receiver::Keyed),
-                BodyProg::Outputs(vec![]),
-            ),
-            t(
-                vec![Role::Reads, Role::None],
-                vec![1],
-                None,
-                BodyProg::Outputs(vec![OutGen {
-                    place: 1,
-                    subject: Subj::Own,
-                    fields: vec![],
-                }]),
-            ),
-        ],
-        derived: vec![],
-        works: vec![],
-    };
-    let ops = vec![
-        Op::Write {
-            place: Name::Held(0),
-            subject: "s".to_string(),
-            content: vec![],
-            dt: Dt::Same,
-        },
-        Op::Complete {
-            attempt: Pick::Known(0),
-            result: ResultGen::Done(vec![]),
-            dt: Dt::Same,
-        },
-        Op::Retract {
-            place: Name::Held(0),
-            subject: "s".to_string(),
-            dt: Dt::Same,
-        },
-    ];
-    (net, ops)
-}
-
-/// The same refused write, but T0's abandon timer closes attempt 0 before
-/// the retract lets the net quiesce.
-fn an_attempt_abandoned_before_its_hand_out() -> FoundCase {
-    let (mut net, mut ops) = a_result_for_an_attempt_never_handed_out();
-    net.transitions[0].timers = Some((None, Some(1), None));
-    ops[1] = Op::Step {
-        dt: Dt::Forward(10_000_000_000),
-    };
     (net, ops)
 }
 

@@ -1091,9 +1091,7 @@ impl Model {
                 }
             }
             if started.is_empty() {
-                let mut requests = std::mem::take(&mut self.requests);
-                requests.retain(|r| self.in_flight.contains_key(&r.attempt));
-                return Ok(requests);
+                return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
                 self.run_body(id, now);
@@ -1160,9 +1158,6 @@ impl Model {
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance(now);
-        if self.requests.iter().any(|r| r.attempt == attempt) {
-            return Err(ExecError::UnknownAttempt(attempt));
-        }
         let live = self.in_flight.remove(&attempt);
         let occ = match &live {
             Some(l) => l.occ.clone(),

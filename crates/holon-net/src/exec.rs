@@ -2741,21 +2741,11 @@ impl Executor {
             .any(|port| t.consumes.contains(port))
     }
 
-    /// The requests issued since the last hand-out whose attempt still runs.
-    /// A refused call keeps its requests until the next Ok return. An abandon
-    /// timer may close their attempts first; it settled them, so nothing is
-    /// lost.
-    fn hand_out(&mut self) -> Vec<EffectRequest> {
-        let mut requests = std::mem::take(&mut self.requests);
-        requests.retain(|r| self.in_flight.contains_key(&r.attempt));
-        requests
-    }
-
     /// Fires every enabled auto transition until none is enabled, and takes
     /// the effect requests; `Err` holds the rounds run. It fires no timer.
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         if self.twin(Twin::NoQuiescence) {
-            return Ok(self.hand_out());
+            return Ok(std::mem::take(&mut self.requests));
         }
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
@@ -2825,7 +2815,7 @@ impl Executor {
                 }
             }
             if started.is_empty() {
-                return Ok(self.hand_out());
+                return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
                 self.run_body(id, now);
@@ -2984,8 +2974,7 @@ impl Executor {
         })
     }
 
-    /// Hands back the result of an effect request; an attempt whose request
-    /// was not handed out yet is unknown to the caller. The result
+    /// Hands back the result of an effect request. The result
     /// closes only its own attempt; the occurrence settles by `outcome` over
     /// all its attempts. A late result of an abandoned attempt counts the same
     /// way, and a late `Unknown` keeps that attempt open.
@@ -2996,9 +2985,6 @@ impl Executor {
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance::<ExecError>(now)?;
-        if self.requests.iter().any(|r| r.attempt == attempt) {
-            return Err(ExecError::UnknownAttempt(attempt));
-        }
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
             Some(a) => a.occurrence.clone(),
