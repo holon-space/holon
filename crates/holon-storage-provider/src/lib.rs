@@ -15,9 +15,10 @@
 //! - **Locking.** "Apply the final delta while held" is a precondition the net
 //!   enforces with holder tokens (queries shared, writes/swap/retirement
 //!   exclusive), never a lock inside a provider.
-//! - **Retries and priority.** Both are token data in the net (`tries` keyed by
-//!   the contribution's stable id on the request token, priority on the
-//!   `Service<X>` token), so a provider has no retry state and no rank.
+//! - **Retries and priority.** Both are token data in the net (`tries`
+//!   (planned, not in the code) keyed by the contribution's stable id on the
+//!   request token, priority on the `Service<X>` token), so a provider has no
+//!   retry state and no rank.
 //! - **Time bounds.** A run timer on the transition is the net's deadline; a
 //!   provider is bounded by a write COUNT, which it can honour at a commit
 //!   boundary.
@@ -38,8 +39,9 @@ pub struct StorageVersion(pub u64);
 
 /// A provider attempt that did not reach its goal, split by what the caller may
 /// conclude — the distinction the executor needs to turn a failed body into
-/// either a definite failure (the input returns with `tries + 1`) or an unknown
-/// outcome (the occurrence parks and a receiver resolves it).
+/// either a definite failure (the input returns with `tries + 1`, planned, not
+/// in the code) or an unknown outcome (the occurrence parks and a receiver
+/// resolves it).
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderFailure {
     /// The attempt did not take effect. The store is in the state it had
@@ -99,7 +101,7 @@ pub trait StorageProvider: Send + Sync {
     /// exclusively, so `target` cannot move and a `max_writes` at or above the
     /// lag MUST reach `target`; a shortfall is a broken postcondition that the
     /// swap attempt reports as a definite failure (`tries + 1` on the swap
-    /// request) — never a silent release of the hold.
+    /// request, planned, not in the code) — never a silent release of the hold.
     async fn catch_up(
         &self,
         target: StorageVersion,

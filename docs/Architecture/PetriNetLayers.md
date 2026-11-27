@@ -226,11 +226,15 @@ Laws, checked as PBT invariants:
   from scratch. So every auto transition disables itself by firing, and
   ChangeDriven equals level semantics.
 - **Crash.** Drop the driver and every cache, rebuild from the marking: the
-  observable run is the same. `Crash` is a shared PBT action.
-  Today the law covers the rebuildable caches (`watchers`, `preferred`,
-  `waiters`, `pending`, `pending_all`); the executor state outside the marking
-  (`runs`, `marks`, `in_flight`, `parked`, `attempts`, `occurrences`,
-  `answers`, `undone`, `deltas`) joins as the carve compiles it into tokens.
+  observable run is the same. Today the executor PBTs check it with a shadow
+  executor that crashes before every call; a drawn `Crash` action is planned.
+  Of the fields of `Executor` (crates/holon-net/src/exec.rs), `net` is the
+  definition and `tokens` the marking. `crash()` rebuilds the caches
+  `watchers`, `preferred`, `waiters`, `pending` and `pending_all`. Every other
+  field is state outside the marking that later carve steps compile into
+  tokens: `runs`, `marks`, `in_flight`, `parked`, `attempts`, `occurrences`,
+  `answers`, `undone`, `deltas`, `conditions`, `requests`, `now` (the Clock
+  place), `next_attempt` and `next_minted`.
 - **Witness.** The witness is a digest of the read trace. The host gives
   `NetDef` an encoder function from `V` to bytes, so `V` needs no `Eq + Hash`
   bound and no trait (Holon's `Value` holds floats and is only `PartialEq`).

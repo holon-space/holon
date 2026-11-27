@@ -32,6 +32,7 @@ use holon_net::exec::Place;
 use holon_net::exec::Reader;
 use holon_net::exec::Resolution;
 use holon_net::exec::Subject;
+use holon_net::exec::Token;
 use holon_net::exec::WhyNot;
 use holon_net::file::CommandSpec;
 use holon_net::file::DurationSpec;
@@ -1504,6 +1505,9 @@ struct Machine {
     /// The largest `now` of every call not refused for the clock.
     clock: Duration,
     requests: Vec<EffectRequest>,
+    /// The transition and attempt number of each request, in hand-out order;
+    /// `None` for an attempt outside a run.
+    attempts: Vec<(Arc<str>, Option<u32>)>,
     occurrences: Vec<OccurrenceId>,
     fresh: u64,
 }
@@ -1515,6 +1519,7 @@ impl Machine {
             exec,
             clock: Duration::ZERO,
             requests: vec![],
+            attempts: vec![],
             occurrences: vec![],
             fresh: 0,
         }
@@ -1562,8 +1567,18 @@ impl Machine {
     }
 
     fn take_requests(&mut self, requests: Option<&Vec<EffectRequest>>) {
-        self.requests
-            .extend(requests.into_iter().flatten().cloned());
+        for r in requests.into_iter().flatten() {
+            assert!(
+                self.exec.in_flight().any(|(id, ..)| id == r.attempt),
+                "a request just handed out is in flight"
+            );
+            let n = self
+                .exec
+                .attempt_numbers()
+                .find_map(|(id, n)| (id == r.attempt).then_some(n));
+            self.attempts.push((r.transition.clone(), n));
+            self.requests.push(r.clone());
+        }
     }
 
     /// A call before the clock is refused for the clock and changes
@@ -1673,6 +1688,17 @@ impl Machine {
             .is_some_and(|k| self.net.places[k].pool.is_some())
     }
 
+    /// The token a stored single-token row holds, with the row's version.
+    fn held(&self, place: &str, subject: &str) -> Option<(Token, u64)> {
+        let k = self.net.stored().iter().position(|p| p == place)?;
+        if self.net.places[k].capacity == PlaceCapacity::Fifo {
+            return None;
+        }
+        let tokens = self.exec.tokens();
+        let token = tokens.token(place, subject)?.clone();
+        Some((token, tokens.version(place, subject)))
+    }
+
     fn apply(&mut self, op: &Op) -> Result<(), TestCaseError> {
         let stored = self.net.stored();
         let writable = self.net.writable();
@@ -1691,14 +1717,16 @@ impl Machine {
                 }
                 let now = now(self.clock, dt);
                 let content: Content = content.iter().cloned().collect();
+                let held = self.held(&place, subject);
                 let exec = &mut self.exec;
                 let r = no_panic(&format!("write({place:?}, {subject:?}, {now:?})"), || {
-                    exec.write(&place, subject, content, now)
+                    exec.write(&place, subject, content.clone(), now)
                 })?;
                 self.take_requests(r.as_ref().ok().map(|q| &q.requests));
                 if !self.check_clock("write", now, &before, &r)? {
                     self.check_place_refusal("write", &place, &before, &r)?;
                 }
+                an_equal_rewrite_keeps_the_token(held, &content, self.held(&place, subject))?;
             }
             Op::Retract { place, subject, dt } => {
                 let place = place.of(&writable);
@@ -1809,10 +1837,16 @@ impl Machine {
                 result,
                 dt,
             } => {
+                // A caller may name an attempt it was never handed: one
+                // running now, or one whose request a refused call kept.
+                let known: Vec<AttemptId> = self
+                    .requests
+                    .iter()
+                    .map(|r| r.attempt)
+                    .chain(self.exec.in_flight().map(|(id, ..)| id))
+                    .collect();
                 let attempt = match attempt {
-                    Pick::Known(i) if !self.requests.is_empty() => {
-                        self.requests[i % self.requests.len()].attempt
-                    }
+                    Pick::Known(i) if !known.is_empty() => known[i % known.len()],
                     Pick::Known(_) => AttemptId(0),
                     Pick::Bogus(n) => AttemptId(*n),
                 };
@@ -2122,49 +2156,83 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
 /// fires. The generator finds kept as their state run first.
 #[test]
 fn no_sequence_of_caller_calls_panics() {
-    let found: [(&str, FoundCase); 9] = [
+    // The third field: the attempt number of each of T0's requests; a retry
+    // of the same run counts on, a new run starts at 1 again.
+    let found: [(&str, FoundCase, Option<&[u32]>); 11] = [
         (
             "free_of_an_answer_place_counts_its_answer",
             free_of_an_answer_place_counts_its_answer(),
+            None,
         ),
         (
             "a_pool_token_back_from_a_failed_run_joins_the_next_run",
             a_pool_token_back_from_a_failed_run_joins_the_next_run(),
+            None,
         ),
         (
             "an_answer_for_the_pool_subject_read_through_free_does_not_panic",
             an_answer_for_the_pool_subject_read_through_free_does_not_panic(),
+            None,
         ),
         (
             "a_pool_read_wakes_its_marked_reader",
             a_pool_read_wakes_its_marked_reader(),
+            None,
         ),
         (
             "an_equal_rewrite_keeps_the_retry_count",
             an_equal_rewrite_keeps_the_retry_count(),
+            Some(&[1, 2]),
         ),
         (
             "new_unread_content_keeps_the_retry_count",
             new_unread_content_keeps_the_retry_count(),
+            Some(&[1, 2]),
         ),
         (
             "a_write_during_the_run_keeps_the_retry_count",
             a_write_during_the_run_keeps_the_retry_count(),
+            Some(&[1, 2]),
         ),
         (
             "new_read_content_starts_a_new_run",
             new_read_content_starts_a_new_run(),
+            Some(&[1, 1]),
         ),
         (
             "a_retry_input_consumed_by_another_keeps_the_run",
             a_retry_input_consumed_by_another_keeps_the_run(),
+            Some(&[1, 2]),
+        ),
+        (
+            "a_result_for_an_attempt_never_handed_out",
+            a_result_for_an_attempt_never_handed_out(),
+            None,
+        ),
+        (
+            "an_attempt_abandoned_before_its_hand_out",
+            an_attempt_abandoned_before_its_hand_out(),
+            None,
         ),
     ];
-    for (name, (net, ops)) in found {
+    for (name, (net, ops), t0_attempts) in found {
         if let Err(e) = net.executor() {
             panic!("static example {name}: the net does not load: {e}");
         }
-        run_calls(net, &ops).unwrap_or_else(|e| panic!("static example {name}: {e}"));
+        let m = run_found(net, &ops).unwrap_or_else(|e| panic!("static example {name}: {e}"));
+        if let Some(want) = t0_attempts {
+            let got: Vec<Option<u32>> = m
+                .attempts
+                .iter()
+                .filter(|(t, _)| &**t == TRANSITIONS[0])
+                .map(|(_, n)| *n)
+                .collect();
+            let want: Vec<Option<u32>> = want.iter().copied().map(Some).collect();
+            assert_eq!(
+                got, want,
+                "static example {name}: attempt numbers of T0's requests"
+            );
+        }
     }
     // PROPTEST_CASES above 512 raises the count, as for a proptest! test.
     let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
@@ -2414,6 +2482,91 @@ fn a_retry_input_consumed_by_another_keeps_the_run() -> FoundCase {
     (net, ops)
 }
 
+/// A generator find, kept as its state: a write starts T0's effect, but T1
+/// appends to P1 in every round, so the call is refused for no quiescence
+/// and hands out no request. The caller completes attempt 0, which it was
+/// never handed; the retract then lets the net quiesce.
+fn a_result_for_an_attempt_never_handed_out() -> FoundCase {
+    let t = |roles, produces, effect, body| TransGen {
+        trigger: Trigger::Auto,
+        priority: 0,
+        roles,
+        produces,
+        facts: vec![],
+        on_failure: None,
+        on_timeout: None,
+        effect,
+        timers: None,
+        bind: BindProg {
+            reads: vec![],
+            out: Some(vec![]),
+        },
+        body,
+    };
+    let net = NetGen {
+        places: vec![
+            PlaceGen {
+                capacity: PlaceCapacity::Single,
+                pool: None,
+            },
+            PlaceGen {
+                capacity: PlaceCapacity::Fifo,
+                pool: None,
+            },
+        ],
+        transitions: vec![
+            t(
+                vec![Role::Reads, Role::None],
+                vec![],
+                Some(Receiver::Keyed),
+                BodyProg::Outputs(vec![]),
+            ),
+            t(
+                vec![Role::Reads, Role::None],
+                vec![1],
+                None,
+                BodyProg::Outputs(vec![OutGen {
+                    place: 1,
+                    subject: Subj::Own,
+                    fields: vec![],
+                }]),
+            ),
+        ],
+        derived: vec![],
+        works: vec![],
+    };
+    let ops = vec![
+        Op::Write {
+            place: Name::Held(0),
+            subject: "s".to_string(),
+            content: vec![],
+            dt: Dt::Same,
+        },
+        Op::Complete {
+            attempt: Pick::Known(0),
+            result: ResultGen::Done(vec![]),
+            dt: Dt::Same,
+        },
+        Op::Retract {
+            place: Name::Held(0),
+            subject: "s".to_string(),
+            dt: Dt::Same,
+        },
+    ];
+    (net, ops)
+}
+
+/// The same refused write, but T0's abandon timer closes attempt 0 before
+/// the retract lets the net quiesce.
+fn an_attempt_abandoned_before_its_hand_out() -> FoundCase {
+    let (mut net, mut ops) = a_result_for_an_attempt_never_handed_out();
+    net.transitions[0].timers = Some((None, Some(1), None));
+    ops[1] = Op::Step {
+        dt: Dt::Forward(10_000_000_000),
+    };
+    (net, ops)
+}
+
 /// A net and the calls on it; a drained pool reader ([`Drain`]) gets a first
 /// write of its input, which the drawn calls rarely make.
 fn calls() -> impl Strategy<Value = (NetGen, Vec<Op>)> {
@@ -2456,6 +2609,23 @@ fn calls() -> impl Strategy<Value = (NetGen, Vec<Op>)> {
     })
 }
 
+/// An outside write of the content a single-token row holds leaves the held
+/// token as it was: its id and header too, not only its payload. A row that
+/// a firing of the same call wrote again has a new version and is out of scope.
+fn an_equal_rewrite_keeps_the_token(
+    before: Option<(Token, u64)>,
+    written: &Content,
+    after: Option<(Token, u64)>,
+) -> Result<(), TestCaseError> {
+    let (Some((before, v0)), Some((after, v1))) = (before, after) else {
+        return Ok(());
+    };
+    if before.payload == Payload::Record(written.clone()) && v0 == v1 {
+        prop_assert_eq!(&after, &before, "an equal rewrite replaced the held token");
+    }
+    Ok(())
+}
+
 /// A generator find kept as its state: a net and the calls on it.
 type FoundCase = (NetGen, Vec<Op>);
 
@@ -2463,11 +2633,21 @@ fn run_calls(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {
     let Some(exec) = load(&net)? else {
         return Ok(());
     };
+    run(net, exec, ops).map(drop)
+}
+
+/// A static example runs like a drawn case; its net must load.
+fn run_found(net: NetGen, ops: &[Op]) -> Result<Machine, TestCaseError> {
+    let exec = load(&net)?.expect("a static example's net loads");
+    run(net, exec, ops)
+}
+
+fn run(net: NetGen, exec: Checked, ops: &[Op]) -> Result<Machine, TestCaseError> {
     let mut m = Machine::new(net, exec);
     for op in ops {
         m.apply(op)?;
     }
-    Ok(())
+    Ok(m)
 }
 
 /// A generator find, kept as its state: a bind counts the free tokens of an

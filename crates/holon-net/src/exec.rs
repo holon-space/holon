@@ -2302,6 +2302,15 @@ impl Executor {
         })
     }
 
+    /// The attempt number of each attempt running now: 1 for the first try
+    /// of its run, one more for each retry of the same run.
+    pub fn attempt_numbers(&self) -> impl Iterator<Item = (AttemptId, u32)> {
+        self.in_flight.iter().filter_map(|(id, a)| {
+            let run = self.runs.get(&(a.transition.clone(), a.subject.clone()))?;
+            Some((*id, run.attempts))
+        })
+    }
+
     /// The occurrences with an attempt running now.
     pub fn in_flight(&self) -> impl Iterator<Item = (AttemptId, &str, &Subject, &OccurrenceId)> {
         self.in_flight
@@ -2732,11 +2741,20 @@ impl Executor {
             .any(|port| t.consumes.contains(port))
     }
 
+    /// The requests issued since the last hand-out whose attempt still runs.
+    /// A refused call keeps its requests here; by the next hand-out a caller
+    /// result or an abandon timer may have closed their attempts.
+    fn hand_out(&mut self) -> Vec<EffectRequest> {
+        let mut requests = std::mem::take(&mut self.requests);
+        requests.retain(|r| self.in_flight.contains_key(&r.attempt));
+        requests
+    }
+
     /// Fires every enabled auto transition until none is enabled, and takes
     /// the effect requests; `Err` holds the rounds run. It fires no timer.
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         if self.twin(Twin::NoQuiescence) {
-            return Ok(std::mem::take(&mut self.requests));
+            return Ok(self.hand_out());
         }
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
@@ -2806,7 +2824,7 @@ impl Executor {
                 }
             }
             if started.is_empty() {
-                return Ok(std::mem::take(&mut self.requests));
+                return Ok(self.hand_out());
             }
             for id in started {
                 self.run_body(id, now);

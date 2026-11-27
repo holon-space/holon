@@ -446,8 +446,8 @@ impl Model {
         self.put_with(place, subject, Head::default(), content, by);
     }
 
-    /// Equal content with another header replaces the header and keeps the
-    /// version: the stamp covers the content only.
+    /// Equal content leaves the held entry, its header and the version as
+    /// they are: the stamp covers the content only.
     fn put_with(
         &mut self,
         place: &str,
@@ -464,8 +464,7 @@ impl Model {
         let slot = self.slot_mut(place, subject);
         if fifo {
             slot.content.push_back((head, content));
-        } else if let Some(held) = slot.content.front_mut().filter(|(_, c)| *c == content) {
-            held.0 = head;
+        } else if slot.content.front().is_some_and(|(_, c)| *c == content) {
             return;
         } else {
             slot.content = VecDeque::from([(head, content)]);
@@ -1092,7 +1091,9 @@ impl Model {
                 }
             }
             if started.is_empty() {
-                return Ok(std::mem::take(&mut self.requests));
+                let mut requests = std::mem::take(&mut self.requests);
+                requests.retain(|r| self.in_flight.contains_key(&r.attempt));
+                return Ok(requests);
             }
             for id in started {
                 self.run_body(id, now);
