@@ -646,24 +646,32 @@ impl PoolRead {
 /// An auto transition takes place `input`, reads nothing and runs a Keyed
 /// effect, which retries a retryable failure after a backoff. A second one
 /// does the same, or (`false`) consumes the returned input with no effect.
-/// [`calls`] fails each Keyed first try and writes `input` again while the
-/// retries wait.
+/// [`calls`] writes `input` again after the first tries failed or while they
+/// run.
 #[derive(Clone, Debug)]
 struct RetryInput {
     input: prop::sample::Index,
     first: prop::sample::Index,
     second: Option<(prop::sample::Index, bool)>,
+    /// A Keyed auto transition that takes its own place and whose bind reads
+    /// `input` of its subject: the reader of a row another firing takes.
+    reader: Option<(prop::sample::Index, prop::sample::Index, bool)>,
 }
 
 fn retry_input() -> impl Strategy<Value = RetryInput> {
     let index = any::<prop::sample::Index>;
-    (index(), index(), prop::option::of((index(), any::<bool>()))).prop_map(
-        |(input, first, second)| RetryInput {
+    (
+        index(),
+        index(),
+        prop::option::of((index(), any::<bool>())),
+        prop::option::weighted(0.9, (index(), index(), prop::bool::weighted(0.85))),
+    )
+        .prop_map(|(input, first, second, reader)| RetryInput {
             input,
             first,
             second,
-        },
-    )
+            reader,
+        })
 }
 
 impl RetryInput {
@@ -679,6 +687,54 @@ impl RetryInput {
             plain(t, q, None, BodyProg::Outputs(vec![]));
             t.effect = keyed.then_some(Receiver::Keyed);
         }
+        if let Some((t, r, fact)) = self.reader {
+            let taken: Vec<usize> = [Some(self.first), self.second.map(|(t, _)| t)]
+                .into_iter()
+                .flatten()
+                .map(|t| t.index(n))
+                .collect();
+            let (t, r) = (t.index(n), r.index(net.places.len()));
+            if r != q && !taken.contains(&t) {
+                net.places[r].pool = None;
+                let t = &mut net.transitions[t];
+                plain(t, r, None, BodyProg::Outputs(vec![]));
+                t.effect = Some(Receiver::Keyed);
+                t.bind.reads = vec![ReadOp::Field(Name::Held(q), Subj::Own, "x".to_owned())];
+                // A fact into the row the bind read: its put is a
+                // compare-and-set.
+                t.facts = if fact { vec![q] } else { vec![] };
+            }
+        }
+    }
+}
+
+/// When [`calls`] writes the retry input again: after the first tries failed,
+/// or while they run, before each settles with the drawn result.
+#[derive(Clone, Debug)]
+enum When {
+    AfterFail,
+    DuringRun(Vec<ResultGen>),
+}
+
+impl NetGen {
+    /// The place the bind of a [`RetryInput`] reader takes, for input `q`,
+    /// and whether it puts a fact into `q`.
+    fn reader_input(&self, q: usize) -> Option<(usize, bool)> {
+        self.transitions.iter().find_map(|t| {
+            let consumes: Vec<usize> = (0..t.roles.len())
+                .filter(|&i| t.roles[i] == Role::Consumes)
+                .collect();
+            let reads_q = matches!(
+                t.bind.reads.as_slice(),
+                [ReadOp::Field(Name::Held(p), Subj::Own, _)] if *p == q
+            );
+            (t.trigger == Trigger::Auto
+                && t.effect == Some(Receiver::Keyed)
+                && reads_q
+                && t.roles.iter().filter(|r| **r != Role::None).count() == 1
+                && consumes.len() == 1)
+                .then(|| (consumes[0], t.facts == [q]))
+        })
     }
 }
 
@@ -2141,7 +2197,7 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
 fn no_sequence_of_caller_calls_panics() {
     // The third field: the attempt number of each of T0's requests; a retry
     // of the same run counts on, a new run starts at 1 again.
-    let found: [(&str, FoundCase, Option<&[u32]>); 9] = [
+    let found: [(&str, FoundCase, Option<&[u32]>); 10] = [
         (
             "free_of_an_answer_place_counts_its_answer",
             free_of_an_answer_place_counts_its_answer(),
@@ -2186,6 +2242,11 @@ fn no_sequence_of_caller_calls_panics() {
             "a_retry_input_consumed_by_another_keeps_the_run",
             a_retry_input_consumed_by_another_keeps_the_run(),
             Some(&[1, 2]),
+        ),
+        (
+            "an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice",
+            an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice(),
+            None,
         ),
     ];
     for (name, (net, ops), t0_attempts) in found {
@@ -2455,46 +2516,179 @@ fn a_retry_input_consumed_by_another_keeps_the_run() -> FoundCase {
     (net, ops)
 }
 
+/// A generator find, kept as its state: T0 takes the front of the FIFO P0
+/// and fails retryably, so its run holds that token; a second write gives
+/// P0 a newer token, and the work W0, which consumes P0, is asked. Two
+/// answers of that ask: the first must settle at once, so the second is
+/// refused, never met by a held `Answer`.
+fn an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice() -> FoundCase {
+    let net = NetGen {
+        places: vec![PlaceGen {
+            capacity: PlaceCapacity::Fifo,
+            pool: None,
+        }],
+        transitions: vec![TransGen {
+            trigger: Trigger::Auto,
+            priority: 0,
+            roles: vec![Role::Consumes],
+            produces: vec![],
+            facts: vec![],
+            on_failure: None,
+            on_timeout: None,
+            effect: Some(Receiver::Keyed),
+            timers: None,
+            bind: BindProg {
+                reads: vec![],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+        derived: vec![],
+        works: vec![WorkGen {
+            roles: vec![Role::Consumes],
+            puts: vec![],
+            effect: None,
+            input: None,
+            irreversible: false,
+            undoes: None,
+            bind: BindProg {
+                reads: vec![],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+    };
+    let write = || Op::Write {
+        place: Name::Held(0),
+        subject: "s".to_owned(),
+        content: vec![],
+        dt: Dt::Same,
+    };
+    let answer = || Op::Answer {
+        work: Name::Held(0),
+        subject: "s".to_owned(),
+        seen: SeenGen::Offered(0),
+        answer: OccGen::Fresh,
+        value: None,
+        forward: 0,
+    };
+    let ops = vec![
+        write(),
+        Op::Complete {
+            attempt: Pick::Known(0),
+            result: ResultGen::Failed(true),
+            dt: Dt::Same,
+        },
+        write(),
+        Op::Step {
+            dt: Dt::Forward(10_000_000),
+        },
+        answer(),
+        answer(),
+    ];
+    (net, ops)
+}
+
 /// A net and the calls on it; a drained pool reader ([`Drain`]) gets a first
 /// write of its input, which the drawn calls rarely make.
 fn calls() -> impl Strategy<Value = (NetGen, Vec<Op>)> {
     let rewrite = prop_oneof![Just(Rewrite::Equal), Just(Rewrite::NewUnread)];
-    (net_gen(), prop::collection::vec(op(), 1..24), rewrite).prop_map(|(net, mut ops, rewrite)| {
-        if let Some((q, runs)) = net.retry_input() {
-            let write = |content| Op::Write {
-                place: Name::Held(q),
-                subject: "s".to_owned(),
-                content,
-                dt: Dt::Same,
-            };
-            let mut first = vec![write(vec![])];
-            first.extend((0..runs).map(|i| Op::Complete {
-                attempt: Pick::Known(i),
-                result: ResultGen::Failed(true),
-                dt: Dt::Same,
-            }));
-            first.push(write(match rewrite {
-                Rewrite::Equal => vec![],
-                Rewrite::NewUnread => vec![("w".to_owned(), Value::Boolean(true))],
-            }));
-            first.push(Op::Step {
-                dt: Dt::Forward(10_000_000),
-            });
-            ops.splice(0..0, first);
-        }
-        if let Some(q) = net.drained_input() {
-            ops.insert(
-                0,
-                Op::Write {
-                    place: Name::Held(q),
+    let settle = || {
+        prop_oneof![
+            Just(ResultGen::Failed(true)),
+            Just(ResultGen::Failed(false)),
+            Just(ResultGen::Done(vec![])),
+        ]
+    };
+    let when = prop_oneof![
+        Just(When::AfterFail),
+        prop::collection::vec(settle(), 2).prop_map(When::DuringRun),
+    ];
+    (
+        net_gen(),
+        prop::collection::vec(op(), 1..24),
+        rewrite,
+        when,
+        any::<prop::sample::Index>(),
+        prop::collection::vec(settle(), 4),
+    )
+        .prop_map(|(net, mut ops, rewrite, when, reader_at, tail)| {
+            if let Some((q, runs)) = net.retry_input() {
+                let write = |place, content| Op::Write {
+                    place: Name::Held(place),
                     subject: "s".to_owned(),
-                    content: vec![],
+                    content,
                     dt: Dt::Same,
-                },
-            );
-        }
-        (net, ops)
-    })
+                };
+                let complete = |i, result| Op::Complete {
+                    attempt: Pick::Known(i),
+                    result,
+                    dt: Dt::Same,
+                };
+                let again = write(
+                    q,
+                    match rewrite {
+                        Rewrite::Equal => vec![],
+                        Rewrite::NewUnread => vec![("w".to_owned(), Value::Boolean(true))],
+                    },
+                );
+                let mut first = vec![write(q, vec![])];
+                match &when {
+                    When::AfterFail => {
+                        first.extend((0..runs).map(|i| complete(i, ResultGen::Failed(true))));
+                        first.push(again);
+                    }
+                    When::DuringRun(results) => {
+                        first.push(again);
+                        first.extend(
+                            (0..runs).map(|i| complete(i, results[i % results.len()].clone())),
+                        );
+                    }
+                }
+                first.push(Op::Step {
+                    dt: Dt::Forward(10_000_000),
+                });
+                if let Some((r, fact)) = net.reader_input(q) {
+                    first.insert(reader_at.index(first.len() + 1), write(r, vec![]));
+                    let into = net.output_places().iter().position(|p| p == PLACES[q]);
+                    if fact && into.is_some() {
+                        // Moves the row the reader read, so its record takes
+                        // the stale path, where the fact's compare-and-set
+                        // decides.
+                        first.push(write(q, vec![("z".to_owned(), Value::Boolean(true))]));
+                    }
+                    first.extend(tail.iter().enumerate().map(|(i, res)| {
+                        let res = match (res, into) {
+                            (_, Some(place)) if fact => ResultGen::Done(vec![OutGen {
+                                place,
+                                subject: Subj::Own,
+                                fields: vec![("x".to_owned(), Value::Boolean(true))],
+                            }]),
+                            (ResultGen::Done(_), Some(place)) => ResultGen::Done(vec![OutGen {
+                                place,
+                                subject: Subj::Own,
+                                fields: vec![("x".to_owned(), Value::Boolean(true))],
+                            }]),
+                            (res, _) => res.clone(),
+                        };
+                        complete(i, res)
+                    }));
+                }
+                ops.splice(0..0, first);
+            }
+            if let Some(q) = net.drained_input() {
+                ops.insert(
+                    0,
+                    Op::Write {
+                        place: Name::Held(q),
+                        subject: "s".to_owned(),
+                        content: vec![],
+                        dt: Dt::Same,
+                    },
+                );
+            }
+            (net, ops)
+        })
 }
 
 /// An outside write of the content a single-token row holds leaves the held

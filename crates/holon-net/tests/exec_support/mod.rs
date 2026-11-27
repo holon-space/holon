@@ -71,6 +71,11 @@ pub trait Reads {
     fn cause(&mut self, place: &str, subject: &str) -> Option<String>;
     /// The output of a candidate token.
     fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content>;
+    /// `f` on the committed view, as an ask's situation reads it.
+    fn committed_view(
+        &mut self,
+        f: &mut dyn FnMut(&mut dyn Reads) -> Option<Content>,
+    ) -> Option<Content>;
 
     /// A field as a string; `None` when absent or not a string.
     fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
@@ -96,6 +101,13 @@ impl Reads for Reader<'_> {
 
     fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
         Reader::candidate_output(self, place, subject)
+    }
+
+    fn committed_view(
+        &mut self,
+        f: &mut dyn FnMut(&mut dyn Reads) -> Option<Content>,
+    ) -> Option<Content> {
+        self.committed(|r| f(r))
     }
 }
 
@@ -444,6 +456,7 @@ fn observable(e: &Executor) -> impl Debug + PartialEq + '_ {
         e.in_flight().collect::<Vec<_>>(),
         e.retrying().collect::<Vec<_>>(),
         e.conditions(),
+        e.held(),
     )
 }
 
@@ -873,6 +886,25 @@ impl Driver {
             self.model.conditions(),
             "disclosed conditions after {op}"
         );
+        assert!(
+            self.model.dirty_commits().is_empty(),
+            "P1 soundness after {op}: a commit on a view that differs from the committed front: {:?}",
+            self.model.dirty_commits()
+        );
+        for (occ, edges) in self.exec.held() {
+            assert_eq!(
+                self.exec.settled(&occ),
+                Ok(None),
+                "P3 commit wait after {op}: the held reader {occ} is settled"
+            );
+            for (place, subject, take) in edges {
+                assert!(
+                    self.model.open_take(&take),
+                    "P3 commit wait after {op}: {occ} waits on {place} of {subject} for {take}, \
+                     which is not open"
+                );
+            }
+        }
     }
 
     fn check(&self, op: &str) {
@@ -1056,6 +1088,7 @@ impl Driver {
             .map(|(o, s)| (o.clone(), s.cloned()))
             .collect();
         agree(op, "occurrences", sut_occs, self.model.occurrences());
+        agree(op, "held readers", self.exec.held(), self.model.held());
 
         let sut_flight: Vec<_> = self
             .exec
@@ -1198,6 +1231,16 @@ pub fn subject(s: &str) -> Subject {
 /// `ExpireAnswer.Accept` expires an answer whose ask is gone or changed;
 /// `ReleaseFailed.Accept` clears a failed answer, so the user can answer
 /// again.
+/// The lowered busy set of an asked transition (`uft::lower`): its ask is
+/// offered, and `Answer` enabled, only while none of these holds a token.
+const ACCEPT_BUSY: [&str; 5] = [
+    "Answered.Accept",
+    "Accept.Running",
+    "Accept.RetryPending",
+    "Accept.OutcomeUnknown",
+    "WorkFailed.Accept",
+];
+
 pub fn answer_spec() -> Spec {
     Spec::default()
         .place("Item", Class::Process)
@@ -1210,8 +1253,7 @@ pub fn answer_spec() -> Spec {
         .derived(
             "Asks.Accept",
             bind!(|r, s| {
-                let busy = ["Answered.Accept", "Accept.Running", "WorkFailed.Accept"];
-                if busy.iter().any(|p| r.present(p, s)) {
+                if ACCEPT_BUSY.iter().any(|p| r.present(p, s)) {
                     return None;
                 }
                 ask_row(r, s)
@@ -1225,15 +1267,15 @@ pub fn answer_spec() -> Spec {
                 has_preview: false,
             },
         )
-        .transition(
+        .transition(ACCEPT_BUSY.iter().fold(
             Transition::new(
                 "Answer.Accept",
                 Trigger::Manual,
                 bind!(|r, s| r.present("Asks.Accept", s).then(Content::new)),
                 Body::pure(|s, input| Ok(vec![Output::new("Answered.Accept", s, input.clone())])),
-            )
-            .inhibits("Answered.Accept"),
-        )
+            ),
+            |t, p| t.inhibits(p),
+        ))
         .transition(
             Transition::new(
                 "Accept",
@@ -1311,10 +1353,13 @@ fn item_n(r: &mut dyn Reads, s: &Subject) -> Option<i64> {
     }
 }
 
+/// The lowered situation reads the committed view.
 fn ask_row(r: &mut dyn Reads, s: &Subject) -> Option<Content> {
-    let n = item_n(r, s)?;
-    let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
-    (n >= 0).then(|| content(&[("hash", text(&hash))]))
+    r.committed_view(&mut |r| {
+        let n = item_n(r, s)?;
+        let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
+        (n >= 0).then(|| content(&[("hash", text(&hash))]))
+    })
 }
 
 /// An answer of `Accept` for `s`; `stale` or a missing ask gives a seen

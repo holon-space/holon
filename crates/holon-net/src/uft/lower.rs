@@ -474,7 +474,8 @@ fn lower_as(
 
 /// The work's binding without the answer, plus the arc checks the executor
 /// makes before a binding runs. `Asks`, the work and `ExpireAnswer` all
-/// evaluate it, so they agree on the ask hash.
+/// evaluate it, so they agree on the ask hash. It reads the committed view,
+/// so an open take never holds an ask's `Answer`.
 struct Situation {
     transition: Arc<str>,
     needs: Vec<String>,
@@ -486,12 +487,14 @@ impl Situation {
     /// The bound situation and the hex ask hash over the trace of this check.
     fn eval(&self, r: &mut Reader<'_>, s: &Subject) -> Option<(Content, String)> {
         let (content, trace) = r.traced(|r| {
-            if !self.needs.iter().all(|p| r.present(p, s))
-                || self.inhibits.iter().any(|p| r.present(p, s))
-            {
-                return None;
-            }
-            (self.bind)(r, s)
+            r.committed(|r| {
+                if !self.needs.iter().all(|p| r.present(p, s))
+                    || self.inhibits.iter().any(|p| r.present(p, s))
+                {
+                    return None;
+                }
+                (self.bind)(r, s)
+            })
         });
         let hash = hash_text(&ask_hash(&self.transition, s, &trace));
         Some((content?, hash))

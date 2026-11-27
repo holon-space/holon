@@ -1,7 +1,8 @@
 //! Reader isolation during a take: T1 reads the row P0 that the taker T0
-//! consumes. A read through an open take is stale when the take fails and
-//! puts its held token back before T1 records: T1 decided on a view that
-//! never committed.
+//! consumes. A reader that read through an open take commits only after the
+//! take commits or fails, and it is stale when the take fails and puts its
+//! held token back: it decided on a view that never committed. While the take
+//! is parked, a condition discloses the wait.
 //!
 //! The net is drawn per case (P0's capacity, whether T0 exists, what T1
 //! reads, T1's body, a fact of T1 into P0), so the generator draws a reader
@@ -21,9 +22,11 @@ use holon_net::exec::Body;
 use holon_net::exec::Capacity;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
+use holon_net::exec::Condition;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
+use holon_net::exec::FireError;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
@@ -65,6 +68,9 @@ struct Net {
     /// T1 puts a fact into P0; only with [`ReadKind::Field`], so the put
     /// compares and sets against the row T1 read.
     fact: bool,
+    /// A second taker of P0, fired by hand, so a token can stay in P0 for
+    /// T1 to read before T2 takes it.
+    t2: bool,
 }
 
 const READER: Net = Net {
@@ -73,6 +79,7 @@ const READER: Net = Net {
     read: ReadKind::Field,
     body: ReaderBody::Keyed,
     fact: false,
+    t2: false,
 };
 
 fn x_of_p0(r: &mut dyn exec_support::Reads, s: &Subject) -> Option<Content> {
@@ -107,6 +114,20 @@ impl Net {
                 Transition::new(
                     "T0",
                     Trigger::Auto,
+                    bind!(|_r, _s| Some(Content::new())),
+                    Body::Effectful(Receiver::Keyed),
+                )
+                .consumes("P0")
+                .retry(Duration::from_secs(BACKOFF), 2),
+            )
+        } else {
+            spec
+        };
+        let spec = if self.t2 {
+            spec.transition(
+                Transition::new(
+                    "T2",
+                    Trigger::Manual,
                     bind!(|_r, _s| Some(Content::new())),
                     Body::Effectful(Receiver::Keyed),
                 )
@@ -159,8 +180,9 @@ fn net() -> impl Strategy<Value = Net> {
             ReaderBody::StateProbe,
         ]),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(p0, taker, read, body, fact)| {
+        .prop_map(|(p0, taker, read, body, fact, t2)| {
             let read = if taker { read } else { ReadKind::Field };
             Net {
                 p0,
@@ -168,6 +190,7 @@ fn net() -> impl Strategy<Value = Net> {
                 read,
                 body,
                 fact: fact && read == ReadKind::Field,
+                t2,
             }
         })
 }
@@ -176,6 +199,7 @@ fn net() -> impl Strategy<Value = Net> {
 enum Who {
     T0,
     T1,
+    T2,
 }
 
 impl Who {
@@ -183,6 +207,7 @@ impl Who {
         match self {
             Who::T0 => "T0",
             Who::T1 => "T1",
+            Who::T2 => "T2",
         }
     }
 }
@@ -214,13 +239,15 @@ enum Op {
     Step,
     /// Resolves the oldest parked occurrence of `who`; no-op when none.
     Resolve { who: Who, how: How },
+    /// Fires T2 by hand; no-op when the net has no T2 or it is not enabled.
+    FireT2,
 }
 
 use Op::Complete;
 use Op::Write;
 
 fn op() -> impl Strategy<Value = Op> {
-    let who = prop::sample::select(vec![Who::T0, Who::T1]);
+    let who = prop::sample::select(vec![Who::T0, Who::T1, Who::T2]);
     let res = prop_oneof![
         Just(Res::Done),
         Just(Res::Failed { retryable: true }),
@@ -235,6 +262,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<prop::sample::Index>().prop_map(|nth| Op::Duplicate { nth }),
         1 => Just(Op::Step),
         1 => (who, how).prop_map(|(who, how)| Op::Resolve { who, how }),
+        1 => Just(Op::FireT2),
     ]
 }
 
@@ -251,6 +279,7 @@ struct Sut {
     net: Net,
     seen: BTreeSet<u64>,
     readers: BTreeMap<OccurrenceId, Ghost>,
+    fired_t2: usize,
 }
 
 fn is_t1(o: &OccurrenceId) -> bool {
@@ -258,7 +287,11 @@ fn is_t1(o: &OccurrenceId) -> bool {
 }
 
 fn of(o: &OccurrenceId, who: Who) -> bool {
-    matches!(o, OccurrenceId::Minted { transition, .. } if &**transition == who.name())
+    match o {
+        OccurrenceId::Minted { transition, .. } => &**transition == who.name(),
+        OccurrenceId::Caller(id) => who == Who::T2 && id.starts_with("t2-"),
+        _ => false,
+    }
 }
 
 fn quiesced<T>(r: Result<T, ExecError>) {
@@ -274,6 +307,7 @@ impl Sut {
             net,
             seen: BTreeSet::new(),
             readers: BTreeMap::new(),
+            fired_t2: 0,
         }
     }
 
@@ -321,6 +355,15 @@ impl Sut {
                 }
             }
             Op::Step => quiesced(self.d.tick(BACKOFF + 1)),
+            Op::FireT2 if self.net.t2 => {
+                self.fired_t2 += 1;
+                let o = OccurrenceId::caller(&format!("t2-{}", self.fired_t2));
+                match self.d.fire("T2", S, o) {
+                    Ok(_) | Err(FireError::NotEnabled { .. }) => {}
+                    Err(e) => panic!("T2 fire: {e}"),
+                }
+            }
+            Op::FireT2 => {}
             Op::Resolve { who, how } => {
                 let parked = self
                     .d
@@ -334,11 +377,33 @@ impl Sut {
                         How::Retry => Resolution::Retry,
                         How::Drop => Resolution::Drop,
                     };
-                    quiesced(self.d.resolve(&o, resolution));
+                    self.resolve(&o, resolution);
                 }
             }
         }
         self.observe();
+    }
+
+    /// Resolves `o` and checks that exactly its wait conditions go; a
+    /// refused retry (a later run of the same transition holds `Running`)
+    /// resolves nothing, so every condition stays.
+    fn resolve(&mut self, o: &OccurrenceId, resolution: Resolution) {
+        let before = self.d.exec().conditions().to_vec();
+        let resolved = match self.d.resolve(o, resolution) {
+            Ok(()) => true,
+            Err(ExecError::RetryWhileRunning { .. }) => false,
+            Err(e) => panic!("resolve of {o}: {e}"),
+        };
+        let after = self.d.exec().conditions();
+        for c in &before {
+            let this_wait = resolved
+                && matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == o);
+            assert_eq!(
+                after.contains(c),
+                !this_wait,
+                "resolve of {o}: {c} before, conditions after {after:?}"
+            );
+        }
     }
 
     /// One operation never both restores a P0 token and records T1: a
@@ -381,6 +446,10 @@ impl Sut {
                 self.net
             );
         }
+    }
+
+    fn t1_held(&self) -> bool {
+        self.d.exec().held().iter().any(|(o, _)| is_t1(o))
     }
 
     /// The verdict of T1's first occurrence.
@@ -544,20 +613,218 @@ fn absent_read_then_written_and_taken() {
     case(READER, &[w(false), w(true), done(Who::T1)], Verdict::Stale);
 }
 
-/// The dirty read: T1 records before T0 fails. Not stale until the commit
-/// wait lands.
+/// T1's effect ends before T0 fails: T1 waits, then goes stale.
 #[test]
 fn dirty_absent_read_records_before_the_taker_fails() {
-    case(
-        READER,
-        &[w(true), w(false), done(Who::T1), fails(Who::T0, false)],
-        Verdict::NotStale,
-    );
+    let mut sut = Sut::new(READER);
+    for op in [w(true), w(false), done(Who::T1)] {
+        sut.apply(&op);
+    }
+    assert!(sut.t1_held(), "T1 waits while T0 holds the token");
+    sut.apply(&fails(Who::T0, false));
+    assert!(!sut.t1_held());
+    assert_eq!(sut.verdict(), Verdict::Stale);
+    sut.check();
 }
 
+/// A2 with a fact of T1 into the Single P0: T1 goes stale by the restore,
+/// and its fact does not land over the restored token.
+#[test]
+fn a_stale_reader_puts_no_fact_over_the_restored_token() {
+    let net = Net {
+        fact: true,
+        ..READER
+    };
+    let mut sut = Sut::new(net);
+    for op in beside(true, Res::Failed { retryable: false }) {
+        sut.apply(&op);
+    }
+    assert_eq!(sut.verdict(), Verdict::Stale);
+    let p0 = sut
+        .d
+        .exec()
+        .tokens()
+        .token("P0", S)
+        .expect("T0's token is back");
+    assert_eq!(
+        p0.record(),
+        &Content::new(),
+        "the restored token, not T1's fact"
+    );
+    sut.check();
+}
+
+/// T0 takes from two rows that T1 reads as holes, then fails: both tokens go
+/// back, and T1's facts land on neither restored token. The drawn net has
+/// one taken row, so this shape is a static example of its own.
+#[test]
+fn a_stale_reader_puts_no_fact_over_either_restored_token() {
+    let x = || content(&[("x", Value::Boolean(true))]);
+    let spec = Spec::default()
+        .place("P1", Class::Process)
+        .place("Q0", Class::Process)
+        .place("Q1", Class::Process)
+        .transition(
+            Transition::new(
+                "T0",
+                Trigger::Auto,
+                bind!(|_r, _s| Some(Content::new())),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("Q0")
+            .consumes("Q1"),
+        )
+        .transition(
+            Transition::new(
+                "T1",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    let q0 = r.field("Q0", s, "x");
+                    let q1 = r.field("Q1", s, "x");
+                    (q0.is_none() && q1.is_none()).then(Content::new)
+                }),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("P1")
+            .fact("Q0")
+            .fact("Q1"),
+        );
+    let mut d = Driver::new(spec);
+    for p in ["Q0", "Q1", "P1"] {
+        d.write(p, S, Content::new()).expect("the net quiesces");
+    }
+    let t1 = d
+        .requests_of("T1")
+        .next()
+        .expect("T1 fired while T0 holds both tokens")
+        .attempt;
+    let s = Subject::new(S);
+    d.complete(
+        t1,
+        EffectResult::Done(vec![Output::new("Q0", &s, x()), Output::new("Q1", &s, x())]),
+    )
+    .expect("the net quiesces");
+    let t0 = d.requests_of("T0").next().expect("T0 runs").attempt;
+    d.complete(t0, EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    for p in ["Q0", "Q1"] {
+        let token = d.exec().tokens().token(p, S).expect("T0's token is back");
+        assert_eq!(
+            token.record(),
+            &Content::new(),
+            "{p}: the restored token, not T1's fact"
+        );
+    }
+}
+
+/// T0 holds k1, k2 is written, T1 reads k2, then T2 takes k2. T0 fails:
+/// k1 is older than k2, which T2 holds, so k1 does not come back. T2's
+/// commit empties P0, so T1's read of k2 is stale.
+#[test]
+fn superseded_token_stays_out_when_a_later_take_holds_the_newer_one() {
+    let net = Net { t2: true, ..READER };
+    let mut sut = Sut::new(net);
+    for op in [
+        w(true),
+        w(true),
+        w(false),
+        Op::FireT2,
+        fails(Who::T0, false),
+        done(Who::T2),
+        done(Who::T1),
+    ] {
+        sut.apply(&op);
+    }
+    assert_eq!(
+        sut.p0_ids(),
+        BTreeSet::new(),
+        "k1 came back after k2 was consumed"
+    );
+    assert_eq!(sut.verdict(), Verdict::Stale);
+    sut.check();
+}
+
+/// T0 holds k1, k2 is written and T2 takes it; T1 reads the hole and
+/// waits on T2 only, since k1 can never come back. T2 commits first, then
+/// T0 fails: k1 stays out, and T1's read of the empty row is true.
+#[test]
+fn superseded_token_stays_out_after_the_newer_one_is_consumed() {
+    let net = Net {
+        t2: true,
+        body: ReaderBody::Pure,
+        ..READER
+    };
+    let mut sut = Sut::new(net);
+    for op in [
+        w(true),
+        w(true),
+        Op::FireT2,
+        w(false),
+        done(Who::T2),
+        fails(Who::T0, false),
+    ] {
+        sut.apply(&op);
+    }
+    assert_eq!(
+        sut.p0_ids(),
+        BTreeSet::new(),
+        "k1 came back after k2 was consumed"
+    );
+    assert_eq!(sut.verdict(), Verdict::NotStale);
+    sut.check();
+}
+
+/// T1's facts fill the FIFO P0; T2 takes one and parks, a later T2 run
+/// takes the next, so a retry of the parked T2 is refused and the wait of
+/// T1 on the parked take stays disclosed.
+#[test]
+fn a_refused_retry_keeps_the_wait_condition() {
+    let net = Net {
+        p0: Capacity::Fifo,
+        taker: false,
+        body: ReaderBody::Pure,
+        fact: true,
+        t2: true,
+        ..READER
+    };
+    let mut sut = Sut::new(net);
+    for op in [
+        w(false),
+        w(false),
+        Op::FireT2,
+        w(false),
+        Complete {
+            who: Who::T2,
+            res: Res::Unknown,
+        },
+        fails(Who::T2, true),
+        Op::FireT2,
+        Op::Resolve {
+            who: Who::T2,
+            how: How::Retry,
+        },
+    ] {
+        sut.apply(&op);
+    }
+    assert!(sut.t1_held(), "T1 still waits on the parked take");
+    sut.check();
+}
+
+/// T1 reads k2, written while T0 holds k1: a failed T0 drops k1 for k2, so
+/// T1's read cannot turn false and T1 does not wait for T0.
 #[test]
 fn read_of_a_token_written_during_a_take() {
     case(READER, &g_ops(), Verdict::NotStale);
+    let mut sut = Sut::new(READER);
+    for op in [w(true), wx(true, false), w(false), done(Who::T1)] {
+        sut.apply(&op);
+        assert!(
+            !sut.t1_held(),
+            "T1 waits on a take that cannot change its read"
+        );
+    }
+    assert_eq!(sut.verdict(), Verdict::NotStale);
+    sut.check();
 }
 
 #[test]
@@ -614,7 +881,7 @@ fn read_then_taken_taker_fails() {
 
 #[test]
 fn read_while_taken_taker_done() {
-    case(READER, &beside(true, Res::Done), Verdict::Stale);
+    case(READER, &beside(true, Res::Done), Verdict::NotStale);
 }
 
 #[test]
@@ -654,4 +921,130 @@ fn present_fifo_read_whose_held_front_goes_back() {
         ],
         Verdict::Stale,
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Resolve {
+    Verify,
+    Drop,
+    /// Retry, then the retried attempt fails definitely: the earlier attempts
+    /// may have taken effect, so the take parks again.
+    RetryThenFails,
+}
+
+/// T0 takes P0 for `s`, T1 binds the hole, T0's two attempts end unknown so
+/// T0 parks; T1's effect ends Done and T1 waits, disclosed. The same happens
+/// for the subject `s2`, whose wait must outlive the resolve of `s`.
+fn reader_waits_on_a_parked_take(resolve: Resolve) {
+    let mut sut = Sut::new(READER);
+    for s in [S, "s2"] {
+        for p in ["P0", "P1"] {
+            quiesced(sut.d.write(p, s, Content::new()));
+        }
+    }
+    for _ in 0..2 {
+        for _ in [S, "s2"] {
+            sut.apply(&Complete {
+                who: Who::T0,
+                res: Res::Unknown,
+            });
+        }
+    }
+    sut.apply(&done(Who::T1));
+    sut.apply(&done(Who::T1));
+    let waits = |sut: &Sut, s: &str| {
+        sut.d.exec().conditions().iter().any(|c| {
+            matches!(c, Condition::WaitsOnParkedTake { reader, subject, take, .. }
+                if &**reader == "T1" && subject.as_str() == s && &**take == "T0")
+        })
+    };
+    assert!(
+        waits(&sut, S) && waits(&sut, "s2"),
+        "{:?}",
+        sut.d.exec().conditions()
+    );
+    assert_eq!(sut.d.exec().held().len(), 2, "both readers wait");
+    let take = sut
+        .d
+        .exec()
+        .occurrences()
+        .find(|(o, s)| of(o, Who::T0) && matches!(s, Some(Settled::OutcomeUnknown(_))))
+        .map(|(o, _)| o.clone())
+        .expect("T0 parked");
+    let take_subject = sut
+        .d
+        .requests
+        .iter()
+        .find(|r| r.occurrence == take)
+        .expect("T0 ran")
+        .subject
+        .clone();
+    let other = if take_subject.as_str() == S { "s2" } else { S };
+    let reader_of = |sut: &Sut, s: &str| {
+        sut.d
+            .requests
+            .iter()
+            .find(|r| &*r.transition == "T1" && r.subject.as_str() == s)
+            .expect("T1 ran")
+            .occurrence
+            .clone()
+    };
+    let reader = reader_of(&sut, take_subject.as_str());
+    let settled = |sut: &Sut| sut.settled(&reader);
+    match resolve {
+        Resolve::Verify => {
+            sut.resolve(&take, Resolution::Verify(vec![]));
+            assert_eq!(settled(&sut), Some(Settled::Done));
+        }
+        Resolve::Drop => {
+            sut.resolve(&take, Resolution::Drop);
+            assert_eq!(settled(&sut), Some(Settled::Done));
+        }
+        Resolve::RetryThenFails => {
+            sut.resolve(&take, Resolution::Retry);
+            assert!(!waits(&sut, take_subject.as_str()));
+            assert_eq!(
+                settled(&sut),
+                None,
+                "the retried take is open: T1 still waits"
+            );
+            let retried = sut
+                .d
+                .pending
+                .iter()
+                .position(|r| r.occurrence == take)
+                .expect("the retry runs");
+            let req = sut.d.pending.remove(retried).expect("found above");
+            quiesced(
+                sut.d
+                    .complete(req.attempt, EffectResult::Failed(Cause::definite("boom"))),
+            );
+            assert!(
+                waits(&sut, take_subject.as_str()),
+                "parked again, disclosed again"
+            );
+            assert_eq!(settled(&sut), None, "T1 waits on the parked take");
+            sut.resolve(&take, Resolution::Drop);
+            assert_eq!(settled(&sut), Some(Settled::Done));
+        }
+    }
+    assert!(!waits(&sut, take_subject.as_str()));
+    assert!(waits(&sut, other), "the wait of the other subject stays");
+    assert_eq!(sut.settled(&reader_of(&sut, other)), None);
+    sut.check();
+}
+
+#[test]
+fn reader_waits_on_a_parked_take_verify() {
+    reader_waits_on_a_parked_take(Resolve::Verify);
+}
+
+#[test]
+fn reader_waits_on_a_parked_take_drop() {
+    reader_waits_on_a_parked_take(Resolve::Drop);
+}
+
+#[test]
+fn reader_waits_on_a_parked_take_retry_then_fails() {
+    reader_waits_on_a_parked_take(Resolve::RetryThenFails);
 }
