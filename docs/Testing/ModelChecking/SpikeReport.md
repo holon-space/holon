@@ -2,17 +2,23 @@
 
 Card: #1490. Base: ffa1611f40950b386f80932fb0e8e521c5af8e4b.
 
-Output: target/lane-1490/numbers.md
-Output: target/lane-1490/run-a.log
+Output: target/lane-1490/r2/numbers.md
+Output: target/lane-1490/r2/run.log
 
 ## Answer
 
-- Yes. TLC replays both known race classes from the code before their fix,
+- Partly. TLC replays the #600 class from shipped pre-fix code (`b452395b`),
   with the user-level properties only.
-- On main, TLC finds one race class that is still open: a feed change that
-  the `home_by` fold has not handed to the write-back consumer reads as
-  settled. The open convergence-predicate diff (#1466) closes it: the spec of
-  main with that diff is green.
+- TLC did not replay #1435 from shipped code: the real pre-fix waiter
+  (`ffa1611f` `spin`, `7af013ce`) is green. TLC finds the #1435 class only on
+  two designs that no commit held: a hybrid (`nowake`) and a verifier's mutant
+  (`late`).
+- On main: TLC found a fold-level window, settle level open (#1506). A feed
+  change that the `home_by` fold has not handed to the write-back consumer
+  reads as settled in the model. It is not counted as a confirmed bug: no
+  test has shown it at the settle level yet. The open convergence-predicate
+  diff (#1466) closes it in the model: the spec of main with that diff is
+  green.
 - Recommendation: adopt, for concurrency cards that change a wait, a settle or
   a hand-over between tasks (details at the end).
 
@@ -67,12 +73,13 @@ Action and the code it models (file:function at `ffa1611f`):
 - PollPass: `crates/holon-orgmode/src/di.rs` `poll_pass`
 - SettleStart, SettlePoll: `crates/holon-integration-tests/src/pbt/convergence.rs` `converge_signals`, `owed`, `writeback_owed`
 
-Designs (constant `Design`):
-- `prefix`: the settle of `b452395b`, the parent of the #600 fix `3b10d7bb1b`.
+Designs (constant `Design`), each with the commit that held it:
+- `prefix`: the settle of `b452395b` (shipped), the parent of the #600 fix `3b10d7bb1b`.
   Quiet = no moved CDC watermark, feed seq or tick, and no fold or
   pass-in-flight flag, over two reads.
-- `main`: the settle of `ffa1611f`: the stages of `owed` and `writeback_owed`.
-- `through`: main plus the write-back feed cursor of the open #1466 diff.
+- `main`: the settle of `ffa1611f` (shipped): the stages of `owed` and `writeback_owed`.
+- `through`: main plus the write-back feed cursor of the open #1466 diff. No
+  commit on main holds it; the open diff does.
 
 ### `SettleWake.tla`: a windowed settle that waits for a change
 
@@ -84,14 +91,16 @@ Action and the code it models:
 - Check: `frontends/gpui/tests/pbt_harness/settle.rs` `settle_window`
 - Arm, Wake: Modelling choice: main has no change wait; the shape is the one of the open #1435 diff
 
-Designs (constant `Waiter`):
-- `spin`: `ffa1611f`. `settle_window` checks again at once and never parks.
-- `fixed`: `813caed2` (the #1435 lane tip): subscribe, check, park; the
-  `OwedChild` drop wakes.
-- `nowake`: the waiter of `fixed` with the wake sources of `7af013ce`. There,
-  and on `ffa1611f`, dropping an `OwedChild` wakes nothing.
-- `late`: the waiter checks, then subscribes (the subscribe-late mutant of
-  the second verify round of #1435).
+Designs (constant `Waiter`), each with the commit that held it:
+- `spin`: `ffa1611f` and `7af013ce` (shipped pre-fix code of the #1435
+  class). `settle_window` checks again at once and never parks.
+- `fixed`: `813caed2` (the #1435 lane tip, not on main): subscribe, check,
+  park; the `OwedChild` drop wakes.
+- `nowake`: never shipped, a hybrid. The waiter of `fixed` with the wake
+  sources of `7af013ce`. The change wait and the drop wake arrived together
+  in `db6074bc`, so no commit had a parking waiter without the drop wake.
+- `late`: never shipped, a mutant. The waiter checks, then subscribes (the
+  subscribe-late mutant of the second verify round of #1435).
 
 ## First replay: an owed render reads as quiet (#600, #610)
 
@@ -106,9 +115,12 @@ TLC violates `SettledReadsNewest`. Its shortest trace
 
 - From EditorWrite to SettlePoll: the CDC batch is emitted but the block feed has not applied
   it. The pre-fix settle reads only change of the CDC watermark, so a batch
-  emitted before the settle started is invisible. The commit message of
-  the fix `3b10d7bb1b` names this window: "between the edit landing in SQL and
-  the write-back loop being handed the render ... every settle returns".
+  emitted before the settle started is invisible. The doc comment of
+  `read_when_written` in
+  `crates/holon-integration-tests/tests/dense_patch_engine_exact.rs`, added
+  by the fix `3b10d7bb1b`, names this window: "between the edit landing in
+  SQL and the write-back loop being handed the render ... every settle
+  returns".
 
 The window that #610 names, a render that is queued, is among the violating
 returns. A shortest path to it in the state graph of the pre-fix design
@@ -141,10 +153,17 @@ flags. `windows.py` counts every distinct return state in the full state graph
 that TLC dumps (`-dump dot,actionlabels`), so the counts are exact for the
 bounds.
 
-## Second replay: a settle waiter misses its wake (#1435 class)
+## Second check: a settle waiter misses its wake (#1435 class, not a replay)
 
-Pre-fix wake sources: `7af013ce` (unchanged on `ffa1611f`), with the
-change-wait waiter of the #1435 lane (`SettleWake.tla`, `Waiter = "nowake"`).
+This is not a replay of shipped code. The shipped pre-fix waiter (`spin`,
+`ffa1611f` and `7af013ce`) never parks and is green on all three
+properties. The brief's case "check-then-wait in the sim driver" assumed a
+pre-fix check-then-wait that no commit held: the sim waits used clock polls
+until `813caed2`. TLC finds the class only on two designs that never shipped.
+
+Hybrid `nowake` (never shipped): the wake sources of `7af013ce` (unchanged on
+`ffa1611f`) with the change-wait waiter of the #1435 lane (`SettleWake.tla`,
+`Waiter = "nowake"`).
 TLC violates `SettleReturns` (SettleWake_nowake.SettleReturns.trace_states: 9):
 
 - `Init`
@@ -157,10 +176,11 @@ TLC violates `SettleReturns` (SettleWake_nowake.SettleReturns.trace_states: 9):
 - `ChildEnd owedChild=FALSE shown=2`: OwedChild::drop: the check would pass now, no wake
 - `Stuttering`: the waiter stays parked (the hang guard fires)
 
-This is the missed wake that the #1435 steward ruling fixed in `db6074bc`
-(`OwedChild::drop` bumps the root cursor's `release_wake`).
+This is the missed wake that `db6074bc` avoids by adding the change wait and
+the drop wake together (`OwedChild::drop` bumps the root cursor's
+`release_wake`).
 
-The check-then-wait order itself (`Waiter = "late"`): TLC violates
+The check-then-wait order itself, mutant `late` (never shipped): TLC violates
 `SettleReturns` (SettleWake_late.SettleReturns.trace_states: 14). Its first
 steps emit, apply and render the first two writes; from the third write on:
 
@@ -205,23 +225,29 @@ Mapped to code:
   last diff is yielded; `run_supervised` has sent it into the unbounded
   channel; the write-back consumer has not received it, so `queued_renders` is
   empty.
-- Both windows outlast the two reads of `converge_signals` whenever the tokio scheduler delays the supervisor or the consumer task:
-  the loaded-host flake shape.
+- In the model, both windows outlast the two reads of `converge_signals`
+  when the scheduler delays the supervisor or the consumer task. Whether a
+  real settle returns in them is the open settle-level question of #1506.
 
-Classification (contract C3):
-- A race, not a model error, confirmed by a red test on `ffa1611f`.
-  Red-test patch (applied for the run only, then restored):
-  `target/lane-1490/red/feed-change-reads-as-owed.patch`.
-  - A property test in `crates/holon-api/src/live_data/home_by/tests.rs`
+Classification (contract C3), per main's ruling of 2026-11-27:
+- TLC found a fold-level window, settle level open (#1506). Not a model
+  error, and not counted as a confirmed bug: #1506 owns the settle-level
+  oracle that would confirm it.
+- The fold-level patch `target/lane-1490/red/feed-change-reads-as-owed.patch`
+  is not a red-first test of this window.
+  - It is a property test in `crates/holon-api/src/live_data/home_by/tests.rs`
     (module `supervision`): after each drawn feed change, before the
     supervisor runs, the fold's progress flag or the consumer's channel must
-    show the change.
-  - It fails on the first drawn change, as the model predicts. Its message:
-    "the feed holds a change the fold has not taken, yet the fold reports
-    nothing in flight and its consumer holds nothing, so a settle that reads
-    both returns before the change is rendered". The shrunk input is one
-    `Replace` with an empty `keep` list.
-- Owner: #1466 (open, in progress). Its diff adds `Homed::Through` and a
+    show the change. It is red on `ffa1611f`.
+  - Its oracle, as the invariant `RedTestOracle` of the `through` design (the
+    design that closes the window), is violated too
+    (Writeback_through_oracle.RedTestOracle.result: violated, in
+    Writeback_through_oracle.RedTestOracle.trace_states: 3). The oracle reads
+    a component state that every unpolled fold task reaches, whatever the
+    settle reads, so the test cannot turn green after the fix.
+  - `run.py` runs this oracle row with the expected verdict "violated"; a
+    future red-first test of #1506 replaces it with a row expected to hold.
+- Owner of the fix: #1466 (open, in progress). Its diff adds `Homed::Through` and a
   write-back feed cursor that applies only after the consumer took every diff
   before the marker. `Design = "through"` models that, and all three
   properties hold.
@@ -244,7 +270,7 @@ Classification (contract C3):
 
 - quint.Writeback.result: violated
 - quint.Writeback.trace_states: 10
-- quint.Writeback.seconds: 1.1
+- quint.Writeback.seconds: 1.0
 
 Comparison:
 - Authoring: agent_minutes.quint_model: 0.7 for a translation of a checked
@@ -276,35 +302,46 @@ TLC per spec and property (the run that the numbers file reads, host load high, 
 
 | spec | property | result | distinct states | states generated | seconds |
 |---|---|---|---|---|---|
-| Writeback_prefix | SettledReadsNewest | violated | 25 | 27 | 2.5 |
-| Writeback_prefix | EveryOwedRenderWritten | holds | 50847 | 159752 | 21.9 |
-| Writeback_prefix | SettleReturns | holds | 50847 | 159752 | 13.2 |
-| Writeback_main | SettledReadsNewest | violated | 37 | 49 | 2.2 |
-| Writeback_main | EveryOwedRenderWritten | holds | 17846 | 54875 | 8.6 |
-| Writeback_main | SettleReturns | holds | 17846 | 54875 | 7.1 |
-| Writeback_through | SettledReadsNewest | holds | 14524 | 43781 | 2.6 |
-| Writeback_through | EveryOwedRenderWritten | holds | 14524 | 43781 | 11.3 |
-| Writeback_through | SettleReturns | holds | 14524 | 43781 | 6.7 |
-| SettleWake_spin | SettledReadsNewest | holds | 80 | 154 | 1.5 |
-| SettleWake_spin | EveryOwedRenderWritten | holds | 80 | 154 | 2.6 |
-| SettleWake_spin | SettleReturns | holds | 80 | 154 | 2.0 |
-| SettleWake_fixed | SettledReadsNewest | holds | 339 | 541 | 1.6 |
-| SettleWake_fixed | EveryOwedRenderWritten | holds | 339 | 541 | 1.3 |
-| SettleWake_fixed | SettleReturns | holds | 339 | 541 | 1.1 |
+| Writeback_prefix | SettledReadsNewest | violated | 21 | 25 | 3.9 |
+| Writeback_prefix | EveryOwedRenderWritten | holds | 50847 | 159752 | 30.2 |
+| Writeback_prefix | SettleReturns | holds | 50847 | 159752 | 10.6 |
+| Writeback_main | SettledReadsNewest | violated | 34 | 44 | 1.1 |
+| Writeback_main | EveryOwedRenderWritten | holds | 17846 | 54875 | 11.4 |
+| Writeback_main | SettleReturns | holds | 17846 | 54875 | 7.6 |
+| Writeback_through | SettledReadsNewest | holds | 14524 | 43781 | 2.0 |
+| Writeback_through | EveryOwedRenderWritten | holds | 14524 | 43781 | 7.4 |
+| Writeback_through | SettleReturns | holds | 14524 | 43781 | 4.8 |
+| SettleWake_spin | SettledReadsNewest | holds | 80 | 154 | 1.8 |
+| SettleWake_spin | EveryOwedRenderWritten | holds | 80 | 154 | 1.5 |
+| SettleWake_spin | SettleReturns | holds | 80 | 154 | 1.4 |
+| SettleWake_fixed | SettledReadsNewest | holds | 339 | 541 | 1.3 |
+| SettleWake_fixed | EveryOwedRenderWritten | holds | 339 | 541 | 1.7 |
+| SettleWake_fixed | SettleReturns | holds | 339 | 541 | 2.1 |
 | SettleWake_nowake | SettledReadsNewest | holds | 181 | 303 | 1.5 |
-| SettleWake_nowake | EveryOwedRenderWritten | holds | 181 | 303 | 2.1 |
-| SettleWake_nowake | SettleReturns | violated | 181 | 303 | 3.2 |
-| SettleWake_late | SettledReadsNewest | holds | 461 | 738 | 1.8 |
-| SettleWake_late | EveryOwedRenderWritten | holds | 461 | 738 | 3.9 |
-| SettleWake_late | SettleReturns | violated | 461 | 738 | 1.7 |
+| SettleWake_nowake | EveryOwedRenderWritten | holds | 181 | 303 | 2.3 |
+| SettleWake_nowake | SettleReturns | violated | 181 | 303 | 2.5 |
+| SettleWake_late | SettledReadsNewest | holds | 461 | 738 | 2.2 |
+| SettleWake_late | EveryOwedRenderWritten | holds | 461 | 738 | 1.9 |
+| SettleWake_late | SettleReturns | violated | 461 | 738 | 1.2 |
+
+The red-test oracle row (outcome row `Writeback_through_oracle.RedTestOracle` of `run.py`):
+
+| config | red test oracle | result | distinct states | seconds |
+|---|---|---|---|---|
+| Writeback_through_oracle | RedTestOracle | violated | 7 | 1.5 |
 
 - tlc_seconds_all_runs: 100.4
-- Writeback_prefix.graph.seconds: 14.9 (state-graph dump for `windows.py`)
-- Writeback_main.graph.seconds: 11.8
+- Writeback_prefix.graph.seconds: 23.4 (state-graph dump for `windows.py`)
+- Writeback_main.graph.seconds: 7.0
 
 Races:
-- races_known_replayed: 2
-- races_found_on_main: 1
+- races_known_replayed: 1 (the #600 class from `b452395b`; only replays of
+  shipped pre-fix code count)
+- races_known_on_unshipped_designs: 2 (the #1435 class on the hybrid
+  `nowake` and the mutant `late`)
+- races_found_on_main: 0
+- fold_level_windows_on_main_settle_level_open: 1 (#1506)
+- red_test_patches_red_first: 0 (the fold-level patch fails its oracle row)
 - races_new_unowned: 0
 - false_alarms: 0
   - No counterexample was a model error. One configuration slip: TLC first
@@ -356,11 +393,16 @@ Adopt, scoped:
   The lane first writes or updates the spec, shows the red trace of the
   current code (or the green run of the planned design), then implements.
 - Each counterexample on main becomes a red test at the lowest observing
-  layer, as for any other bug.
+  layer, as for any other bug. Before it counts, its oracle is checked as an
+  invariant of the design that closes the race (a `run.py` oracle row): it
+  must hold there.
 - Gate: `run.py` runs when this folder or a modelled file changes. It is a
   cargo-free check.
 - Not for: logic inside one task, rendering, data formats. The PBTs cover
   those.
-- Basis: both known race classes replay in minutes of agent time and seconds
-  to minutes of TLC; the one counterexample on main is a real race that an
-  open lane already targets; no false alarm.
+- Basis: the #600 class replays from shipped code in minutes of agent time
+  and seconds to minutes of TLC; the #1435 class shows on designs that never
+  shipped, and the shipped pre-fix waiter is green, so that check guards
+  future waiter designs rather than replaying a past bug; the one
+  counterexample on main is a fold-level window that an open lane already
+  targets, settle level open (#1506); no false alarm.

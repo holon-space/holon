@@ -4,7 +4,9 @@
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR]
 
 Each spec is checked once per shared property (SettleProperties.tla) and the
-outcome is compared with EXPECTED. Logs and `numbers.txt` (`key: value`
+outcome is compared with EXPECTED. The oracle of a red test is checked on the
+design that closes its race (RED_TEST_ORACLES): a violation there means the
+test cannot turn green after the fix, so it is no red-first test. Logs and `numbers.txt` (`key: value`
 lines) go to DIR (default target/model-checking/logs).
 
 Tools: TLA2TOOLS_JAR and QUINT name them; otherwise the jar is downloaded to
@@ -13,8 +15,8 @@ target/model-checking/ (checksum pinned) and Quint is installed there by npm.
 Exit codes:
   0  every outcome is the expected one
   1  an outcome differs from EXPECTED (a green spec violates, a red one holds)
-  2  a tool failed: download, checksum, TLC or Quint error, unreadable log,
-     or this script crashed
+  2  no verdict: a tool failed (download, checksum, TLC or Quint error,
+     unreadable log), the command line is wrong, or this script crashed
 """
 
 import argparse
@@ -24,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 
@@ -50,6 +53,9 @@ EXPECTED = {
 # specs whose violating returns windows.py counts by pipeline stage
 WINDOWS = ["Writeback_prefix", "Writeback_main"]
 QUINT_EXPECTED_VIOLATED = "settledReadsNewest"
+# config whose INVARIANT is a red test's oracle on the fixed design -> whether
+# TLC must find that oracle violated
+RED_TEST_ORACLES = {"Writeback_through_oracle": ("RedTestOracle", True)}
 
 TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
 
@@ -100,16 +106,17 @@ def number(pattern, text, log):
     return int(found[-1].replace(",", ""))
 
 
-def run_tlc(jar, spec, prop, out, extra=()):
+def run_tlc(jar, spec, prop, out, extra=(), name=None):
     """TLC 1.7.4 reads a config only from the spec's own folder, so the specs
-    are copied next to the generated config. prop None checks no property."""
+    are copied next to the generated config. prop None adds no property to
+    the config."""
     module = spec.split("_")[0]
     specs = out / "specs"
     specs.mkdir(exist_ok=True)
     for tla in HERE.glob("*.tla"):
         (specs / tla.name).write_text(tla.read_text())
     base = (HERE / f"{spec}.cfg").read_text()
-    name = prop or "graph"
+    name = name or prop or "graph"
     kind = "INVARIANT" if prop == INVARIANT else "PROPERTY"
     cfg = f"{spec}-{name}.cfg"
     (specs / cfg).write_text(f"{base}{kind} {prop}\n" if prop else base)
@@ -153,6 +160,29 @@ def check_tlc(jar, out, numbers):
                   f"{numbers[f'{key}.seconds']} s, log {log}", flush=True)
             if violated != (prop in expected):
                 mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
+    return mismatches
+
+
+def check_red_test_oracles(jar, out, numbers):
+    mismatches = []
+    for spec, (oracle, expect_violated) in RED_TEST_ORACLES.items():
+        code, log, seconds = run_tlc(jar, spec, None, out, name=oracle)
+        text = log.read_text()
+        if code == TLC_HOLDS and "No error has been found" in text:
+            violated = False
+        elif code == TLC_SAFETY and f"Invariant {oracle} is violated" in text:
+            violated = True
+        else:
+            raise ToolError(f"{log}: TLC exit {code} without a verdict")
+        key = f"{spec}.{oracle}"
+        numbers[f"{key}.result"] = "violated" if violated else "holds"
+        numbers[f"{key}.distinct_states"] = number(r"([\d,]+) distinct states found", text, log)
+        numbers[f"{key}.seconds"] = f"{seconds:.1f}"
+        if violated:
+            numbers[f"{key}.trace_states"] = number(r"\nState (\d+):", text, log)
+        print(f"{key}: {numbers[f'{key}.result']}, log {log}", flush=True)
+        if violated != expect_violated:
+            mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
     return mismatches
 
 
@@ -206,6 +236,7 @@ def main():
     numbers = {}
     try:
         mismatches = check_tlc(tla_jar(), out, numbers)
+        mismatches += check_red_test_oracles(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)
         mismatches += check_quint(quint_bin(), out, numbers)
     except Exception as e:
@@ -220,4 +251,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(2)

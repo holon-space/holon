@@ -280,4 +280,8 @@ P == INSTANCE SettleProperties WITH
 SettledReadsNewest     == P!SettledReadsNewest
 EveryOwedRenderWritten == P!EveryOwedRenderWritten
 SettleReturns          == P!SettleReturns
+
+\* The oracle of the red test of the open race: after a feed change, the fold
+\* reports work in flight or its consumer channel holds the change.
+RedTestOracle == srcPending => (folding \/ supChan /= <<>>)
 ================================================================================

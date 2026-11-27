@@ -5,7 +5,9 @@ edge into a state with phase "returned", and equal return states count once.
 
 Usage: python3 windows.py <graph.dot> <label>
 Prints `<label>.<stage>: <count>` lines and `<label>.returns: <total>`.
-Exits 1 when the graph holds no return at all, or a return it cannot classify.
+Exits 1, and prints no counts, when the graph holds no return at all, a return
+it cannot classify, or the script crashes (an unreadable graph, a missing
+argument).
 """
 
 import re

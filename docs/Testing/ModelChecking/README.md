@@ -12,7 +12,9 @@ use, checked with TLC. One model is also written in Quint.
 | `SettleWake.tla` | A windowed settle that waits on `UiWatermark::changed` |
 | `Writeback.qnt` | The pre-fix settle of `Writeback.tla` in Quint |
 | `*.cfg` | One design of a spec each: constants only |
+| `Writeback_through_oracle.cfg` | The oracle of a red test, checked on the design that closes its race |
 | `run.py` | Checks every spec once per property and compares with the expected outcome |
+| `test_run_exit_codes.py` | Pins that every crash of `run.py` exits 2 |
 | `windows.py` | Counts the violating settle returns by the stage that holds the newest edit |
 
 Each action in a spec names the code it models (`Models: <file>:<function>`)
@@ -27,7 +29,8 @@ python3 docs/Testing/ModelChecking/run.py --out target/model-checking/logs
 ```
 
 The script exits 0 when every outcome is the expected one, 1 when an outcome
-differs, and 2 when a tool fails. It writes one log per run and
+differs, and 2 when it has no verdict: a tool fails, the command line is
+wrong, or the script crashes. It writes one log per run and
 numbers.txt into the `--out` folder.
 
 ## Tools
@@ -40,3 +43,12 @@ numbers.txt into the `--out` folder.
   under `target/model-checking/`, or takes the binary in `QUINT`. On its first
   run Quint downloads its Rust evaluator to `~/.quint/`.
 - Nothing is installed into the tracked tree.
+
+## Rules
+
+- A replay names the commit whose code has the replayed shape; a design that
+  no commit held (a hybrid or a mutant) is reported as such, never as a
+  replay.
+- A red test of a race that TLC finds is a red-first test only if its oracle
+  holds on the design that closes the race. `run.py` checks the oracle as an
+  invariant of that design (`RED_TEST_ORACLES`, with the expected verdict).
