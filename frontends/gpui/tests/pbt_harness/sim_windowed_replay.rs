@@ -36,6 +36,7 @@ use super::settle::PUMP_TICKS;
 use super::settle::Pump;
 use super::settle::SettleError;
 use super::settle::pump_parks;
+use super::settle::pump_until_resolved;
 use super::settle::settle_window;
 use super::settle::wait_until;
 
@@ -66,6 +67,10 @@ fn pump_until_parked(app: &HeadlessAppContext) {
 /// budget this replaced was written when the click point resolved instantly and
 /// had silently narrowed to a single attempt.
 const CHORD_FOCUS_CLICK_ATTEMPTS: usize = 3;
+
+/// How long [`SimUserDriver::scroll_to_entity`] waits for the interaction
+/// pump's reply: a hang guard below the nextest cap, not a pace.
+const SCROLL_REPLY_DEADLINE: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // SimUserDriver — UserDriver over direct TestPlatform dispatch
@@ -300,9 +305,10 @@ impl SimUserDriver {
         })
     }
 
-    /// Dispatch one keystroke; returns gpui's `handled` flag.
-    fn dispatch_keystroke_once(&self, ks: &Keystroke) -> bool {
-        self.update_and_settle(|cx| {
+    /// Dispatch one keystroke, without settling; returns gpui's `handled` flag.
+    fn dispatch_keystroke(&self, ks: &Keystroke) -> bool {
+        let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
+        app.update(|cx| {
             self.window
                 .update(cx, |_, window, cx| {
                     window.dispatch_keystroke(ks.clone(), cx)
@@ -311,12 +317,33 @@ impl SimUserDriver {
         })
     }
 
-    /// Mirror `GpuiUserDriver::key_down_until_handled`: retry — waiting for a
-    /// change between attempts — until a handler consumes the key.
+    /// Dispatch one keystroke and settle; returns gpui's `handled` flag.
+    fn dispatch_keystroke_once(&self, ks: &Keystroke) -> bool {
+        let handled = self.dispatch_keystroke(ks);
+        pump_cycle(unsafe { &*self.app_ptr }, &self.bounds);
+        handled
+    }
+
+    /// The entity whose editable_text holds window focus in the committed
+    /// frame.
+    fn focused_editor(&self) -> Option<String> {
+        self.bounds
+            .all_elements()
+            .into_iter()
+            .find(|(_, info)| {
+                info.widget_type.as_ref() == "editable_text" && info.focused == Some(true)
+            })
+            .and_then(|(_, info)| info.entity_id.map(|id| id.to_string()))
+    }
+
+    /// Mirror `GpuiUserDriver::key_down_until_handled`: retry until a handler
+    /// consumes the key, waiting between attempts for window focus to move.
     /// Covers the editor-mount race (engine focus moved, editor takes
-    /// window focus on a later render pass). Unconsumed keystrokes have no
-    /// side effects, so the retry cannot double-apply. Fails loud at the
-    /// deadline: a key the UI never consumes is a keybinding/focus bug.
+    /// window focus on a later render pass). A dispatch schedules window
+    /// tasks of its own, so the wait between attempts reads window focus and
+    /// never retries on a bare wake. Unconsumed keystrokes have no side
+    /// effects, so the retry cannot double-apply. Fails loud at the deadline:
+    /// a key the UI never consumes is a keybinding/focus bug.
     fn dispatch_keystroke_until_handled(
         &self,
         ks_str: &str,
@@ -325,16 +352,33 @@ impl SimUserDriver {
     ) -> Result<(), anyhow::Error> {
         let ks = Keystroke::parse(ks_str)
             .map_err(|e| anyhow::anyhow!("{context}: bad keystroke {ks_str:?}: {e}"))?;
+        assert!(
+            timeout <= HANG_DEADLINE,
+            "a keystroke deadline of {timeout:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
+        );
         let app = unsafe { &*self.app_ptr };
-        if !wait_until(
-            app,
-            self.engine.ui_watermark(),
-            &mut || self.dispatch_keystroke_once(&ks),
-            timeout,
-        ) {
-            anyhow::bail!("{context}: keystroke {ks_str:?} never consumed within {timeout:?}");
+        let clock = app.clock();
+        let start = clock.now();
+        loop {
+            self.pump();
+            let focus = self.focused_editor();
+            if self.dispatch_keystroke(&ks) {
+                pump_cycle(app, &self.bounds);
+                return Ok(());
+            }
+            let left = timeout.saturating_sub(clock.now() - start);
+            if left.is_zero()
+                || !wait_until(
+                    app,
+                    self.engine.ui_watermark(),
+                    &mut || self.pump(),
+                    &mut || self.focused_editor() != focus,
+                    left,
+                )
+            {
+                anyhow::bail!("{context}: keystroke {ks_str:?} never consumed within {timeout:?}");
+            }
         }
-        Ok(())
     }
 
     /// Click at a window point that belongs to no tracked entity — the gesture
@@ -461,8 +505,8 @@ impl UserDriver for SimUserDriver {
             let landed = wait_until(
                 app,
                 self.engine.ui_watermark(),
+                &mut || self.pump(),
                 &mut || {
-                    self.pump();
                     self.engine
                         .ui_state()
                         .focused_block_mutable()
@@ -497,8 +541,8 @@ impl UserDriver for SimUserDriver {
         let window_focused = wait_until(
             app,
             self.engine.ui_watermark(),
+            &mut || self.pump(),
             &mut || {
-                self.pump();
                 self.bounds.all_elements().iter().any(|(_, info)| {
                     info.entity_id.as_deref() == Some(id)
                         && info.widget_type.as_ref() == "editable_text"
@@ -677,7 +721,7 @@ impl UserDriver for SimUserDriver {
     /// runs on gpui's foreground executor, so await the response by pumping;
     /// a plain `.await` would deadlock (nothing else drives gpui in sim).
     async fn scroll_to_entity(&self, entity_id: &EntityUri) -> Result<(), anyhow::Error> {
-        let (resp_tx, mut resp_rx) = tokio::sync::oneshot::channel();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.interaction_tx
             .clone()
             .try_send(holon_mcp::server::InteractionCommand {
@@ -687,24 +731,25 @@ impl UserDriver for SimUserDriver {
                 response_tx: resp_tx,
             })
             .map_err(|e| anyhow::anyhow!("interaction channel send failed: {e}"))?;
-        for _ in 0..200 {
-            self.pump();
-            match resp_rx.try_recv() {
-                Ok(_) => {
-                    // Let the reveal's scroll → mount → paint cascade commit.
-                    let app = unsafe { &*self.app_ptr };
-                    pump_cycle(app, &self.bounds);
-                    return Ok(());
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    anyhow::bail!("interaction pump dropped the ScrollEntityIntoView response");
-                }
-            }
-        }
-        anyhow::bail!("ScrollEntityIntoView response never arrived after 200 pump cycles");
+        let app = unsafe { &*self.app_ptr };
+        pump_until_resolved(
+            app,
+            &mut || self.pump(),
+            std::pin::pin!(tokio::task::unconstrained(resp_rx)),
+            SCROLL_REPLY_DEADLINE,
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the ScrollEntityIntoView reply for {entity_id} is still pending after \
+                 {SCROLL_REPLY_DEADLINE:?}"
+            )
+        })?
+        .map_err(|_| {
+            anyhow::anyhow!("interaction pump dropped the ScrollEntityIntoView response")
+        })?;
+        // Let the reveal's scroll → mount → paint cascade commit.
+        pump_cycle(app, &self.bounds);
+        Ok(())
     }
 
     fn click_intent_of(&self, _: &EntityUri) -> Option<OperationIntent> {

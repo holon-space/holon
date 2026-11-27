@@ -253,11 +253,13 @@ frontends/gpui/tests/overlay_sidebar_dismisses_windowed.rs	liveness	start.elapse
 frontends/gpui/tests/pbt_harness/settle.rs	harness	deadline <= HANG_DEADLINE,
 frontends/gpui/tests/pbt_harness/settle.rs	harness	deadline <= HANG_DEADLINE,
 frontends/gpui/tests/pbt_harness/settle.rs	harness	deadline <= HANG_DEADLINE,
+frontends/gpui/tests/pbt_harness/sim_windowed_replay.rs	harness	timeout <= HANG_DEADLINE,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/screenshot_readback_windowed.rs	liveness	Instant::now() < boot_deadline,
 frontends/gpui/tests/screenshot_readback_windowed.rs	liveness	Instant::now() < response_deadline,
 frontends/gpui/tests/settle_window_fixed_point.rs	harness	timeout <= HANG_DEADLINE,
+frontends/gpui/tests/sim_driver_waits_windowed.rs	liveness	Instant::now() < boot_deadline,
 frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	if Instant::now() >= deadline {
 frontends/gpui/tests/vault_loading_placeholder_windowed.rs	liveness	start.elapsed() < PUMP_DEADLINE,

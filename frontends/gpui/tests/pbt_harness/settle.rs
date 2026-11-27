@@ -405,12 +405,14 @@ pub fn settle_window_until(
     }
 }
 
-/// Try `ready` until it holds (true) or `deadline` passes (false). Between two
-/// tries it waits for a change of the watermark or a window task to wake, never
-/// by the clock; a try that must see the window pumps it itself.
+/// Pump, then try `ready`, until it holds (true) or `deadline` passes (false).
+/// Between two tries it waits for a change of the watermark or a window task to
+/// wake, never by the clock. It subscribes after the pump, so the pokes of the
+/// pump's own drains do not wake it.
 pub fn wait_until(
     app: &impl Pump,
     watermark: &UiWatermark,
+    pump: &mut dyn FnMut(),
     ready: &mut dyn FnMut() -> bool,
     deadline: Duration,
 ) -> bool {
@@ -421,6 +423,7 @@ pub fn wait_until(
     let clock = app.clock();
     let start = clock.now();
     loop {
+        pump();
         // Subscribed before the try, so a change during the try wakes the wait.
         let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
         if ready() {
@@ -431,6 +434,38 @@ pub fn wait_until(
             return false;
         }
         await_change(app, change.as_mut(), deadline - spent);
+    }
+}
+
+/// Pump, then poll `reply`, until it resolves (its value) or `deadline` passes
+/// (None). Between two pumps it parks until the reply's waker or a window task
+/// wakes it, never by the clock.
+pub fn pump_until_resolved<T>(
+    app: &impl Pump,
+    pump: &mut dyn FnMut(),
+    mut reply: Pin<&mut impl Future<Output = T>>,
+    deadline: Duration,
+) -> Option<T> {
+    assert!(
+        deadline <= HANG_DEADLINE,
+        "a reply deadline of {deadline:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let clock = app.clock();
+    let start = clock.now();
+    loop {
+        pump();
+        if let Poll::Ready(value) = reply
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+        {
+            return Some(value);
+        }
+        let spent = clock.now() - start;
+        if spent >= deadline {
+            return None;
+        }
+        app.park(deadline - spent);
     }
 }
 

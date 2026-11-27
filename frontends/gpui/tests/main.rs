@@ -100,6 +100,7 @@ mod settle_waits_for_late_row_bridge;
 mod settle_window_fixed_point;
 mod sidebar_disclosure_affordance;
 mod sidebar_scroll_reaches_bottom;
+mod sim_driver_waits_windowed;
 mod slash_command_text_hidden_windowed;
 #[cfg(feature = "pbt")]
 mod soft_keyboard_survives_spurious_blur;

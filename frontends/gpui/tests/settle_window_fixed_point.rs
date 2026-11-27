@@ -1803,6 +1803,7 @@ mod waits_at_rest {
 
     use super::*;
     use crate::pbt_harness::settle::HANG_DEADLINE;
+    use crate::pbt_harness::settle::pump_until_resolved;
     use crate::pbt_harness::settle::settle_window_until;
     use crate::pbt_harness::settle::wait_until;
 
@@ -1813,39 +1814,31 @@ mod waits_at_rest {
     /// Long enough that a wait that sees a change never runs it out.
     const WAKE_DEADLINE: Duration = Duration::from_secs(2);
 
-    /// The wait loops: `settle_window` itself, `settle_window_until` around
-    /// it, whose own wait must not see the inner settle's poke, and the sim
-    /// driver's waits over `wait_until`, each with its own try.
+    /// The shared wait loops: `settle_window` itself, `settle_window_until`
+    /// around it, whose own wait must not see the inner settle's poke,
+    /// `wait_until` and `pump_until_resolved`. The sim driver's waits over the
+    /// last two are pinned through the driver in `sim_driver_waits_windowed`.
     #[derive(Clone, Copy, Debug)]
     enum Waiter {
         /// A subscription that never applies its first snapshot holds it.
         Settle,
         /// A settled window whose delivery never comes.
         SettleUntil,
-        /// A key the window does not consume: each try dispatches and pumps.
-        Keystroke,
-        /// A click whose engine focus never lands: each try pumps, then reads.
-        FocusLanding,
-        /// An editor that never takes window focus: each try pumps, promotes
-        /// the staged bounds, then reads them.
-        WindowFocus,
+        /// A check that never holds: each try pumps, then reads.
+        WaitUntil,
+        /// A reply that never resolves: each try pumps, then polls it.
+        Reply,
     }
 
-    const WAITERS: [Waiter; 5] = [
+    const WAITERS: [Waiter; 4] = [
         Waiter::Settle,
         Waiter::SettleUntil,
-        Waiter::Keystroke,
-        Waiter::FocusLanding,
-        Waiter::WindowFocus,
+        Waiter::WaitUntil,
+        Waiter::Reply,
     ];
 
     /// The waiters with a check after which a change can come.
-    const CHECKING_WAITERS: [Waiter; 4] = [
-        Waiter::SettleUntil,
-        Waiter::Keystroke,
-        Waiter::FocusLanding,
-        Waiter::WindowFocus,
-    ];
+    const CHECKING_WAITERS: [Waiter; 3] = [Waiter::SettleUntil, Waiter::WaitUntil, Waiter::Reply];
 
     #[derive(Default)]
     struct AtRest {
@@ -1927,35 +1920,26 @@ mod waits_at_rest {
                     Err(e) => panic!("a settle at rest ends as Ok or Undelivered, not {e}"),
                 }
             }
-            Waiter::Keystroke => wait_until(
-                window,
-                watermark,
-                &mut || {
-                    let handled = ready();
-                    pump();
-                    handled
-                },
-                deadline,
-            ),
-            Waiter::FocusLanding => wait_until(
-                window,
-                watermark,
-                &mut || {
-                    pump();
-                    ready()
-                },
-                deadline,
-            ),
-            Waiter::WindowFocus => wait_until(
-                window,
-                watermark,
-                &mut || {
-                    pump();
-                    bounds.flush();
-                    ready()
-                },
-                deadline,
-            ),
+            Waiter::WaitUntil => {
+                wait_until(window, watermark, &mut || pump(), &mut || ready(), deadline)
+            }
+            Waiter::Reply => {
+                // Resolves once `ready` holds; a watermark change wakes it.
+                let mut change = Box::pin(watermark.changed());
+                let reply = std::future::poll_fn(|cx| {
+                    loop {
+                        if ready() {
+                            return Poll::Ready(());
+                        }
+                        if change.as_mut().poll(cx).is_pending() {
+                            return Poll::Pending;
+                        }
+                        change = Box::pin(watermark.changed());
+                    }
+                });
+                pump_until_resolved(window, &mut || pump(), std::pin::pin!(reply), deadline)
+                    .is_some()
+            }
         }
     }
 
