@@ -1799,26 +1799,59 @@ mod driver_hop {
 /// Every settle wait loop on a window at rest that never settles: nothing
 /// changes, so the loop tries, waits out its deadline, and gives up.
 mod waits_at_rest {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
+    use crate::pbt_harness::settle::HANG_DEADLINE;
     use crate::pbt_harness::settle::settle_window_until;
+    use crate::pbt_harness::settle::wait_until;
 
     /// One try before the wait and one after it, plus a spurious unpark or
     /// two; a loop that does not wait tries thousands of times.
     const MAX_TRIES: usize = 4;
 
-    /// The wait loops: `settle_window` itself, and `settle_window_until`
-    /// around it, whose own wait must not see the inner settle's poke.
+    /// Long enough that a wait that sees a change never runs it out.
+    const WAKE_DEADLINE: Duration = Duration::from_secs(2);
+
+    /// The wait loops: `settle_window` itself, `settle_window_until` around
+    /// it, whose own wait must not see the inner settle's poke, and the sim
+    /// driver's waits over `wait_until`, each with its own try.
     #[derive(Clone, Copy, Debug)]
     enum Waiter {
         /// A subscription that never applies its first snapshot holds it.
         Settle,
         /// A settled window whose delivery never comes.
         SettleUntil,
+        /// A key the window does not consume: each try dispatches and pumps.
+        Keystroke,
+        /// A click whose engine focus never lands: each try pumps, then reads.
+        FocusLanding,
+        /// An editor that never takes window focus: each try pumps, promotes
+        /// the staged bounds, then reads them.
+        WindowFocus,
     }
+
+    const WAITERS: [Waiter; 5] = [
+        Waiter::Settle,
+        Waiter::SettleUntil,
+        Waiter::Keystroke,
+        Waiter::FocusLanding,
+        Waiter::WindowFocus,
+    ];
+
+    /// The waiters with a check after which a change can come.
+    const CHECKING_WAITERS: [Waiter; 4] = [
+        Waiter::SettleUntil,
+        Waiter::Keystroke,
+        Waiter::FocusLanding,
+        Waiter::WindowFocus,
+    ];
 
     #[derive(Default)]
     struct AtRest {
         pumps: AtomicUsize,
+        parks: AtomicUsize,
+        parks_ran_out: AtomicUsize,
     }
 
     impl Pump for AtRest {
@@ -1840,43 +1873,108 @@ mod waits_at_rest {
         }
 
         fn park(&self, timeout: Duration) {
+            assert!(
+                timeout <= HANG_DEADLINE,
+                "a park of {timeout:?} outlives the nextest cap"
+            );
+            self.parks.fetch_add(1, Ordering::Relaxed);
+            let start = std::time::Instant::now();
             std::thread::park_timeout(timeout);
+            if start.elapsed() >= timeout {
+                self.parks_ran_out.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
-    fn tries_until_deadline(waiter: Waiter, deadline: Duration) -> usize {
-        let watermark = UiWatermark::new(None);
+    /// Run `waiter` with `ready` as its check; true when the check held.
+    /// `Settle` has no check: its subscription applies when `ready` first
+    /// holds, read once per settle step.
+    fn wait(
+        waiter: Waiter,
+        window: &AtRest,
+        watermark: &Arc<UiWatermark>,
+        ready: &dyn Fn() -> bool,
+        deadline: Duration,
+    ) -> bool {
         let bounds = BoundsRegistry::new();
-        let window = AtRest::default();
+        let pump = || {
+            Pump::run_until_parked(window, &mut || true);
+        };
         match waiter {
             Waiter::Settle => {
-                let _never_applies = watermark.register("view".to_string());
-                let result = settle_window(&window, &bounds, &watermark, &mut || {}, deadline);
-                assert!(
-                    matches!(result, Err(SettleError::Timeout(_))),
-                    "a first snapshot that never comes ends as Timeout"
+                let mut view = Some(watermark.register("view".to_string()));
+                let result = settle_window(
+                    window,
+                    &bounds,
+                    watermark,
+                    &mut || {
+                        if ready() {
+                            view.take();
+                        }
+                    },
+                    deadline,
                 );
-                window.pumps.load(Ordering::Relaxed)
+                match result {
+                    Ok(_) => true,
+                    Err(SettleError::Timeout(_)) => false,
+                    Err(e) => panic!("a settle at rest ends as Ok or Timeout, not {e}"),
+                }
             }
             Waiter::SettleUntil => {
-                let tries = AtomicUsize::new(0);
-                let delivered = |_: &BoundsRegistry| {
-                    tries.fetch_add(1, Ordering::Relaxed);
-                    false
-                };
-                let result =
-                    settle_window_until(&window, &bounds, &watermark, &delivered, deadline);
-                assert!(
-                    matches!(result, Err(SettleError::Undelivered(_))),
-                    "a delivery that never comes ends as Undelivered"
-                );
-                tries.load(Ordering::Relaxed)
+                match settle_window_until(window, &bounds, watermark, &|_| ready(), deadline) {
+                    Ok(_) => true,
+                    Err(SettleError::Undelivered(_)) => false,
+                    Err(e) => panic!("a settle at rest ends as Ok or Undelivered, not {e}"),
+                }
             }
+            Waiter::Keystroke => wait_until(
+                window,
+                watermark,
+                &mut || {
+                    let handled = ready();
+                    pump();
+                    handled
+                },
+                deadline,
+            ),
+            Waiter::FocusLanding => wait_until(
+                window,
+                watermark,
+                &mut || {
+                    pump();
+                    ready()
+                },
+                deadline,
+            ),
+            Waiter::WindowFocus => wait_until(
+                window,
+                watermark,
+                &mut || {
+                    pump();
+                    bounds.flush();
+                    ready()
+                },
+                deadline,
+            ),
         }
     }
 
     fn waits_while_nothing_changes(waiter: Waiter, deadline_ms: u64) -> Result<(), TestCaseError> {
-        let tries = tries_until_deadline(waiter, Duration::from_millis(deadline_ms));
+        let watermark = UiWatermark::new(None);
+        let window = AtRest::default();
+        let tries = AtomicUsize::new(0);
+        let held = wait(
+            waiter,
+            &window,
+            &watermark,
+            &|| {
+                tries.fetch_add(1, Ordering::Relaxed);
+                false
+            },
+            Duration::from_millis(deadline_ms),
+        );
+        prop_assert!(!held, "{waiter:?} ended as if something changed");
+        let tries = tries.load(Ordering::Relaxed);
         prop_assert!(
             tries <= MAX_TRIES,
             "{waiter:?} tried {tries} times in {deadline_ms} ms with nothing changing: \
@@ -1888,21 +1986,108 @@ mod waits_at_rest {
     /// The fixed cases run first, then the drawn ones.
     #[test]
     fn settle_wait_loops_wait_while_nothing_changes() {
-        for waiter in [Waiter::Settle, Waiter::SettleUntil] {
+        for waiter in WAITERS {
             waits_while_nothing_changes(waiter, 50).unwrap_or_else(|e| panic!("{e}"));
         }
         proptest::test_runner::TestRunner::new(ProptestConfig {
-            cases: 8,
+            cases: 16,
             failure_persistence: None,
             ..ProptestConfig::default()
         })
         .run(
-            &(
-                prop_oneof![Just(Waiter::Settle), Just(Waiter::SettleUntil)],
-                20u64..120,
-            ),
+            &(proptest::sample::select(WAITERS.to_vec()), 20u64..120),
             |(waiter, deadline_ms)| waits_while_nothing_changes(waiter, deadline_ms),
         )
         .unwrap();
+    }
+
+    /// Another thread makes the change `delay_ms` after the wait starts.
+    fn wakes_on_a_later_change(waiter: Waiter, delay_ms: u64) -> Result<(), TestCaseError> {
+        let watermark = UiWatermark::new(None);
+        let window = AtRest::default();
+        let changed = Arc::new(AtomicBool::new(false));
+        // Not a scoped thread: a scoped thread unparks the waiter when it ends.
+        let changer = std::thread::spawn({
+            let changed = changed.clone();
+            let watermark = watermark.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                changed.store(true, Ordering::Relaxed);
+                watermark.poke();
+            }
+        });
+        let held = wait(
+            waiter,
+            &window,
+            &watermark,
+            &|| changed.load(Ordering::Relaxed),
+            WAKE_DEADLINE,
+        );
+        changer.join().expect("the changer thread panicked");
+        prop_assert!(held, "{waiter:?} ended before the change it waits for");
+        let ran_out = window.parks_ran_out.load(Ordering::Relaxed);
+        prop_assert_eq!(
+            ran_out,
+            0,
+            "{:?} waited out its deadline although a change came after {} ms",
+            waiter,
+            delay_ms
+        );
+        Ok(())
+    }
+
+    /// The fixed cases run first, then the drawn ones.
+    #[test]
+    fn settle_wait_loops_wake_on_a_later_change() {
+        for waiter in WAITERS {
+            wakes_on_a_later_change(waiter, 20).unwrap_or_else(|e| panic!("{e}"));
+        }
+        proptest::test_runner::TestRunner::new(ProptestConfig {
+            cases: 16,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })
+        .run(
+            &(proptest::sample::select(WAITERS.to_vec()), 1u64..40),
+            |(waiter, delay_ms)| wakes_on_a_later_change(waiter, delay_ms),
+        )
+        .unwrap();
+    }
+
+    /// The first check makes the change, then fails; the second holds.
+    fn wakes_on_a_change_right_after_the_check(waiter: Waiter) -> Result<(), TestCaseError> {
+        let watermark = UiWatermark::new(None);
+        let window = AtRest::default();
+        let checks = AtomicUsize::new(0);
+        let held = wait(
+            waiter,
+            &window,
+            &watermark,
+            &|| {
+                let first = checks.fetch_add(1, Ordering::Relaxed) == 0;
+                if first {
+                    watermark.poke();
+                }
+                !first
+            },
+            WAKE_DEADLINE,
+        );
+        prop_assert!(held, "{waiter:?} ended before its second check");
+        let parks = window.parks.load(Ordering::Relaxed);
+        prop_assert_eq!(
+            parks,
+            0,
+            "{:?} parked although the change came before its wait: it subscribed after the check",
+            waiter
+        );
+        Ok(())
+    }
+
+    /// The waiter is the only input, so every one runs.
+    #[test]
+    fn a_change_right_after_the_check_wakes_the_wait() {
+        for waiter in CHECKING_WAITERS {
+            wakes_on_a_change_right_after_the_check(waiter).unwrap_or_else(|e| panic!("{e}"));
+        }
     }
 }

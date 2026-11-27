@@ -405,6 +405,35 @@ pub fn settle_window_until(
     }
 }
 
+/// Try `ready` until it holds (true) or `deadline` passes (false). Between two
+/// tries it waits for a change of the watermark or a window task to wake, never
+/// by the clock; a try that must see the window pumps it itself.
+pub fn wait_until(
+    app: &impl Pump,
+    watermark: &UiWatermark,
+    ready: &mut dyn FnMut() -> bool,
+    deadline: Duration,
+) -> bool {
+    assert!(
+        deadline <= HANG_DEADLINE,
+        "a wait deadline of {deadline:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
+    );
+    let clock = app.clock();
+    let start = clock.now();
+    loop {
+        // Subscribed before the try, so a change during the try wakes the wait.
+        let mut change = std::pin::pin!(tokio::task::unconstrained(watermark.changed()));
+        if ready() {
+            return true;
+        }
+        let spent = clock.now() - start;
+        if spent >= deadline {
+            return false;
+        }
+        await_change(app, change.as_mut(), deadline - spent);
+    }
+}
+
 /// Keep every tokio worker of `runtime` busy for `hold`, so a task woken now
 /// runs only after it: a tokio hop then takes longer than a window settle, as
 /// it does on a loaded host.

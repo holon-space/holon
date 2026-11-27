@@ -37,6 +37,7 @@ use super::settle::Pump;
 use super::settle::SettleError;
 use super::settle::pump_parks;
 use super::settle::settle_window;
+use super::settle::wait_until;
 
 /// One sim pump cycle: real tokio time for backend watchers, drain gpui
 /// tasks (test builds draw dirty windows inside flush_effects), fire fake
@@ -310,8 +311,8 @@ impl SimUserDriver {
         })
     }
 
-    /// Mirror `GpuiUserDriver::key_down_until_handled`: retry — pumping a
-    /// full cycle between attempts — until a handler consumes the key.
+    /// Mirror `GpuiUserDriver::key_down_until_handled`: retry — waiting for a
+    /// change between attempts — until a handler consumes the key.
     /// Covers the editor-mount race (engine focus moved, editor takes
     /// window focus on a later render pass). Unconsumed keystrokes have no
     /// side effects, so the retry cannot double-apply. Fails loud at the
@@ -324,19 +325,16 @@ impl SimUserDriver {
     ) -> Result<(), anyhow::Error> {
         let ks = Keystroke::parse(ks_str)
             .map_err(|e| anyhow::anyhow!("{context}: bad keystroke {ks_str:?}: {e}"))?;
-        assert!(
-            timeout <= HANG_DEADLINE,
-            "a keystroke deadline of {timeout:?} outlives the nextest cap; ask for at most {HANG_DEADLINE:?}"
-        );
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if self.dispatch_keystroke_once(&ks) {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                anyhow::bail!("{context}: keystroke {ks_str:?} never consumed within {timeout:?}");
-            }
+        let app = unsafe { &*self.app_ptr };
+        if !wait_until(
+            app,
+            self.engine.ui_watermark(),
+            &mut || self.dispatch_keystroke_once(&ks),
+            timeout,
+        ) {
+            anyhow::bail!("{context}: keystroke {ks_str:?} never consumed within {timeout:?}");
         }
+        Ok(())
     }
 
     /// Click at a window point that belongs to no tracked entity — the gesture
@@ -459,25 +457,22 @@ impl UserDriver for SimUserDriver {
                 x: Pixels::from(cx),
                 y: Pixels::from(cy),
             });
-            let attempt_deadline = std::time::Instant::now() + Duration::from_secs(1);
-            let landed = loop {
-                let focused = self
-                    .engine
-                    .ui_state()
-                    .focused_block_mutable()
-                    .get_cloned()
-                    .as_ref()
-                    .map(|u| u.as_str())
-                    == Some(id);
-                if focused {
-                    break true;
-                }
-                if std::time::Instant::now() >= attempt_deadline {
-                    break false;
-                }
-                let app = unsafe { &*self.app_ptr };
-                pump_cycle(app, &self.bounds);
-            };
+            let app = unsafe { &*self.app_ptr };
+            let landed = wait_until(
+                app,
+                self.engine.ui_watermark(),
+                &mut || {
+                    self.pump();
+                    self.engine
+                        .ui_state()
+                        .focused_block_mutable()
+                        .get_cloned()
+                        .as_ref()
+                        .map(|u| u.as_str())
+                        == Some(id)
+                },
+                Duration::from_secs(1),
+            );
             if landed {
                 break;
             }
@@ -498,28 +493,26 @@ impl UserDriver for SimUserDriver {
         // Engine focus moved, but the editor takes WINDOW focus only on a
         // following render pass — wait for the target's editable_text to
         // report focused == true in a committed frame.
-        {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            loop {
+        let app = unsafe { &*self.app_ptr };
+        let window_focused = wait_until(
+            app,
+            self.engine.ui_watermark(),
+            &mut || {
                 self.pump();
-                let window_focused = self.bounds.all_elements().iter().any(|(_, info)| {
+                self.bounds.all_elements().iter().any(|(_, info)| {
                     info.entity_id.as_deref() == Some(id)
                         && info.widget_type.as_ref() == "editable_text"
                         && info.focused == Some(true)
-                });
-                if window_focused {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    anyhow::bail!(
-                        "send_key_chord: {entity_id}'s editable_text never took window focus \
-                         within 2s of click-to-focus — refusing to press {chord:?} into whatever \
-                         editor still holds it"
-                    );
-                }
-                let app = unsafe { &*self.app_ptr };
-                pump_cycle(app, &self.bounds);
-            }
+                })
+            },
+            Duration::from_secs(2),
+        );
+        if !window_focused {
+            anyhow::bail!(
+                "send_key_chord: {entity_id}'s editable_text never took window focus \
+                 within 2s of click-to-focus — refusing to press {chord:?} into whatever \
+                 editor still holds it"
+            );
         }
 
         // Caret seed: click lands the cursor somewhere in the line; re-anchor
