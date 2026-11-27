@@ -1242,23 +1242,27 @@ impl<V: Clone + PartialEq + fmt::Debug> Tokens<V> {
     }
 
     /// An input goes back with no version change: into a FIFO at the front,
-    /// where it was taken from. A single-token place that holds a token
-    /// written meanwhile keeps it and the taken one is dropped. Returns
-    /// whether the token went back into the row.
-    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token<V>) -> bool {
+    /// where it was taken from, or into a single-token row unless a newer
+    /// token `superseded` it (see [`Executor::superseded`]). Returns whether
+    /// the token went back into the row.
+    fn restore(
+        &mut self,
+        place: &Place,
+        subject: &Subject,
+        token: &Token<V>,
+        superseded: bool,
+    ) -> bool {
         self.unlend(place);
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
         slot.reserved = false;
-        if slot.tokens.iter().any(|t| t.id == token.id) {
+        if superseded || slot.tokens.iter().any(|t| t.id == token.id) {
             return false;
         }
         if fifo {
             slot.tokens.push_front(token.clone());
-        } else if slot.tokens.is_empty() {
-            slot.tokens.push_back(token.clone());
         } else {
-            return false;
+            slot.tokens.push_back(token.clone());
         }
         true
     }
@@ -1329,6 +1333,8 @@ struct RowRead<V> {
     cause: Option<Option<Cause>>,
     /// The output of a candidate token, when a reader asked for it.
     candidate: Option<Option<Record<V>>>,
+    /// Read only through [`Reader::committed`]: no restore can change it.
+    committed: bool,
 }
 
 impl<V> Default for Trace<V> {
@@ -1350,20 +1356,35 @@ impl<V> Default for RowRead<V> {
             fields: BTreeMap::new(),
             cause: None,
             candidate: None,
+            committed: false,
         }
     }
 }
 
 impl<V: Clone + PartialEq + fmt::Debug> Trace<V> {
     fn row(&mut self, tokens: &Tokens<V>, place: &str, subject: &str) -> &mut RowRead<V> {
+        let row = self.committed_row(tokens, place, subject, tokens.token(place, subject));
+        row.committed = false;
+        row
+    }
+
+    /// The row as the committed view `front` shows it.
+    fn committed_row(
+        &mut self,
+        tokens: &Tokens<V>,
+        place: &str,
+        subject: &str,
+        front: Option<&Token<V>>,
+    ) -> &mut RowRead<V> {
         self.rows
             .entry((Place::new(place), Subject::new(subject)))
             .or_insert_with(|| RowRead {
                 version: tokens.version(place, subject),
-                present: tokens.token(place, subject).is_some(),
+                present: front.is_some(),
                 fields: BTreeMap::new(),
                 cause: None,
                 candidate: None,
+                committed: true,
             })
     }
 
@@ -1380,16 +1401,17 @@ impl<V: Clone + PartialEq + fmt::Debug> Trace<V> {
 
 /// The view a guard, a binding or a derived place reads the marking through.
 pub struct Reader<'a, V> {
-    net: &'a NetDef<V>,
-    tokens: &'a Tokens<V>,
+    exec: &'a Executor<V>,
     trace: &'a mut Trace<V>,
     /// The value of an `Answered` token reads as absent.
     hide_value: bool,
+    /// Inside [`Reader::committed`].
+    committed: bool,
 }
 
-impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
+impl<'a, V: Clone + PartialEq + fmt::Debug> Reader<'a, V> {
     pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<V> {
-        let net = self.net;
+        let net = &self.exec.net;
         if !self.declared(place) {
             return None;
         }
@@ -1400,7 +1422,6 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
             PlaceKind::Stored { .. }
                 if net.owned.contains(place)
                     || self
-                        .tokens
                         .token(place, subject)
                         .is_some_and(|t| matches!(t.payload, Payload::Candidate(_))) =>
             {
@@ -1410,21 +1431,15 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
                 None
             }
             PlaceKind::Stored { .. } => {
-                let value = self
-                    .tokens
-                    .token(place, subject)
-                    .and_then(|t| match &t.payload {
-                        Payload::Answered(a) => {
-                            answered_field(&net.host, a, field, !self.hide_value)
-                        }
-                        Payload::Failure { cause } => {
-                            (field == FAILURE_CAUSE_FIELD).then(|| (net.host.text)(&cause.text))
-                        }
-                        Payload::Record(r) => r.get(field).cloned(),
-                        other => unreachable!("the arm above refuses a read of {other:?}"),
-                    });
-                self.trace
-                    .row(self.tokens, place, subject)
+                let value = self.token(place, subject).and_then(|t| match &t.payload {
+                    Payload::Answered(a) => answered_field(&net.host, a, field, !self.hide_value),
+                    Payload::Failure { cause } => {
+                        (field == FAILURE_CAUSE_FIELD).then(|| (net.host.text)(&cause.text))
+                    }
+                    Payload::Record(r) => r.get(field).cloned(),
+                    other => unreachable!("the arm above refuses a read of {other:?}"),
+                });
+                self.row(place, subject)
                     .fields
                     .insert(field.to_string(), value.clone());
                 value
@@ -1439,8 +1454,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
         if !self.declared(place) {
             return 0;
         }
-        self.trace.row(self.tokens, place, POOL_SUBJECT);
-        self.tokens.free(place)
+        self.trace.row(&self.exec.tokens, place, POOL_SUBJECT);
+        self.exec.tokens.free(place)
     }
 
     /// The cause in the header of a failure or timeout port token.
@@ -1449,13 +1464,14 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
             return None;
         }
         let cause = self
+            .exec
             .tokens
             .token(place, subject)
             .and_then(|t| match &t.payload {
                 Payload::Failure { cause } => Some(cause.clone()),
                 _ => None,
             });
-        self.trace.row(self.tokens, place, subject).cause = Some(cause.clone());
+        self.trace.row(&self.exec.tokens, place, subject).cause = Some(cause.clone());
         cause
     }
 
@@ -1466,30 +1482,59 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
             return None;
         }
         let output = self
+            .exec
             .tokens
             .token(place, subject)
             .and_then(|t| match &t.payload {
                 Payload::Candidate(c) => Some(c.output.clone()),
                 _ => None,
             });
-        self.trace.row(self.tokens, place, subject).candidate = Some(output.clone());
+        self.trace.row(&self.exec.tokens, place, subject).candidate = Some(output.clone());
         output
     }
 
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
-        let net = self.net;
+        let net = &self.exec.net;
         if !self.declared(place) {
             return false;
         }
         match &net.place_def(place).kind {
             PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject)).is_some(),
-            PlaceKind::Stored { .. } => self.trace.row(self.tokens, place, subject).present,
+            PlaceKind::Stored { .. } => self.row(place, subject).present,
+        }
+    }
+
+    /// Runs `f` on the committed view: a token that an open take holds, and
+    /// would put back if it failed, reads as still in its row. Such a read
+    /// waits on no take, as no take's outcome changes it.
+    pub fn committed<R>(&mut self, f: impl FnOnce(&mut Reader<'_, V>) -> R) -> R {
+        let was = std::mem::replace(&mut self.committed, true);
+        let r = f(self);
+        self.committed = was;
+        r
+    }
+
+    fn token(&self, place: &str, subject: &str) -> Option<&'a Token<V>> {
+        if self.committed {
+            self.exec.committed_front(place, subject)
+        } else {
+            self.exec.tokens.token(place, subject)
+        }
+    }
+
+    fn row(&mut self, place: &str, subject: &str) -> &mut RowRead<V> {
+        let tokens = &self.exec.tokens;
+        if self.committed {
+            let front = self.exec.committed_front(place, subject);
+            self.trace.committed_row(tokens, place, subject, front)
+        } else {
+            self.trace.row(tokens, place, subject)
         }
     }
 
     /// An undeclared place reads as empty and refuses the firing that read it.
     fn declared(&mut self, place: &str) -> bool {
-        let declared = self.net.places.contains_key(place);
+        let declared = self.exec.net.places.contains_key(place);
         if !declared {
             self.trace
                 .undeclared
@@ -1501,7 +1546,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
     /// A derived row that reads itself reads as empty and refuses what
     /// evaluated it.
     fn derived(&mut self, place: &str, s: &Subject) -> Option<Record<V>> {
-        let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
+        let PlaceKind::Derived(derive) = &self.exec.net.place_def(place).kind else {
             panic!("'{place}' is no derived place");
         };
         let row = (Place::new(place), s.clone());
@@ -1541,10 +1586,10 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
             ..Trace::default()
         };
         let r = f(&mut Reader {
-            net: self.net,
-            tokens: self.tokens,
+            exec: self.exec,
             trace: &mut sub,
             hide_value: self.hide_value,
+            committed: self.committed,
         });
         for (k, row) in &sub.rows {
             let into = self.trace.rows.entry(k.clone()).or_insert_with(|| RowRead {
@@ -1553,6 +1598,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
                 candidate: None,
                 ..row.clone()
             });
+            into.committed &= row.committed;
             into.fields.extend(row.fields.clone());
             if row.cause.is_some() {
                 into.cause = row.cause.clone();
@@ -1573,7 +1619,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Reader<'_, V> {
     /// A field as a string; `None` when absent or not a string.
     pub fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
         let value = self.field(place, subject, field)?;
-        (self.net.host.as_text)(&value).map(str::to_owned)
+        (self.exec.net.host.as_text)(&value).map(str::to_owned)
     }
 }
 
@@ -1894,6 +1940,9 @@ pub enum Twin {
     NoQuiescence,
     /// Quiescing skips the auto transitions that consume a failure port token.
     KeepWorkFailed,
+    /// A reader records at once, although a take that hid a token of a row
+    /// it read is still open.
+    NoCommitWait,
 }
 
 /// An auto pair that a check from scratch finds enabled at quiescence: a
@@ -1957,6 +2006,9 @@ struct Run {
     failed: Option<Cause>,
 }
 
+/// A held reader's wait: the row it read and the open take's occurrence.
+pub type WaitEdge = (Place, Subject, OccurrenceId);
+
 /// A condition the net discloses for a subject (NET-rev1 termination):
 /// blocked and visible, never a panic.
 #[derive(Clone, Debug, PartialEq)]
@@ -2005,6 +2057,15 @@ pub enum Condition {
         transition: Arc<str>,
         subject: Subject,
         cycle: Vec<Place>,
+    },
+    /// `reader` read a row while the parked `take` held a token of it, so
+    /// the reader's commit waits until the take is resolved.
+    WaitsOnParkedTake {
+        reader: Arc<str>,
+        subject: Subject,
+        reader_occurrence: OccurrenceId,
+        take: Arc<str>,
+        take_occurrence: OccurrenceId,
     },
 }
 
@@ -2080,6 +2141,17 @@ impl fmt::Display for Condition {
                  reads itself through {}",
                 cycle_text(cycle)
             ),
+            Self::WaitsOnParkedTake {
+                reader,
+                subject,
+                reader_occurrence,
+                take,
+                take_occurrence,
+            } => write!(
+                f,
+                "{reader}[{subject}] ({reader_occurrence}) waits for {take} ({take_occurrence}), \
+                 whose outcome is unknown"
+            ),
         }
     }
 }
@@ -2090,16 +2162,18 @@ struct Attempt<V> {
     transition: Arc<str>,
     subject: Subject,
     taken: Vec<(Place, Token<V>)>,
+    /// The version of each consumed row at the take.
+    taken_at: BTreeMap<Place, u64>,
     trace: Trace<V>,
     input: Record<V>,
     started: Duration,
     probe: bool,
     /// The tokens that open takes held from a row this attempt read, at its
-    /// bind: (place, subject, token id).
-    waits_on: BTreeSet<(Place, Subject, u64)>,
-    /// A read row that a failed take put one of those tokens back into: the
-    /// read is no longer true in the committed state.
-    stale_row: Option<(Place, Subject)>,
+    /// bind: (place, subject, token id) and the take's occurrence.
+    waits_on: BTreeMap<(Place, Subject, u64), OccurrenceId>,
+    /// The read rows that a failed take put one of those tokens back into:
+    /// the read is no longer true in the committed state.
+    stale_rows: BTreeSet<(Place, Subject)>,
 }
 
 pub struct Executor<V> {
@@ -2109,6 +2183,9 @@ pub struct Executor<V> {
     runs: BTreeMap<(Arc<str>, Subject), Run>,
     in_flight: BTreeMap<AttemptId, Attempt<V>>,
     parked: BTreeMap<OccurrenceId, Attempt<V>>,
+    /// Readers that recorded while a take they read through is open: the
+    /// attempt and its outputs, recorded when the last such take settles.
+    held: BTreeMap<OccurrenceId, (Attempt<V>, Vec<Output<V>>)>,
     attempts: BTreeMap<OccurrenceId, BTreeMap<AttemptId, Seen>>,
     // ponytail: settled occurrences are kept forever; add retention with the
     // first long-running user.
@@ -2266,6 +2343,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             runs: BTreeMap::new(),
             in_flight: BTreeMap::new(),
             parked: BTreeMap::new(),
+            held: BTreeMap::new(),
             attempts: BTreeMap::new(),
             occurrences: BTreeMap::new(),
             answers: BTreeMap::new(),
@@ -2529,6 +2607,24 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         &self.conditions
     }
 
+    /// The readers whose commit waits on an open take, with the rows and the
+    /// take occurrences they wait on.
+    pub fn held(&self) -> Vec<(OccurrenceId, Vec<WaitEdge>)> {
+        self.held
+            .values()
+            .map(|(a, _)| {
+                let edges = a
+                    .waits_on
+                    .iter()
+                    .map(|((p, s, _), take)| (p.clone(), s.clone(), take.clone()))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                (a.occurrence.clone(), edges)
+            })
+            .collect()
+    }
+
     /// How far the answer `id` got; `None` for an answer this executor
     /// never took.
     pub fn answer_progress(&self, id: &str) -> Option<AnswerProgress<'_, V>> {
@@ -2780,6 +2876,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         }
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
+            self.release_held(now);
             let mut started = Vec::new();
             let mut fired = BTreeSet::new();
             for i in 0..self.net.transitions.len() {
@@ -2846,6 +2943,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                 }
             }
             if started.is_empty() {
+                self.disclose_front_waits();
                 return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
@@ -3094,6 +3192,9 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             }
             return Completion::DroppedLate;
         }
+        if self.held.contains_key(occurrence) {
+            return Completion::DroppedLate;
+        }
         if let (Some(a), EffectResult::Unknown(_)) = (&live, &result)
             && let Some(probe) = self.continuation(a)
         {
@@ -3197,6 +3298,9 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         );
         let (transition, subject) = (a.transition.clone(), a.subject.clone());
         self.mark_unknown(&transition, &subject);
+        self.conditions.retain(|c| {
+            !matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == occurrence)
+        });
         Ok(a)
     }
 
@@ -3231,8 +3335,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                 self.issue(a, false, now);
             }
             Resolution::Drop => {
-                for (p, _) in &a.taken {
-                    self.commit_consumption(p, &a.subject, &a.transition);
+                for (p, token) in &a.taken {
+                    self.commit_consumption(p, &a.subject, token.id, &a.transition);
                 }
                 let cause = Cause::definite("dropped by the user");
                 self.occurrences
@@ -3355,7 +3459,12 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     pub(crate) fn holder(&self, place: &Place, subject: &Subject) -> Option<Holder> {
         let holds =
             |a: &Attempt<V>| &a.subject == subject && a.taken.iter().any(|(p, _)| p == place);
-        if let Some(a) = self.in_flight.values().find(|a| holds(a)) {
+        if let Some(a) = self
+            .in_flight
+            .values()
+            .chain(self.held.values().map(|(a, _)| a))
+            .find(|a| holds(a))
+        {
             return Some(Holder::Running(a.transition.clone()));
         }
         self.parked
@@ -3425,7 +3534,12 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         trace: &mut Trace<V>,
     ) -> Result<Record<V>, WhyNot> {
         let present = |p: &Place| self.tokens.token(p, s).is_some();
-        if let Some(p) = t.consumes.iter().find(|p| !self.available(p, s)) {
+        let asked = self.net.answered_of(&t.name).is_some();
+        if let Some(p) = t
+            .consumes
+            .iter()
+            .find(|p| !self.available(p, s) || asked && self.front_taker(p, s).is_some())
+        {
             return Err(WhyNot::Needs {
                 place: p.clone(),
                 held_by: self.holder(p, s),
@@ -3475,10 +3589,10 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
 
     fn reader<'a>(&'a self, trace: &'a mut Trace<V>) -> Reader<'a, V> {
         Reader {
-            net: &self.net,
-            tokens: &self.tokens,
+            exec: self,
             trace,
             hide_value: !self.twin(Twin::ValueBeforeBind),
+            committed: false,
         }
     }
 
@@ -3507,7 +3621,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     ) -> AttemptId {
         let t = self.net.transition_def(transition);
         let consumes = t.consumes.clone();
-        let mut taken = Vec::new();
+        let (mut taken, mut taken_at) = (Vec::new(), BTreeMap::new());
         let key = (transition.clone(), subject.clone());
         if self.retry_due(transition, &subject).is_some() {
             self.end_run(&key);
@@ -3515,6 +3629,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         for p in consumes {
             let hidden = self.twin(Twin::HiddenReservation);
             let slot = self.tokens.slot_mut(&p, &subject);
+            taken_at.insert(p.clone(), slot.version);
             let token = if hidden {
                 slot.reserved = true;
                 slot.tokens.front().cloned()
@@ -3538,41 +3653,45 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             transition: transition.clone(),
             subject,
             taken,
+            taken_at,
             trace,
             input,
             started: now,
             probe: false,
             waits_on,
-            stale_row: None,
+            stale_rows: BTreeSet::new(),
         };
         self.occupy_running(&a);
-        self.insert_attempt(a)
+        let id = self.insert_attempt(a);
+        self.disclose_parked_waits();
+        id
     }
 
     /// The tokens that open takes hold from the rows `trace` read, except
-    /// the rows the new attempt consumes itself and pools.
+    /// the rows the new attempt consumes itself, pools, and tokens a failed
+    /// take cannot put back because a newer one superseded them.
     fn held_from_read_rows(
         &self,
         trace: &Trace<V>,
         taken: &[(Place, Token<V>)],
         subject: &Subject,
         now: Duration,
-    ) -> BTreeSet<(Place, Subject, u64)> {
-        let mut held = BTreeSet::new();
-        for (p, s) in trace.rows.keys() {
+    ) -> BTreeMap<(Place, Subject, u64), OccurrenceId> {
+        let mut held = BTreeMap::new();
+        for ((p, s), _) in trace.rows.iter().filter(|(_, r)| !r.committed) {
             if s == subject && taken.iter().any(|(own, _)| own == p)
                 || self.tokens.pools.contains_key(p)
             {
                 continue;
             }
-            for o in self.in_flight.values().chain(self.parked.values()) {
+            for o in self.live_attempts() {
                 assert!(o.started <= now, "a take open at a bind started after it");
                 if &o.subject == s {
                     held.extend(
                         o.taken
                             .iter()
-                            .filter(|(tp, _)| tp == p)
-                            .map(|(_, t)| (p.clone(), s.clone(), t.id)),
+                            .filter(|(tp, _)| tp == p && !self.superseded(p, s, o))
+                            .map(|(_, t)| ((p.clone(), s.clone(), t.id), o.occurrence.clone())),
                     );
                 }
             }
@@ -3617,6 +3736,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         match self
             .in_flight
             .values()
+            .chain(self.held.values().map(|(a, _)| a))
             .find(|o| &o.transition == transition && &o.subject == subject)
             .cloned()
         {
@@ -3624,6 +3744,146 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             None => self
                 .tokens
                 .mark_slot(&Place::running(transition), subject, None),
+        }
+    }
+
+    /// Whether a failed `take` drops its token of `place` rather than put
+    /// it back: a single-token row moved since the take, which only a newer
+    /// token can do, whether it is still in the row, held by a later take,
+    /// or already consumed.
+    fn superseded(&self, place: &Place, subject: &Subject, take: &Attempt<V>) -> bool {
+        !self.tokens.fifo.contains(place)
+            && self.tokens.version(place, subject) != take.taken_at[place]
+    }
+
+    /// The token a row shows in the committed state: its own, or one that an
+    /// open take holds from it and would put back on failure. A take holds
+    /// the oldest tokens of a FIFO row; a single-token row's own token is
+    /// newer than a held one.
+    fn committed_front(&self, place: &str, subject: &str) -> Option<&Token<V>> {
+        let (place, subject) = (Place::new(place), Subject::new(subject));
+        if self.tokens.pools.contains_key(&place) {
+            return self.tokens.token(&place, &subject);
+        }
+        let held = self
+            .live_attempts()
+            .filter(|a| a.subject == subject)
+            .flat_map(|a| {
+                a.taken
+                    .iter()
+                    .filter(|(p, _)| *p == place && !self.superseded(p, &subject, a))
+                    .map(|(_, t)| t)
+            });
+        if self.tokens.fifo.contains(&place) {
+            held.min_by_key(|t| t.id)
+                .or_else(|| self.tokens.token(&place, &subject))
+        } else {
+            self.tokens
+                .token(&place, &subject)
+                .or_else(|| held.max_by_key(|t| t.id))
+        }
+    }
+
+    /// The open take that holds the committed front of a row ahead of the
+    /// row's own head. An asked work takes only the front its situation
+    /// showed, so it waits for that take.
+    fn front_taker(&self, place: &Place, subject: &Subject) -> Option<&Attempt<V>> {
+        let front = self.committed_front(place, subject)?.id;
+        if self
+            .tokens
+            .token(place, subject)
+            .is_some_and(|t| t.id == front)
+        {
+            return None;
+        }
+        self.live_attempts()
+            .find(|a| a.taken.iter().any(|(p, t)| p == place && t.id == front))
+    }
+
+    /// An asked work whose committed front a parked take holds waits until
+    /// `resolve`; the condition shows why it does not run.
+    fn disclose_front_waits(&mut self) {
+        let mut waits = Vec::new();
+        for t in &self.net.transitions {
+            let Some(answered) = self.net.answered_of(&t.name) else {
+                continue;
+            };
+            for s in self.tokens.subjects(&answered) {
+                for p in &t.consumes {
+                    if let Some(take) = self.front_taker(p, &s)
+                        && self.parked.contains_key(&take.occurrence)
+                    {
+                        waits.push(Condition::WaitsOnParkedTake {
+                            reader: t.name.clone(),
+                            subject: s.clone(),
+                            reader_occurrence: work_occurrence(
+                                &t.name,
+                                &self.answered(&answered, &s).id,
+                            ),
+                            take: take.transition.clone(),
+                            take_occurrence: take.occurrence.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        for c in waits {
+            self.disclose(c);
+        }
+    }
+
+    /// The attempts whose takes are open: in flight, parked or held.
+    fn live_attempts(&self) -> impl Iterator<Item = &Attempt<V>> {
+        self.in_flight
+            .values()
+            .chain(self.parked.values())
+            .chain(self.held.values().map(|(a, _)| a))
+    }
+
+    fn live_attempts_mut(&mut self) -> impl Iterator<Item = &mut Attempt<V>> {
+        self.in_flight
+            .values_mut()
+            .chain(self.parked.values_mut())
+            .chain(self.held.values_mut().map(|(a, _)| a))
+    }
+
+    /// Records every held reader whose takes all committed or failed, until
+    /// none is left: one release can end the wait of another.
+    fn release_held(&mut self, now: Duration) {
+        while let Some(occurrence) = self
+            .held
+            .iter()
+            .find(|(_, (a, _))| a.waits_on.is_empty())
+            .map(|(o, _)| o.clone())
+        {
+            let (a, outputs) = self.held.remove(&occurrence).expect("found above");
+            self.record(a, outputs, now);
+        }
+    }
+
+    /// A reader that waits on a parked take waits until `resolve`; the
+    /// condition shows why it does not finish.
+    fn disclose_parked_waits(&mut self) {
+        let waits: BTreeMap<_, _> = self
+            .live_attempts()
+            .flat_map(|r| {
+                r.waits_on.values().filter_map(|take| {
+                    let t = self.parked.get(take)?;
+                    Some((
+                        (take.clone(), r.occurrence.clone()),
+                        Condition::WaitsOnParkedTake {
+                            reader: r.transition.clone(),
+                            subject: r.subject.clone(),
+                            reader_occurrence: r.occurrence.clone(),
+                            take: t.transition.clone(),
+                            take_occurrence: take.clone(),
+                        },
+                    ))
+                })
+            })
+            .collect();
+        for c in waits.into_values() {
+            self.disclose(c);
         }
     }
 
@@ -3689,8 +3949,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         if self.twin(Twin::NoCas) {
             return None;
         }
-        if a.stale_row.is_some() {
-            return a.stale_row.clone();
+        if let Some(row) = a.stale_rows.first() {
+            return Some(row.clone());
         }
         a.trace
             .rows
@@ -3708,6 +3968,11 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     /// or is withheld, and a mark on its input stays: the effect never runs
     /// twice on it.
     fn record(&mut self, a: Attempt<V>, outputs: Vec<Output<V>>, now: Duration) {
+        if !a.waits_on.is_empty() && !self.twin(Twin::NoCommitWait) {
+            self.occurrences.insert(a.occurrence.clone(), None);
+            self.held.insert(a.occurrence.clone(), (a, outputs));
+            return;
+        }
         if let Some(e) = self.net.refused_output(&outputs) {
             let cause = Cause::definite(format!("'{}' output refused: {e}", a.transition));
             return self.fail(a, cause, now);
@@ -3866,14 +4131,16 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     }
 
     /// Whether the compare-and-set of a fact into a row the firing read fails:
-    /// the row moved since the firing read it, so the newer token wins and the
-    /// fact is not put (322/E3.c). Another input of the same firing having
+    /// the row moved since the firing read it, or a failed take put back a
+    /// token the firing missed there, so that token wins and the fact is not
+    /// put (322/E3.c). Another input of the same firing having
     /// changed does not withhold this fact — the comparison is against the row
     /// the fact writes.
     fn moved_read_row(&self, a: &Attempt<V>, o: &Output<V>) -> bool {
+        let row = (o.place.clone(), o.subject.clone());
         self.read_row(a, o)
-            && self.tokens.version(&o.place, &o.subject)
-                != a.trace.rows[&(o.place.clone(), o.subject.clone())].version
+            && (a.stale_rows.contains(&row)
+                || self.tokens.version(&o.place, &o.subject) != a.trace.rows[&row].version)
     }
 
     /// Whether the firing read the row this output writes, so that the row's
@@ -3944,8 +4211,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                     });
             }
         }
-        for (p, _) in &a.taken {
-            self.commit_consumption(p, &a.subject, &a.transition);
+        for (p, token) in &a.taken {
+            self.commit_consumption(p, &a.subject, token.id, &a.transition);
         }
         for (place, subject, payload) in rows {
             self.put_by_with(&place, &subject, payload, &a.transition);
@@ -3969,18 +4236,36 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     /// single-token place a newer token written meanwhile already carries a
     /// newer version; on a FIFO place every token left behind is younger than
     /// the consumed one, so the row did change.
-    fn commit_consumption(&mut self, place: &Place, subject: &Subject, by: &Arc<str>) {
+    ///
+    /// A reader that bound while this take held the token read the row as it
+    /// is now committed: its read version moves along, unless another write
+    /// moved the row meanwhile.
+    fn commit_consumption(&mut self, place: &Place, subject: &Subject, token: u64, by: &Arc<str>) {
         self.tokens.unlend(place);
         let fifo = self.tokens.fifo.contains(place);
         let slot = self.tokens.slot_mut(place, subject);
+        let before = slot.version;
         if slot.reserved {
             slot.reserved = false;
             slot.tokens.pop_front();
-        } else if !fifo && !slot.tokens.is_empty() {
-            return;
+            slot.version += 1;
+        } else if fifo || slot.tokens.is_empty() {
+            slot.version += 1;
         }
-        slot.version += 1;
-        slot.writer = Some(by.clone());
+        if slot.version != before {
+            slot.writer = Some(by.clone());
+        }
+        let after = slot.version;
+        let edge = (place.clone(), subject.clone(), token);
+        let row = (place.clone(), subject.clone());
+        for r in self.live_attempts_mut() {
+            if r.waits_on.remove(&edge).is_some()
+                && let Some(read) = r.trace.rows.get_mut(&row)
+                && read.version == before
+            {
+                read.version = after;
+            }
+        }
     }
 
     /// The inputs go back with no version change: see [`Tokens::restore`].
@@ -3989,11 +4274,12 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     /// leaves the version check to decide.
     fn rollback(&mut self, a: &Attempt<V>) {
         for (p, token) in &a.taken {
-            let back = self.tokens.restore(p, &a.subject, token);
+            let superseded = self.superseded(p, &a.subject, a);
+            let back = self.tokens.restore(p, &a.subject, token, superseded);
             let edge = (p.clone(), a.subject.clone(), token.id);
-            for r in self.in_flight.values_mut().chain(self.parked.values_mut()) {
-                if r.waits_on.remove(&edge) && back {
-                    r.stale_row.get_or_insert((p.clone(), a.subject.clone()));
+            for r in self.live_attempts_mut() {
+                if r.waits_on.remove(&edge).is_some() && back {
+                    r.stale_rows.insert((p.clone(), a.subject.clone()));
                 }
             }
         }
@@ -4080,6 +4366,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         let (transition, subject) = (a.transition.clone(), a.subject.clone());
         self.parked.insert(a.occurrence.clone(), a);
         self.mark_unknown(&transition, &subject);
+        self.disclose_parked_waits();
     }
 
     /// `<T>.OutcomeUnknown` of a subject holds while any occurrence of `T`

@@ -112,6 +112,8 @@ struct Row {
     fields: BTreeMap<String, Option<Value>>,
     cause: Option<Option<String>>,
     candidate: Option<Option<Content>>,
+    /// Read only through the committed view: it waits on no take.
+    committed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -188,6 +190,8 @@ struct Occ {
     transition: String,
     subject: String,
     taken: Vec<(String, (Head, Content))>,
+    /// The version of each consumed row at the take.
+    taken_at: BTreeMap<String, u64>,
     trace: Trace,
     input: Content,
     settled: Option<Settled>,
@@ -197,8 +201,12 @@ struct Occ {
     /// The open takes that held a token of a row it read, at its bind: the
     /// row and the taking occurrence (one token per place and occurrence).
     waits_on: BTreeSet<(Key, OccurrenceId)>,
-    /// A read row that a failed take put such a token back into.
-    stale_row: Option<Key>,
+    /// The read rows that a failed take put such a token back into.
+    stale_rows: BTreeSet<Key>,
+    /// Start order: which of two takes from a FIFO row took first.
+    seq: u64,
+    /// The outputs of a reader whose commit waits on an open take.
+    held: Option<Vec<Output>>,
 }
 
 /// An attempt in flight.
@@ -233,6 +241,9 @@ pub struct Model {
     answers: BTreeMap<String, (String, String)>,
     undone: BTreeSet<String>,
     conditions: Vec<Condition>,
+    /// The commits that P1 (soundness) refutes: what the firing read differs
+    /// from the committed front at its commit.
+    dirty: Vec<String>,
     /// Per work occurrence, what its commit did to each row it changed.
     deltas: BTreeMap<OccurrenceId, BTreeMap<Key, Delta>>,
     /// `<T>.UndoPending`: per (work, answer), the rows the undo of that
@@ -243,6 +254,23 @@ pub struct Model {
 pub struct Reader<'a> {
     model: &'a Model,
     trace: &'a mut Trace,
+    committed: bool,
+}
+
+impl Reader<'_> {
+    fn content(&self, place: &str, subject: &str) -> Option<&Content> {
+        if self.committed {
+            self.model.committed_front(place, subject)
+        } else {
+            self.model.content(place, subject)
+        }
+    }
+
+    fn row(&mut self, place: &str, subject: &str) -> &mut Row {
+        let present = self.content(place, subject).is_some();
+        self.model
+            .row_as(self.trace, place, subject, present, self.committed)
+    }
 }
 
 impl Reads for Reader<'_> {
@@ -254,11 +282,10 @@ impl Reads for Reader<'_> {
                 None
             }
             PlaceSpec::Stored { .. } => {
-                let value = model
+                let value = self
                     .content(place, subject)
                     .and_then(|c| c.get(field).cloned());
-                model
-                    .row(self.trace, place, subject)
+                self.row(place, subject)
                     .fields
                     .insert(field.to_string(), value.clone());
                 value
@@ -302,19 +329,32 @@ impl Reads for Reader<'_> {
         }
         match model.place(place) {
             PlaceSpec::Derived(_) => model.derived(self, place, subject).is_some(),
-            PlaceSpec::Stored { .. } => model.row(self.trace, place, subject).present,
+            PlaceSpec::Stored { .. } => self.row(place, subject).present,
         }
+    }
+
+    fn committed_view(
+        &mut self,
+        f: &mut dyn FnMut(&mut dyn Reads) -> Option<Content>,
+    ) -> Option<Content> {
+        let was = std::mem::replace(&mut self.committed, true);
+        let r = f(self);
+        self.committed = was;
+        r
     }
 }
 
 enum ExecutorPlace {
     Running,
+    RetryPending,
     OutcomeUnknown,
 }
 
 fn executor_place<'p>(spec: &Spec, place: &'p str) -> Option<(&'p str, ExecutorPlace)> {
     let (t, kind) = if let Some(t) = place.strip_suffix(".Running") {
         (t, ExecutorPlace::Running)
+    } else if let Some(t) = place.strip_suffix(".RetryPending") {
+        (t, ExecutorPlace::RetryPending)
     } else {
         (
             place.strip_suffix(".OutcomeUnknown")?,
@@ -359,6 +399,7 @@ impl Model {
             answers: BTreeMap::new(),
             undone: BTreeSet::new(),
             conditions: Vec::new(),
+            dirty: Vec::new(),
             deltas: BTreeMap::new(),
             pending_undos: BTreeMap::new(),
         }
@@ -384,11 +425,14 @@ impl Model {
     /// Whether an executor place (`<T>.Running`, `<T>.OutcomeUnknown`) holds
     /// for the subject, derived from the occurrences; `None` for a net place.
     fn executor_place_held(&self, place: &str, subject: &str) -> Option<bool> {
-        let (t, held) = match executor_place(&self.spec, place)? {
-            (t, ExecutorPlace::Running) => (t, self.running()),
-            (t, ExecutorPlace::OutcomeUnknown) => (t, self.unknown_places()),
+        let held = match executor_place(&self.spec, place)? {
+            (t, ExecutorPlace::Running) => self.running().contains_key(&key(t, subject)),
+            (t, ExecutorPlace::RetryPending) => self.retry_pending().contains_key(&key(t, subject)),
+            (t, ExecutorPlace::OutcomeUnknown) => {
+                self.unknown_places().contains_key(&key(t, subject))
+            }
         };
-        Some(held.contains_key(&key(t, subject)))
+        Some(held)
     }
 
     fn place(&self, name: &str) -> &PlaceSpec {
@@ -432,15 +476,30 @@ impl Model {
     }
 
     fn row<'t>(&self, trace: &'t mut Trace, place: &str, subject: &str) -> &'t mut Row {
+        let present = self.content(place, subject).is_some();
+        let row = self.row_as(trace, place, subject, present, false);
+        row.committed = false;
+        row
+    }
+
+    fn row_as<'t>(
+        &self,
+        trace: &'t mut Trace,
+        place: &str,
+        subject: &str,
+        present: bool,
+        committed: bool,
+    ) -> &'t mut Row {
         trace
             .rows
             .entry(key(place, subject))
             .or_insert_with(|| Row {
                 version: self.version(place, subject),
-                present: self.content(place, subject).is_some(),
+                present,
                 fields: BTreeMap::new(),
                 cause: None,
                 candidate: None,
+                committed,
             })
     }
 
@@ -520,14 +579,22 @@ impl Model {
     /// flight; any of those occurrences may be the one it names.
     pub fn running(&self) -> BTreeMap<Key, BTreeSet<String>> {
         let mut running: BTreeMap<Key, BTreeSet<String>> = BTreeMap::new();
-        for live in self.in_flight.values() {
-            let o = &self.occs[&live.occ];
+        for (id, o) in self.running_occs() {
             running
                 .entry(key(&o.transition, &o.subject))
                 .or_default()
-                .insert(live.occ.to_string());
+                .insert(id.to_string());
         }
         running
+    }
+
+    /// The occurrences that keep `<T>.Running`: an attempt in flight, or a
+    /// reader whose commit waits.
+    fn running_occs(&self) -> impl Iterator<Item = (&OccurrenceId, &Occ)> {
+        self.in_flight
+            .values()
+            .map(|l| (&l.occ, &self.occs[&l.occ]))
+            .chain(self.occs.iter().filter(|(_, o)| o.held.is_some()))
     }
 
     /// `<T>.RetryPending`: the due time of each pending retry backoff.
@@ -622,7 +689,13 @@ impl Model {
         let Some((work, _)) = self.answers.get(id.as_ref()) else {
             return Ok(own);
         };
-        assert_eq!(own, Some(Settled::Done), "an Answer firing is pure");
+        if own != Some(Settled::Done) {
+            assert!(
+                own.is_none() && self.occs[occurrence].held.is_some(),
+                "an Answer firing is pure: it settles Done or waits on an open take, got {own:?}"
+            );
+            return Ok(own);
+        }
         if let Some(o) = self.occs.get(&work_occurrence(work, id)) {
             return Ok(o.settled.clone());
         }
@@ -767,6 +840,7 @@ impl Model {
         let mut reader = Reader {
             model: self,
             trace: &mut trace,
+            committed: false,
         };
         self.derived(&mut reader, place, subject)
     }
@@ -778,7 +852,7 @@ impl Model {
         (b.model)(reader, &Subject::new(s))
     }
 
-    /// Every subject a stored place holds or a running attempt names.
+    /// Every subject a stored place holds or an open take names.
     pub fn derive_all(&self, place: &str) -> Vec<(Subject, Content)> {
         let subjects: BTreeSet<String> = self
             .slots
@@ -786,9 +860,10 @@ impl Model {
             .filter(|(_, slot)| !slot.content.is_empty())
             .map(|((_, s), _)| s.clone())
             .chain(
-                self.in_flight
-                    .values()
-                    .map(|l| self.occs[&l.occ].subject.clone()),
+                self.occs
+                    .iter()
+                    .filter(|(id, _)| self.open_take(id))
+                    .map(|(_, o)| o.subject.clone()),
             )
             .collect();
         subjects
@@ -900,12 +975,7 @@ impl Model {
 
     fn holder(&self, place: &str, subject: &str) -> Option<Holder> {
         let holds = |o: &Occ| o.subject == subject && o.taken.iter().any(|(p, _)| p == place);
-        if let Some(o) = self
-            .in_flight
-            .values()
-            .map(|l| &self.occs[&l.occ])
-            .find(|o| holds(o))
-        {
+        if let Some((_, o)) = self.running_occs().find(|(_, o)| holds(o)) {
             return Some(Holder::Running(Arc::from(o.transition.as_str())));
         }
         self.occs
@@ -915,17 +985,22 @@ impl Model {
     }
 
     fn decide(&self, t: &Transition, s: &str) -> Result<(Trace, Content), WhyNot> {
-        let in_flight = self.in_flight.values().any(|l| {
-            let o = &self.occs[&l.occ];
-            o.transition == t.name && o.subject == s
-        });
+        let in_flight = self
+            .running_occs()
+            .any(|(_, o)| o.transition == t.name && o.subject == s);
         if in_flight {
             return Err(WhyNot::InFlight);
         }
         let answered = self.answered_of(&t.name);
         let bound = (|| {
             let present = |p: &String| self.content(p, s).is_some();
-            if let Some(p) = t.consumes.iter().chain(&t.reads).find(|p| !present(p)) {
+            let front_held = |p: &String| answered.is_some() && self.front_taker(p, s).is_some();
+            if let Some(p) = t
+                .consumes
+                .iter()
+                .find(|p| !present(p) || front_held(p))
+                .or_else(|| t.reads.iter().find(|p| !present(p)))
+            {
                 return Err(WhyNot::Needs {
                     place: Place::new(p),
                     held_by: self.holder(p, s),
@@ -951,6 +1026,7 @@ impl Model {
             let mut reader = Reader {
                 model: self,
                 trace: &mut trace,
+                committed: false,
             };
             let input = (t.bind.model)(&mut reader, &Subject::new(s)).ok_or(WhyNot::Guard)?;
             Ok((trace, input))
@@ -1065,6 +1141,7 @@ impl Model {
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
+            self.release_held();
             let mut started = Vec::new();
             for t in self.spec.transitions.clone() {
                 if t.trigger != Trigger::Auto {
@@ -1099,6 +1176,7 @@ impl Model {
                 }
             }
             if started.is_empty() {
+                self.disclose_front_waits();
                 return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
@@ -1205,7 +1283,7 @@ impl Model {
                 subject: Subject::new(&o.subject),
             });
         }
-        self.occ_mut(occurrence).parked = None;
+        self.unpark(occurrence);
         match resolution {
             Resolution::Verify(outputs) => self.record(occurrence, outputs),
             Resolution::Retry => {
@@ -1250,12 +1328,14 @@ impl Model {
         {
             self.end_run(&key(&t.name, s));
         }
+        let mut taken_at = BTreeMap::new();
         let taken = t
             .consumes
             .iter()
             .map(|p| {
-                let c = self
-                    .slot_mut(p, s)
+                let slot = self.slot_mut(p, s);
+                taken_at.insert(p.clone(), slot.version);
+                let c = slot
                     .content
                     .pop_front()
                     .expect("decide checked every consumed token");
@@ -1276,7 +1356,9 @@ impl Model {
             .map_or_else(BTreeMap::new, |o| o.attempts.clone());
         let waits_on = trace
             .rows
-            .keys()
+            .iter()
+            .filter(|(_, r)| !r.committed)
+            .map(|(k, _)| k)
             .filter(|(p, rs)| rs != s || !t.consumes.contains(p))
             .flat_map(|row| {
                 self.occs
@@ -1285,6 +1367,7 @@ impl Model {
                     .filter(|(_, o)| {
                         o.subject == row.1 && o.taken.iter().any(|(tp, _)| *tp == row.0)
                     })
+                    .filter(|(id, _)| !self.superseded(&row.0, &row.1, id))
                     .map(|(id, _)| (row.clone(), id.clone()))
             })
             .collect();
@@ -1294,16 +1377,21 @@ impl Model {
                 transition: t.name.clone(),
                 subject: s.to_string(),
                 taken,
+                taken_at,
                 trace,
                 input,
                 settled: None,
                 parked: None,
                 attempts,
                 waits_on,
-                stale_row: None,
+                stale_rows: BTreeSet::new(),
+                seq: self.next_attempt,
+                held: None,
             },
         );
-        self.launch(occ, now, false)
+        let id = self.launch(occ, now, false);
+        self.disclose_parked_waits();
+        id
     }
 
     fn launch(&mut self, occ: OccurrenceId, now: Duration, probe: bool) -> AttemptId {
@@ -1401,6 +1489,9 @@ impl Model {
         ) {
             return Completion::DroppedLate;
         }
+        if o.held.is_some() {
+            return Completion::DroppedLate;
+        }
         if let (Some(l), EffectResult::Unknown(_)) = (&live, &result)
             && let Some(probe) = self.continuation(occ, l)
         {
@@ -1413,7 +1504,7 @@ impl Model {
                 let EffectResult::Done(outputs) = result else {
                     panic!("{occ} is Done by an earlier attempt but did not settle");
                 };
-                self.occ_mut(occ).parked = None;
+                self.unpark(occ);
                 self.record(occ, outputs);
                 Completion::Recorded
             }
@@ -1426,7 +1517,7 @@ impl Model {
                 } else {
                     cause
                 };
-                self.occ_mut(occ).parked = None;
+                self.unpark(occ);
                 self.fail(occ, cause, now);
                 Completion::Recorded
             }
@@ -1475,8 +1566,8 @@ impl Model {
     /// firing (REV11-running.a) and cannot be stale.
     fn stale(&self, occ: &OccurrenceId) -> Option<Key> {
         let o = &self.occs[occ];
-        if o.stale_row.is_some() {
-            return o.stale_row.clone();
+        if let Some(row) = o.stale_rows.first() {
+            return Some(row.clone());
         }
         o.trace
             .rows
@@ -1486,13 +1577,158 @@ impl Model {
             .map(|(k, _)| k.clone())
     }
 
+    /// The first row `occ` read whose view differs from the committed front
+    /// of that row: its tokens plus the tokens open takes hold from it. Rows
+    /// it consumed, executor places and derived places are no committed
+    /// state.
+    fn committed_view_stale(&self, occ: &OccurrenceId) -> Option<String> {
+        let o = &self.occs[occ];
+        o.trace
+            .rows
+            .iter()
+            .filter(|((p, s), _)| *s != o.subject || o.taken.iter().all(|(held, _)| held != p))
+            .filter(|((p, _), _)| {
+                executor_place(&self.spec, p).is_none()
+                    && matches!(self.place(p), PlaceSpec::Stored { .. })
+            })
+            .find_map(|((p, s), r)| {
+                let front = self.committed_front(p, s);
+                let same = r.present == front.is_some()
+                    && r.fields
+                        .iter()
+                        .all(|(f, v)| front.and_then(|c| c.get(f)) == v.as_ref());
+                (!same).then(|| {
+                    format!("{occ} committed on {p} of {s}: read {r:?}, committed front {front:?}")
+                })
+            })
+    }
+
+    /// The open take that holds the committed front ahead of the row's own
+    /// head: an asked work waits for it.
+    fn front_taker(&self, place: &str, subject: &str) -> Option<&OccurrenceId> {
+        let held = self
+            .occs
+            .iter()
+            .filter(|(id, t)| t.subject == subject && self.open_take(id))
+            .filter(|(id, t)| {
+                t.taken.iter().any(|(tp, _)| tp == place) && !self.superseded(place, subject, id)
+            })
+            .map(|(id, t)| (t.seq, id));
+        if self.is_fifo(place) {
+            held.min_by_key(|(seq, _)| *seq).map(|(_, id)| id)
+        } else if self.content(place, subject).is_some() {
+            None
+        } else {
+            held.max_by_key(|(seq, _)| *seq).map(|(_, id)| id)
+        }
+    }
+
+    /// Each asked work whose committed front a parked take holds, in net
+    /// order: it waits until `resolve`.
+    fn disclose_front_waits(&mut self) {
+        let mut waits = Vec::new();
+        for t in &self.spec.transitions {
+            let Some(answered) = self.answered_of(&t.name) else {
+                continue;
+            };
+            let subjects: BTreeSet<String> = self
+                .slots
+                .iter()
+                .filter(|((p, _), slot)| *p == answered && !slot.content.is_empty())
+                .map(|((_, s), _)| s.clone())
+                .collect();
+            for s in subjects {
+                for p in &t.consumes {
+                    let Some(take) = self.front_taker(p, &s) else {
+                        continue;
+                    };
+                    let taker = &self.occs[take];
+                    if taker.parked.is_some() {
+                        let Value::String(answer) =
+                            self.answered_field(&answered, &s, ANSWER_ID_KEY)
+                        else {
+                            panic!("an Answered token without a text answer id");
+                        };
+                        waits.push(Condition::WaitsOnParkedTake {
+                            reader: Arc::from(t.name.as_str()),
+                            subject: Subject::new(&s),
+                            reader_occurrence: work_occurrence(&t.name, &answer),
+                            take: Arc::from(taker.transition.as_str()),
+                            take_occurrence: take.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        for c in waits {
+            if !self.conditions.contains(&c) {
+                self.conditions.push(c);
+            }
+        }
+    }
+
+    /// A take holds the oldest token of a FIFO row, so the first held token
+    /// is the front; a single-token row's own token is newer than a held one,
+    /// and a superseded held token never comes back.
+    fn committed_front(&self, place: &str, subject: &str) -> Option<&Content> {
+        let held = self
+            .occs
+            .iter()
+            .filter(|(id, t)| t.subject == subject && self.open_take(id))
+            .filter_map(|(id, t)| {
+                t.taken
+                    .iter()
+                    .find(|(tp, _)| tp == place)
+                    .filter(|_| !self.superseded(place, subject, id))
+                    .map(|(_, c)| (t.seq, &c.1))
+            });
+        if self.is_fifo(place) {
+            held.min_by_key(|(seq, _)| *seq)
+                .map(|(_, c)| c)
+                .or_else(|| self.content(place, subject))
+        } else {
+            self.content(place, subject)
+                .or_else(|| held.max_by_key(|(seq, _)| *seq).map(|(_, c)| c))
+        }
+    }
+
+    /// Whether `occ` holds its taken tokens uncommitted: running, parked or
+    /// a held reader.
+    pub fn open_take(&self, occ: &OccurrenceId) -> bool {
+        self.occs
+            .get(occ)
+            .is_some_and(|o| o.settled.is_none() || o.parked.is_some())
+    }
+
+    pub fn dirty_commits(&self) -> &[String] {
+        &self.dirty
+    }
+
+    pub fn held(&self) -> Vec<(OccurrenceId, Vec<holon_net::exec::WaitEdge>)> {
+        self.occs
+            .iter()
+            .filter(|(_, o)| o.held.is_some())
+            .map(|(id, o)| {
+                let edges = o
+                    .waits_on
+                    .iter()
+                    .map(|((p, s), take)| (Place::new(p), Subject::new(s), take.clone()))
+                    .collect();
+                (id.clone(), edges)
+            })
+            .collect()
+    }
+
     /// Whether the compare-and-set of a fact into a read row fails: that row
-    /// moved since the firing read it (322/E3.c). Another input having changed
+    /// moved since the firing read it, or a failed take put back a token the
+    /// firing missed there (322/E3.c). Another input having changed
     /// does not withhold the fact.
     fn moved_read_row(&self, occ: &OccurrenceId, out: &Output) -> bool {
+        let row = key(&out.place, &out.subject);
+        let o = &self.occs[occ];
         self.read_row(occ, out)
-            && self.version(&out.place, &out.subject)
-                != self.occs[occ].trace.rows[&key(&out.place, &out.subject)].version
+            && (o.stale_rows.contains(&row)
+                || self.version(&out.place, &out.subject) != o.trace.rows[&row].version)
     }
 
     /// Whether the firing read the row this output writes, so a put compares
@@ -1516,6 +1752,12 @@ impl Model {
     /// place's candidate, or applies on a data-class place, or is withheld;
     /// the settle discloses it.
     fn record(&mut self, occ: &OccurrenceId, outputs: Vec<Output>) {
+        if !self.occs[occ].waits_on.is_empty() {
+            let o = self.occ_mut(occ);
+            o.settled = None;
+            o.held = Some(outputs);
+            return;
+        }
         let o = &self.occs[occ];
         let t = self.transition(&o.transition);
         let (facts, rows): (Vec<_>, Vec<_>) = outputs
@@ -1523,6 +1765,9 @@ impl Model {
             .partition(|out| t.facts.iter().any(|f| f == out.place.as_str()));
         let by = o.transition.clone();
         let Some((place, subject)) = self.stale(occ) else {
+            if let Some(dirty) = self.committed_view_stale(occ) {
+                self.dirty.push(dirty);
+            }
             for f in facts {
                 self.put(&f.place, &f.subject, f.content, Some(&by));
             }
@@ -1659,9 +1904,20 @@ impl Model {
         for p in places {
             let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
+            let before = slot.version;
             if fifo || slot.content.is_empty() {
                 slot.version += 1;
                 slot.writer = Some(Arc::clone(&by));
+            }
+            let after = slot.version;
+            let edge = (key(&p, &s), occ.clone());
+            for r in self.occs.values_mut() {
+                if r.waits_on.remove(&edge)
+                    && let Some(read) = r.trace.rows.get_mut(&edge.0)
+                    && read.version == before
+                {
+                    read.version = after;
+                }
             }
         }
     }
@@ -1673,8 +1929,8 @@ impl Model {
         let (taken, s) = (o.taken.clone(), o.subject.clone());
         for (p, c) in taken {
             let fifo = self.is_fifo(&p);
+            let back = !self.superseded(&p, &s, occ);
             let slot = self.slot_mut(&p, &s);
-            let back = fifo || slot.content.is_empty();
             if fifo {
                 // The taken token was the oldest, so it goes back in front.
                 slot.content.push_front(c);
@@ -1684,10 +1940,16 @@ impl Model {
             let edge = (key(&p, &s), occ.clone());
             for o in self.occs.values_mut() {
                 if o.waits_on.remove(&edge) && back {
-                    o.stale_row.get_or_insert(edge.0.clone());
+                    o.stale_rows.insert(edge.0.clone());
                 }
             }
         }
+    }
+
+    /// Whether a failed `take` drops its token of `place`: a single-token
+    /// row moved since the take, which only a newer token can do.
+    fn superseded(&self, place: &str, subject: &str, take: &OccurrenceId) -> bool {
+        !self.is_fifo(place) && self.version(place, subject) != self.occs[take].taken_at[place]
     }
 
     /// A failure or timeout port token: its cause is its data, so a new
@@ -1741,6 +2003,57 @@ impl Model {
         let o = self.occ_mut(occ);
         o.parked = Some(cause.text.clone());
         o.settled = Some(Settled::OutcomeUnknown(cause));
+        self.disclose_parked_waits();
+    }
+
+    fn unpark(&mut self, occ: &OccurrenceId) {
+        if self.occ_mut(occ).parked.take().is_some() {
+            self.conditions.retain(|c| {
+                !matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == occ)
+            });
+        }
+    }
+
+    /// Each open reader with an edge to a parked take: one condition per
+    /// (take, reader), in that order.
+    fn disclose_parked_waits(&mut self) {
+        let mut waits = BTreeMap::new();
+        for (rid, r) in self.occs.iter().filter(|(id, _)| self.open_take(id)) {
+            for (_, take) in &r.waits_on {
+                let t = &self.occs[take];
+                if t.parked.is_some() {
+                    waits.insert(
+                        (take.clone(), rid.clone()),
+                        Condition::WaitsOnParkedTake {
+                            reader: Arc::from(r.transition.as_str()),
+                            subject: Subject::new(&r.subject),
+                            reader_occurrence: rid.clone(),
+                            take: Arc::from(t.transition.as_str()),
+                            take_occurrence: take.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        for c in waits.into_values() {
+            if !self.conditions.contains(&c) {
+                self.conditions.push(c);
+            }
+        }
+    }
+
+    /// Records every held reader whose takes all committed or failed, until
+    /// none is left.
+    fn release_held(&mut self) {
+        while let Some(occ) = self
+            .occs
+            .iter()
+            .find(|(_, o)| o.held.is_some() && o.waits_on.is_empty())
+            .map(|(id, _)| id.clone())
+        {
+            let outputs = self.occ_mut(&occ).held.take().expect("found above");
+            self.record(&occ, outputs);
+        }
     }
 
     fn timers(&mut self, now: Duration) {

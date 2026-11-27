@@ -23,6 +23,7 @@ const TWINS: &[(&str, Twin)] = &[
     ("settled-from-answer", Twin::SettledFromAnswer),
     ("no-quiescence", Twin::NoQuiescence),
     ("keep-work-failed", Twin::KeepWorkFailed),
+    ("no-commit-wait", Twin::NoCommitWait),
 ];
 
 const LOWER_TWINS: &[(&str, LowerTwin)] = &[
@@ -77,7 +78,8 @@ mod tests {
                 | Twin::UndoRestoresAnswered
                 | Twin::SettledFromAnswer
                 | Twin::NoQuiescence
-                | Twin::KeepWorkFailed => t,
+                | Twin::KeepWorkFailed
+                | Twin::NoCommitWait => t,
             }
         }
         let all = [
@@ -98,6 +100,7 @@ mod tests {
             Twin::SettledFromAnswer,
             Twin::NoQuiescence,
             Twin::KeepWorkFailed,
+            Twin::NoCommitWait,
         ];
         for t in all {
             let t = listed(t);
