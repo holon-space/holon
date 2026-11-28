@@ -129,6 +129,12 @@ CaseScript(c) ==
       [] c = "reader_waits_on_a_parked_take_drop" -> ParkSetup \o <<R0("s", "drop")>>
       [] c = "reader_waits_on_a_parked_take_retry_then_fails" ->
             ParkSetup \o <<R0("s", "retry"), C0("s", "definite"), R0("s", "drop")>>
+      [] c = "a_wait_condition_goes_when_the_reader_fails" ->
+            <<W("s", "P0", "none"), W("s", "P1", "none"), C0("s", "unknown"), C0("s", "unknown"),
+              C1("s", "definite")>>
+      [] c = "a_reader_stale_by_a_write_is_not_held" ->
+            <<W("s", "P0", "none"), W("s", "P1", "none"), W("s", "P0", "t"), C0("s", "unknown"),
+              C0("s", "unknown"), C1("s", "done")>>
       [] OTHER -> <<>>
 
 CaseChecks(c) ==
@@ -148,6 +154,10 @@ CaseChecks(c) ==
             ParkChecks \cup ParkEnd(13) \cup
             {Chk(11, "nocond", "s", 0), Chk(11, "held", "s", 0),
              Chk(12, "cond", "s", 0), Chk(12, "held", "s", 0)}
+      [] c = "a_wait_condition_goes_when_the_reader_fails" ->
+            {Chk(4, "cond", "s", 0), Chk(5, "nocond", "s", 0), Chk(5, "verdict", "s", "failed")}
+      [] c = "a_reader_stale_by_a_write_is_not_held" ->
+            {Chk(6, "notheld", "s", 0), Chk(6, "nocond", "s", 0), Chk(6, "verdict", "s", "stale")}
       [] c \in {"absent_read_then_written_and_taken", "held_token_superseded_by_a_write",
                 "fact_into_fifo_appended_behind_head", "fifo_append_behind_the_read_head",
                 "read_then_taken_taker_done", "read_while_taken_taker_fails",

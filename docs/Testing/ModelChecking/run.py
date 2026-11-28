@@ -84,6 +84,8 @@ RI_CASES = {
     "reader_waits_on_a_parked_take_verify": "case_reader",
     "reader_waits_on_a_parked_take_drop": "case_reader",
     "reader_waits_on_a_parked_take_retry_then_fails": "case_reader",
+    "a_wait_condition_goes_when_the_reader_fails": "case_reader",
+    "a_reader_stale_by_a_write_is_not_held": "case_reader",
 }
 
 
@@ -187,6 +189,11 @@ RI_ROWS = (
     ]
     + [(f"fifoask.d.{w}", "ReaderIsolationFifoAsk_d", None, "INVARIANT", [w], violated(w))
        for w in ["NeverDone", "NeverWaitsParked"]]
+    + [(f"waitgraph.{d}", f"ReaderIsolationWaitGraph_{d}", None, "INVARIANT", ["TypeOK", "NoWaitCycle"],
+        "holds")
+       for d in ["ring2", "ring3"]]
+    + [(f"waitgraph.{d}.{w}", f"ReaderIsolationWaitGraph_{d}", None, "INVARIANT", [w], violated(w))
+       for d in ["ring2", "ring3"] for w in ["NeverCrossEdge", "NeverHeld"]]
 )
 
 

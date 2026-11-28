@@ -22,12 +22,14 @@ the trace TLC finds in G4.
 | `ReaderIsolationSupersede.tla` | The supersede test of a restore, with two takes of one Single row |
 | `ReaderIsolationIdle.tla` | The idle rule of asks: an offered ask has its Answer enabled |
 | `ReaderIsolationFifoAsk.tla` | An ask work on a FIFO row whose front an open take holds |
+| `ReaderIsolationWaitGraph.tla` | The wait graph of takes that read each other's rows |
 | `ReaderIsolation_<design>.cfg` | One design or mutant: constants only |
 | `ReaderIsolation_case_<net>.cfg` | The net of a group of case tests; `run.py` adds the `Case` constant |
 | `ReaderIsolationAnswers_<gate>.cfg` | The production busy set, or the test net's gate |
 | `ReaderIsolationSupersede_<rule>.cfg` | The supersede test on the version, or on the slot |
 | `ReaderIsolationIdle_<design>.cfg` | Ask shape, I2 variant, and the held-present ruling on or off |
 | `ReaderIsolationFifoAsk_<bind>.cfg` | The bind rule of the ask work: current, (d) or (b) |
+| `ReaderIsolationWaitGraph_ring<N>.cfg` | A ring of N takes, each reading the row of the next |
 | `run.py` (`RI_ROWS`) | One row per check: design, property, expected outcome |
 
 Run: `python3 docs/Testing/ModelChecking/run.py` runs every row with the
@@ -106,7 +108,9 @@ Every row is a line of `RI_ROWS` in `run.py`; its log is
   attempts and all four outcomes, resolve Verify, Retry and Drop; T1 pure
   or Keyed. The liveness rows use three writes.
 - The two-subject row checks that every edge names the take that was open
-  at the bind (`I2Dependency`), and has no deadlock.
+  at the bind (`I2Dependency`), and has no deadlock. Its subjects share no
+  row, so no wait cycle can form there; `ReaderIsolationWaitGraph` (below)
+  checks takes whose rows overlap.
 - `wide` checks I6 with the wide I2: it holds too; the narrow I2 only
   removes waits.
 - Each design rule has a mutant whose row is red:
@@ -158,6 +162,8 @@ must be violated. With a mutant of the rule a case pins, its check is red.
 | reader_waits_on_a_parked_take_verify | waits with Condition; commits; Condition gone; the other subject still waits | same |
 | reader_waits_on_a_parked_take_drop | as Verify | same |
 | reader_waits_on_a_parked_take_retry_then_fails | Retry: Condition gone, still waits; definite fail: parks again, Condition back; Drop: commits | same |
+| a_wait_condition_goes_when_the_reader_fails | Condition while T0 is parked; gone when T1 fails definitely (`EndWait` ruling) | same; red under `oldcond` |
+| a_reader_stale_by_a_write_is_not_held | stale at record, not held, no Condition (`StaleFirst` ruling) | same; red under `holdfirst` |
 | superseded_token_stays_out_when_a_later_take_holds_the_newer_one | P0 empty, reader stale | same (version and slot) |
 | superseded_token_stays_out_after_the_newer_one_is_consumed | P0 empty, reader not stale | version: same; slot: k1 comes back, reader stale |
 | an ask on a hole while its take runs (Inhibit read) | ruling on: no ask offered, idle rule holds | ruling on: holds; ruling off: the Answer is held and the ask stays offered |
@@ -172,8 +178,33 @@ must be violated. With a mutant of the rule a case pins, its check is red.
   case tests: the supersede cases are scripts of `ReaderIsolationSupersede`;
   the two ask rows are the counterexamples of `idle.absent_off.IdleRule`
   and `idle.wide_off.IdleRule`, in the op order of their source.
-- The property test of the isolation machine is no case; its operations are
+- The property test of the isolation machine,
+  `a_read_through_a_failed_take_is_stale`, is no case; its operations are
   the outside operations of the spec.
+- `a_reader_stale_by_a_write_is_not_held` makes the reader stale before
+  its effect ends, so it is never held; it stays green under the mutant
+  `staleatrecord` and does not pin the open finding below.
+- Case tests out of the bound (one take per FIFO row per subject, a fact
+  into one row), each covered by its static example only:
+  - `a_refused_retry_keeps_the_wait_condition`: a second take of one FIFO
+    row parks and is retried.
+  - `committed_front_is_the_oldest_token_of_a_later_take`: two takes of one
+    FIFO row; the committed front is chosen by token id.
+  - `committed_front_is_a_restored_token_older_than_a_held_one`: the same,
+    see G5.
+  - `failed_takes_put_fifo_tokens_back_in_write_order`: two takes of one
+    FIFO row both fail; the order of the restores.
+  - `a_stale_reader_puts_no_fact_over_either_restored_token`: a fact into
+    two rows; the spec puts a fact into one row
+    (`a_stale_reader_puts_no_fact_over_the_restored_token`).
+- Helpers of the test file, no case tests: `x_of_p0`, `committed_x_of_p0`,
+  `taker_runs`, `fact_output`, `spec`, `outputs`, `net`, `name`, `op`,
+  `is_t1`, `of`, `quiesced`, `new`, `p0_ids`, `settled`, `apply`,
+  `resolve`, `observe`, `check`, `t1_held`, `verdict`, `init_state`,
+  `transitions`, `init_test`, `check_invariants`, `w`, `wx`, `done`,
+  `fails`, `case`, `g_ops`, `beside`, `p0_order`, `committed_read_of_t1`,
+  `t1_waits_on_parked_t0`, `park_t0`, and `reader_waits_on_a_parked_take`
+  (the body of the three parked-take cases).
 
 ### G4, not vacuous: yes
 
@@ -181,7 +212,12 @@ must be violated. With a mutant of the rule a case pins, its check is red.
 effect ends Done, T1 commits "no input" while T0 still holds k. That is the
 dirty read of the worked example; I6 fails at the commit.
 
-### G5, test-model conformance: rules mapped; step check not run
+### G5, test-model conformance: waiting for the final commit of the commit-wait change
+
+The commit-wait change is still open: it owes the release of a reader that
+a write makes stale while it is held (the open finding below). The random
+step check runs on its final commit, on a card that the lane lead files.
+The rule map below is the part done so far.
 
 At commit 104f32fe (the commit-wait change after its fix round), each spec
 rule against the executor (`crates/petri-workflow/src/exec.rs`) and the test
@@ -207,9 +243,9 @@ reach that state (one take per FIFO row per subject, so no token is held
 while an older one is restored); the static example
 `committed_front_is_a_restored_token_older_than_a_held_one` covers it.
 
-Not run: the random step check of the test model against the spec (a
-tla-checker step check of model.rs runs). It needs a build of the test
-crate at that commit; that follow-up is open.
+Not run yet: the random step check of the test model against the spec
+(runs of model.rs, each step checked as a spec step, with a planted model
+mutant). It waits for the final commit of the commit-wait change.
 
 ### Supersede test of a restore
 
@@ -251,6 +287,29 @@ enabled. The ask's derive does not count the Answer's own Running place.
   Narrow I2 is the ruled variant, so this is no gap.
 - Latent in production: no production manual transition consumes a row
   that an ask reads.
+
+### Wait graph of takes whose rows overlap
+
+`ReaderIsolationWaitGraph.tla`: N transitions in a ring; transition t
+takes the token of row t and reads row t+1. Each is a take and a reader of
+another take's row, so a wait cycle is one edge set away. Bind, hold,
+commit, restore and the stale check are the rules of `ReaderIsolation.tla`
+over Single rows: at its bind a reader gets an edge to each take open then
+whose token it saw as a hole.
+
+| Row | Result |
+|---|---|
+| `waitgraph.ring2`, `waitgraph.ring3`: `NoWaitCycle`, no deadlock | hold (ring of 3: 1,222,411 states) |
+| `waitgraph.ring<N>.NeverCrossEdge`: t waits on u while u reads t's row | violated, as expected |
+| `waitgraph.ring<N>.NeverHeld` | violated, as expected |
+
+- Why no cycle forms: an edge goes from a reader to a take open at its
+  bind, so it points to an earlier take; a cycle would need a take earlier
+  than itself.
+- Mutant: Bind also gives each live reader of the row it takes an edge to
+  this later take. `NoWaitCycle` is violated on both rings: T1 takes row 1;
+  T2 takes row 2 and binds the hole of row 1 (edge T2 to T1); the mutant
+  adds T1 to T2, since T1 reads row 2.
 
 ### Ask work on a FIFO row
 
@@ -337,7 +396,8 @@ per-transition state (`t0`, `t1`) would become a function over transitions.
 ## Not checked
 
 - G5 step check: random runs of the test model, each step checked as a spec
-  step, with the planted mutant. Follow-up.
+  step, with the planted mutant. Waits for the final commit of the
+  commit-wait change.
 - Two takes of one FIFO row in one subject (the findings of G5 come from
   reading the code).
 - Retract of a row token: the isolation machine has no retract operation.
