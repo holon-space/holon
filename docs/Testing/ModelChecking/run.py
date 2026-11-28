@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every write-back, settle and work-runtime spec with TLC, and the Quint model.
+"""Check every write-back, settle, work-runtime and keystroke spec with TLC, and the Quint model.
 
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR] [--if-touched FILE]
 
@@ -94,6 +94,71 @@ WORK_RUNTIME = {
         "NeverReady": ("INVARIANT", True, "witness of WaitingStarts"),
     },
 }
+# keystroke config -> property -> (TLC kind, whether TLC must find it violated,
+# why). The design and world of each config are its constants (Keystroke.tla).
+# A known defect names its finding in KeystrokeReport.md; a replay names its
+# bug entry; a teeth row switches off the action that makes the property true.
+LOST_UPDATE = ("known defect: a whole-buffer write from a buffer that has not seen an "
+               "external write reverts it (KeystrokeReport.md, Findings, lost update)")
+TRAILING = ("known defect: a trailing whitespace key that only the editor holds is lost "
+            "when the editor converges to an external write (KeystrokeReport.md, Findings)")
+SPLIT_SPACE = ("known defect: Enter after a trailing whitespace key splits past the stored "
+               "text and fails (KeystrokeReport.md, Findings)")
+JOIN_AHEAD = ("known defect, suspected: a key typed after Backspace-at-0 and before focus "
+              "moves writes to the deleted block (KeystrokeReport.md, Findings)")
+PROPS = ("NoLostKeystroke", "ExternalWriteKept", "NoClobber", "MonotoneViews")
+
+
+def keystroke_rows(violated=None, witnesses=()):
+    violated = violated or {}
+    rows = {p: ("PROPERTY", p in violated, violated.get(p, "property")) for p in PROPS}
+    for w, of in witnesses:
+        rows[w] = ("INVARIANT", True, f"witness of {of}")
+    return rows
+
+
+def replay(entry, *props):
+    return keystroke_rows({p: f"replay of {entry}" for p in props})
+
+
+KEYSTROKE = {
+    "Keystroke_main": keystroke_rows(witnesses=[
+        ("NotTypedAndStopped", "NoLostKeystroke"), ("NoStaleEcho", "NoLostKeystroke"),
+        ("NoInSync", "NoLostKeystroke"), ("NoAdoptBaseline", "NoLostKeystroke"),
+        ("NeverRewritten", "NoClobber"), ("PanelNeverMoves", "MonotoneViews")]),
+    "Keystroke_ext": keystroke_rows({"ExternalWriteKept": LOST_UPDATE}, [
+        ("ExternalNeverAdopted", "ExternalWriteKept"), ("NoConverge", "ExternalWriteKept")]),
+    "Keystroke_fresh": keystroke_rows({"ExternalWriteKept": LOST_UPDATE}, [
+        ("ExternalNeverAdopted", "ExternalWriteKept")]),
+    "Keystroke_quiet": keystroke_rows(witnesses=[
+        ("ExternalNeverAdopted", "ExternalWriteKept"), ("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_spaceext": keystroke_rows({"NoLostKeystroke": TRAILING, "MonotoneViews": TRAILING,
+                                          "ExternalWriteKept": LOST_UPDATE}),
+    "Keystroke_split": keystroke_rows(witnesses=[("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_splitspace": keystroke_rows({"NoLostKeystroke": SPLIT_SPACE}),
+    "Keystroke_join": keystroke_rows({"NoLostKeystroke": JOIN_AHEAD}),
+    "Keystroke_birth": keystroke_rows(witnesses=[("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_teeth": {"NoLostKeystroke": ("PROPERTY", True, "teeth: no keystroke write lands")},
+    "Keystroke_delta": keystroke_rows(witnesses=[("ExternalNeverAdopted", "ExternalWriteKept")]),
+    "Keystroke_deltateeth": {"ExternalWriteKept": ("PROPERTY", True, "teeth: no echo converges")},
+    "Keystroke_r_enter": replay("2026-07-12-enter-after-typing-intermittently-creates-block",
+                                "NoLostKeystroke", "NoClobber", "MonotoneViews"),
+    "Keystroke_r_trailing": replay("2026-07-20-typed-trailing-space-deleted-100ms-later",
+                                   "NoLostKeystroke", "MonotoneViews"),
+    "Keystroke_r_noecho": replay("2026-07-21-editor-stale-buffer-clobber-new-manifestation",
+                                 "NoLostKeystroke", "ExternalWriteKept"),
+    "Keystroke_r_chord": replay("2026-08-11-structural-chord-flushes-focused-editor-stale",
+                                "ExternalWriteKept"),
+    "Keystroke_r_unordered": replay("2026-08-12-typing-through-production-fire-forget-dispatch",
+                                    "NoLostKeystroke", "NoClobber", "MonotoneViews"),
+    "Keystroke_r_noseq": {**replay("2026-08-17-editor-drops-external-write-with-no-write-seq",
+                                   "NoLostKeystroke", "ExternalWriteKept"),
+                          "NoDropNoSeq": ("INVARIANT", True, "witness: DropNoSeq is reached")},
+    "Keystroke_r_detached": replay("2026-10-01-first-keystroke-into-a-slot-races-the-detached-create",
+                                   "NoLostKeystroke"),
+    "Keystroke_r_strip": replay("2026-10-04-slash-command-strip-drops-a-key-queued-behind-enter",
+                                "NoLostKeystroke", "MonotoneViews"),
+}
 # liveness config -> (property, the auto transition it promises): with that
 # transition never enabled, TLC must find the property violated.
 WORK_RUNTIME_TEETH = {
@@ -105,7 +170,15 @@ WINDOWS = ["Writeback_prefix", "Writeback_main"]
 QUINT_EXPECTED_VIOLATED = "settledReadsNewest"
 # config whose INVARIANT is a red test's oracle on the fixed design -> whether
 # TLC must find that oracle violated
-RED_TEST_ORACLES = {"Writeback_through_oracle": ("RedTestOracle", True)}
+RED_TEST_ORACLES = {
+    "Writeback_through_oracle": ("RedTestOracle", True),
+    "Keystroke_oracle_whole": ("ExtStaysStored", True),
+    "Keystroke_oracle_delta": ("ExtStaysStored", False),
+    "Keystroke_oracle_spacetrim": ("SpaceStaysInEditor", True),
+    "Keystroke_oracle_spacekeep": ("SpaceStaysInEditor", False),
+    "Keystroke_oracle_splittrim": ("SplitLands", True),
+    "Keystroke_oracle_splitkeep": ("SplitLands", False),
+}
 
 TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
 
@@ -279,14 +352,15 @@ def check_tlc(jar, out, numbers):
 
 def check_work_runtime(jar, out, numbers):
     mismatches = []
-    for spec, props in WORK_RUNTIME.items():
+    for spec, props in {**WORK_RUNTIME, **KEYSTROKE}.items():
         for prop, (kind, expect_violated, why) in props.items():
             code, log, seconds = run_tlc(jar, spec, prop, out, kind=kind)
             text = log.read_text()
             violation_code = TLC_SAFETY if kind == "INVARIANT" else TLC_LIVENESS
             if code == TLC_HOLDS and "No error has been found" in text:
                 violated = False
-            elif code == violation_code and f"{prop} is violated" in text:
+            elif code == violation_code and (f"{prop} is violated" in text
+                                             or "Temporal properties were violated" in text):
                 violated = True
             else:
                 raise ToolError(f"{log}: TLC exit {code} without a verdict")
