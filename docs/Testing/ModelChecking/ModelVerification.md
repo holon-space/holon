@@ -58,7 +58,9 @@ Both describe a state-transition system.
 | one firing | one step |
 
 A net that is data (a net file) can become a spec by generation. The spec then
-cannot drift from the net, because it is the net.
+follows the net, but only while the gate regenerates it from the net file and a
+conformance PBT checks the executor against it. Without both, a generated spec
+goes stale like a hand-written one.
 
 For normal code this is not possible. A hand-written spec repeats the logic of
 the code (`HomeBySettle.tla` repeats the supervision of `home_by`), and the
@@ -97,7 +99,8 @@ The functional core gives this.
 
 - **One TLA+ action = one core function.** The conformance PBT calls the
   function and checks each step against the matching action. tla-checker
-  evaluates the action in process (well below a millisecond per step).
+  evaluates the action in process. Each recorded call is a search over a few
+  unobserved steps, so a case costs more than one evaluation.
 - **The imperative shell = the scheduler.** It decides which action runs when.
   TLA+ writes this as a free choice between the enabled actions, and TLC tries
   every order. A random PBT samples some orders.
@@ -148,8 +151,9 @@ the gaps in the table, so tests can aim at them.
 
 1. **The race search leaves the slow tests.** The keystone PBT hunts
    interleavings with long random runs under load, which is slow and flaky.
-   TLC covers all interleavings within the bound in seconds to minutes. The
-   keystone then checks wiring and the gaps, with fewer and shorter cases.
+   TLC covers all interleavings within the bound, in seconds for small bounds
+   and in many minutes for larger ones under load. The keystone then checks
+   wiring and the gaps, with fewer and shorter cases.
 2. **Contract PBTs are pure.** A case takes microseconds to milliseconds, with
    no database and no async runtime.
 3. **Selection by contract.** If a change in a body keeps its contract, its
