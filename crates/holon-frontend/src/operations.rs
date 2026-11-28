@@ -132,9 +132,7 @@ pub fn dispatch_operation(
         holon_api::latency_e2e::interaction_dispatched(
             &op_name,
             target,
-            holon_api::latency_e2e::Observable::BlockRow(
-                holon_api::latency_e2e::write_seq_from_params(&params),
-            ),
+            holon_api::latency_e2e::Observable::of_block_op(&op_name, &params),
             holon_api::latency_e2e::ClockOrigin::Ui,
         );
     }

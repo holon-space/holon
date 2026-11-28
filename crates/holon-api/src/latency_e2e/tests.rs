@@ -1,4 +1,16 @@
+use proptest::prelude::*;
+
 use super::*;
+
+/// [`close_delivered`] for clocks without an interaction, which every batch
+/// carries.
+fn close_untraced<S: AsRef<str>>(
+    pending: &mut Vec<Pending>,
+    deliveries: &[(S, Observable)],
+    now: Instant,
+) -> Vec<Closed> {
+    close_delivered(pending, deliveries, &[], now)
+}
 
 fn pend(action: &str, target: &str, seq: Option<i64>, t0: Instant) -> Pending {
     pend_from(ClockOrigin::Ui, action, target, seq, t0)
@@ -19,6 +31,7 @@ fn pend_from(
         t0,
         in_flight: 1,
         contended: false,
+        interaction: None,
     }
 }
 
@@ -32,6 +45,7 @@ fn pend_nav(target: &str, t0: Instant) -> Pending {
         t0,
         in_flight: 1,
         contended: false,
+        interaction: None,
     }
 }
 
@@ -228,7 +242,7 @@ fn real_commit_not_stolen_by_stale_noop_entry() {
     ];
     // The real edit's delta carries token 101.
     let now = base + Duration::from_secs(16) + Duration::from_millis(10);
-    let closed = close_delivered(&mut pending, &[("block:x", row(Some(101)))], now);
+    let closed = close_untraced(&mut pending, &[("block:x", row(Some(101)))], now);
     assert_eq!(closed.len(), 1, "exactly one measurement");
     assert_eq!(closed[0].action, "set_field");
     assert_eq!(
@@ -248,7 +262,7 @@ fn real_commit_not_stolen_by_stale_noop_entry() {
 fn nonmatching_token_closes_nothing() {
     let base = Instant::now();
     let mut pending = vec![pend("set_field", "block:x", Some(100), base)];
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut pending,
         &[("block:x", row(Some(999)))],
         base + Duration::from_millis(5),
@@ -270,7 +284,7 @@ fn structural_op_closes_over_a_stale_row_token() {
     let now = base + Duration::from_millis(36);
     // The split's own delta on its target: the row still carries the token
     // of the last EDITOR write (42), whose pending entry already closed.
-    let closed = close_delivered(&mut pending, &[("block:typed", row(Some(42)))], now);
+    let closed = close_untraced(&mut pending, &[("block:typed", row(Some(42)))], now);
     assert_eq!(closed.len(), 1, "the split must yield its OWN measurement");
     assert_eq!(closed[0].action, "split_block");
     assert_eq!(closed[0].ms, 36);
@@ -288,7 +302,7 @@ fn typed_then_split_the_same_block_both_measure() {
     let mut pending = Vec::new();
     // 1. the keystroke's content write, stamped write_seq 7.
     pending.push(pend("set_field", "block:t", Some(7), base));
-    let typed = close_delivered(
+    let typed = close_untraced(
         &mut pending,
         &[("block:t", row(Some(7)))],
         base + Duration::from_millis(20),
@@ -299,7 +313,7 @@ fn typed_then_split_the_same_block_both_measure() {
     //    still carries the sticky write_seq 7.
     let t1 = base + Duration::from_millis(100);
     pending.push(pend("split_block", "block:t", None, t1));
-    let split = close_delivered(
+    let split = close_untraced(
         &mut pending,
         &[("block:t", row(Some(7))), ("block:new-child", row(None))],
         t1 + Duration::from_millis(36),
@@ -325,7 +339,7 @@ fn anonymous_delivery_closes_newest_and_drops_older() {
         pend("split_block", "block:x", None, base),
         pend("indent", "block:x", None, base + Duration::from_millis(50)),
     ];
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut pending,
         &[("block:x", row(Some(42)))],
         base + Duration::from_millis(60),
@@ -359,7 +373,7 @@ fn refused_op_is_retired_so_a_later_delivery_cannot_phantom_close_it() {
     assert_eq!(retired.action, "outdent");
     assert_eq!(retired.target, "block:refused");
     assert!(pending.is_empty());
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut pending,
         &[("block:refused", row(Some(5)))],
         base + Duration::from_secs(25),
@@ -484,6 +498,7 @@ fn closed_on(target: &str) -> Closed {
         contended: false,
         superseded: Superseded::default(),
         quiet: QuietBatches::default(),
+        span: None,
     }
 }
 
@@ -542,7 +557,7 @@ fn tokenless_closes_newest_and_drops_older() {
         ),
     ];
     let now = base + Duration::from_secs(5) + Duration::from_millis(7);
-    let closed = close_delivered(&mut pending, &[("block:y", row(None))], now);
+    let closed = close_untraced(&mut pending, &[("block:y", row(None))], now);
     assert_eq!(closed.len(), 1);
     assert_eq!(
         closed[0].ms, 7,
@@ -577,7 +592,13 @@ fn a_batch_never_closes_a_clock_dispatched_after_it_was_received() {
         ),
     ];
     let now = base + Duration::from_millis(283);
-    let closed = close_received(&mut pending, &[("block:host", row(None))], received, now);
+    let closed = close_received(
+        &mut pending,
+        &[("block:host", row(None))],
+        &[],
+        received,
+        now,
+    );
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].ms, 283, "the batch closes the write it carries");
     assert_eq!(closed[0].backlog, 1, "the newer write is still in flight");
@@ -595,6 +616,7 @@ fn a_repeated_delivery_of_one_batch_closes_no_later_clock() {
     let first = close_received(
         &mut pending,
         &[("block:host", row(None))],
+        &[],
         received,
         base + Duration::from_millis(272),
     );
@@ -608,6 +630,7 @@ fn a_repeated_delivery_of_one_batch_closes_no_later_clock() {
     let repeat = close_received(
         &mut pending,
         &[("block:host", row(None))],
+        &[],
         received,
         base + Duration::from_millis(274),
     );
@@ -628,7 +651,7 @@ fn exact_match_preserves_newer_entry() {
             base + Duration::from_secs(2),
         ),
     ];
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut pending,
         &[("block:z", row(Some(50)))],
         base + Duration::from_millis(3),
@@ -666,6 +689,7 @@ fn global_dispatch_and_delivery_clears_entry() {
         Feed::fresh(),
         Instant::now(),
         [("block:other", row(None)), ("block:e2e-test-a", row(None))],
+        &[],
     );
     let pending = PENDING.lock().unwrap();
     assert!(
@@ -682,6 +706,7 @@ fn global_unmatched_ids_leave_entry_pending() {
         Feed::fresh(),
         Instant::now(),
         [("block:unrelated", row(None))],
+        &[],
     );
     let pending = PENDING.lock().unwrap();
     assert!(pending.iter().any(|p| p.target == "block:e2e-test-b"));
@@ -696,7 +721,7 @@ fn navigation_closes_on_its_own_focus_root_delivery() {
     let base = Instant::now();
     let mut pending = vec![pend_nav("block:page", base)];
     let now = base + Duration::from_millis(12);
-    let closed = close_delivered(&mut pending, &[("block:page", Observable::FocusRoot)], now);
+    let closed = close_untraced(&mut pending, &[("block:page", Observable::FocusRoot)], now);
     assert_eq!(closed.len(), 1, "navigation produces one e2e measurement");
     assert_eq!(closed[0].action, "navigate");
     assert_eq!(closed[0].ms, 12);
@@ -716,7 +741,7 @@ fn a_block_row_delivery_never_closes_a_pending_navigate() {
     let mut pending = vec![pend_nav("block:page", base)];
     // 12s later the user types into a child of that page; the child's row
     // delivers `parent_id = block:page` as a tokenless block-row entry.
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut pending,
         &[("block:page", row(None)), ("block:child", row(Some(9)))],
         base + Duration::from_secs(12),
@@ -751,7 +776,7 @@ fn navigate_and_a_write_on_the_same_id_close_independently() {
             base + Duration::from_millis(30),
         ),
     ];
-    let write = close_delivered(
+    let write = close_untraced(
         &mut pending,
         &[("block:p", row(Some(4)))],
         base + Duration::from_millis(40),
@@ -764,7 +789,7 @@ fn navigate_and_a_write_on_the_same_id_close_independently() {
         1,
         "the block row must not consume the navigate as a superseded entry"
     );
-    let nav = close_delivered(
+    let nav = close_untraced(
         &mut pending,
         &[("block:p", Observable::FocusRoot)],
         base + Duration::from_millis(45),
@@ -840,7 +865,10 @@ fn a_block_batch_with_a_root_id_column_is_still_block_rows() {
     let touched = touched_entities("block", &changes);
     assert_eq!(
         touched,
-        vec![("block:b".to_string(), Observable::BlockRow(None))],
+        vec![
+            ("block:b".to_string(), Observable::BlockRow(None)),
+            ("block:b".to_string(), Observable::NewRow(None)),
+        ],
         "a block mirror's root_id column is not a focus root"
     );
 }
@@ -862,6 +890,7 @@ fn global_navigation_dispatch_and_delivery_clears_entry() {
         Feed::fresh(),
         Instant::now(),
         [("block:e2e-nav-test", Observable::FocusRoot)],
+        &[],
     );
     let pending = PENDING.lock().unwrap();
     assert!(
@@ -889,7 +918,7 @@ fn repeat_interactions_each_emit_their_own_measurement() {
             base + Duration::from_millis(i * 100),
         )];
         let now = base + Duration::from_millis(i * 100 + 5);
-        let closed = close_delivered(
+        let closed = close_untraced(
             &mut pending,
             &[("block:repeat-page", Observable::FocusRoot)],
             now,
@@ -934,6 +963,7 @@ fn emitted_e2e_event_closes_at_projection_visible_stage() {
                 Feed::fresh(),
                 Instant::now(),
                 [("block:proj-visible-lock", Observable::FocusRoot)],
+                &[],
             );
             if captured
                 .lock()
@@ -982,6 +1012,7 @@ fn a_facade_clock_emits_a_facade_origin_sample() {
                 Feed::fresh(),
                 Instant::now(),
                 [("block:facade-origin-lock", Observable::BlockRow(None))],
+                &[],
             );
             if captured
                 .lock()
@@ -1029,8 +1060,8 @@ fn a_ui_clock_and_a_facade_clock_on_one_target_both_close() {
     let delivery = [("block:shared", row(None))];
     let now = base + Duration::from_millis(10);
 
-    let closed_ui = close_delivered(&mut ui, &delivery, now);
-    let closed_facade = close_delivered(&mut facade, &delivery, now);
+    let closed_ui = close_untraced(&mut ui, &delivery, now);
+    let closed_facade = close_untraced(&mut facade, &delivery, now);
 
     assert_eq!(closed_ui.len(), 1, "the UI interaction must be measured");
     assert_eq!(closed_ui[0].origin, ClockOrigin::Ui);
@@ -1063,6 +1094,7 @@ fn a_facade_clock_in_flight_leaves_a_ui_sample_at_depth_one() {
             &format!("block:agent-{i}"),
             Observable::BlockRow(None),
             ClockOrigin::Facade,
+            None,
             base,
         );
     }
@@ -1072,6 +1104,7 @@ fn a_facade_clock_in_flight_leaves_a_ui_sample_at_depth_one() {
         "block:human",
         Observable::BlockRow(None),
         ClockOrigin::Ui,
+        None,
         base + Duration::from_millis(1),
     );
 
@@ -1089,7 +1122,7 @@ fn a_facade_clock_in_flight_leaves_a_ui_sample_at_depth_one() {
         "the shared pipeline's foreign traffic must be recorded, not discarded"
     );
 
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut registry.ui,
         &[("block:human", row(None))],
         base + Duration::from_millis(10),
@@ -1115,6 +1148,7 @@ fn overflow_evicts_within_one_origin() {
         "block:human",
         Observable::BlockRow(None),
         ClockOrigin::Ui,
+        None,
         base,
     );
     let mut evictions = 0;
@@ -1125,6 +1159,7 @@ fn overflow_evicts_within_one_origin() {
             &format!("block:agent-{i}"),
             Observable::BlockRow(None),
             ClockOrigin::Facade,
+            None,
             base,
         );
         evictions += usize::from(evicted.is_some());
@@ -1189,6 +1224,7 @@ fn a_facade_clock_contained_inside_a_ui_clocks_life_still_contends() {
         "block:human",
         Observable::BlockRow(None),
         ClockOrigin::Ui,
+        None,
         t0,
     );
     assert!(
@@ -1204,11 +1240,12 @@ fn a_facade_clock_contained_inside_a_ui_clocks_life_still_contends() {
         "block:agent",
         Observable::BlockRow(None),
         ClockOrigin::Facade,
+        None,
         t0 + Duration::from_millis(2),
     );
 
     // t0+8ms: the facade op is delivered and leaves the registry.
-    let facade_closed = close_delivered(
+    let facade_closed = close_untraced(
         &mut registry.facade,
         &[("block:agent", row(None))],
         t0 + Duration::from_millis(8),
@@ -1223,7 +1260,7 @@ fn a_facade_clock_contained_inside_a_ui_clocks_life_still_contends() {
     // t0+20ms: the UI interaction is delivered. Its own queue was empty at
     // both ends and the other slot is empty NOW, so every instant reading
     // available at this point says "alone".
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut registry.ui,
         &[("block:human", row(None))],
         t0 + Duration::from_millis(20),
@@ -1251,6 +1288,7 @@ fn a_clock_enrolled_into_a_busy_pipeline_is_contended_from_the_start() {
         "block:agent",
         Observable::BlockRow(None),
         ClockOrigin::Facade,
+        None,
         t0,
     );
     enrol(
@@ -1259,6 +1297,7 @@ fn a_clock_enrolled_into_a_busy_pipeline_is_contended_from_the_start() {
         "block:human",
         Observable::BlockRow(None),
         ClockOrigin::Ui,
+        None,
         t0 + Duration::from_millis(1),
     );
     assert!(registry.ui[0].contended);
@@ -1277,9 +1316,10 @@ fn a_solitary_interaction_is_not_contended() {
         "block:human",
         Observable::BlockRow(None),
         ClockOrigin::Ui,
+        None,
         t0,
     );
-    let closed = close_delivered(
+    let closed = close_untraced(
         &mut registry.ui,
         &[("block:human", row(None))],
         t0 + Duration::from_millis(10),
@@ -1308,4 +1348,620 @@ fn an_expiry_names_its_origin() {
         .expect("the expiry must be disclosed");
     assert_eq!(mine.stage.as_deref(), Some("e2e_expired"));
     assert_eq!(mine.origin.as_deref(), Some("facade"));
+}
+
+/// One step of a cell-editing session as the correlator sees it.
+#[derive(Clone, Debug)]
+enum CellStep {
+    /// A keystroke on `target` commits to `doc`.
+    Commit { target: usize, doc: u64 },
+    /// A projection pass reads `doc` and writes the claimed blocks in
+    /// `writes`, or fails (`None`) before it writes anything.
+    Pass { doc: u64, writes: Option<[bool; 2]> },
+    /// The block mirror delivers `target` in a batch carrying the trace of
+    /// the `pass`-th claiming pass (modulo), or a trace no pass made.
+    Deliver { target: usize, pass: Option<usize> },
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Resolved {
+    Open,
+    Closed,
+    Superseded,
+    Retired,
+}
+
+struct ModelClock {
+    target: usize,
+    doc: u64,
+    trace: String,
+    pass: Option<String>,
+    state: Resolved,
+}
+
+const CELL_TARGETS: [&str; 2] = ["block:cell-a", "block:cell-b"];
+
+fn cell_step() -> impl Strategy<Value = CellStep> {
+    prop_oneof![
+        3 => (0..2usize, 1..=2u64).prop_map(|(target, doc)| CellStep::Commit { target, doc }),
+        2 => (1..=2u64, proptest::option::weighted(0.8, any::<[bool; 2]>()))
+            .prop_map(|(doc, writes)| CellStep::Pass { doc, writes }),
+        2 => (0..2usize, proptest::option::of(0..8usize))
+            .prop_map(|(target, pass)| CellStep::Deliver { target, pass }),
+    ]
+}
+
+/// Runs `steps` through the pure correlator and a model of it, then flushes:
+/// a pass per doc that writes every block, and a delivery of every block
+/// carrying every pass trace.
+///
+/// Properties: a cell clock closes only on a delivery of its block that
+/// carries the trace of the pass that claimed it (the newest claimed clock
+/// closes, older ones on the block are superseded); a pass of one doc never
+/// claims another doc's commit, although peer and counter repeat across docs;
+/// a failed pass releases its claims for the next pass; a pass that wrote
+/// nothing for a claimed block retires that keystroke; after the flush every
+/// keystroke ended exactly once, closed, superseded or retired.
+fn check_cell_session(steps: &[CellStep]) {
+    let base = Instant::now();
+    let registry: &'static Mutex<Registry> = Box::leak(Box::default());
+    let mut model: Vec<ModelClock> = Vec::new();
+    let mut passes: Vec<String> = Vec::new();
+    let mut counters = [0i32; 3];
+    let mut closes = 0usize;
+    let mut superseded = 0usize;
+    let mut retired = 0usize;
+    let position = |target: &str| CELL_TARGETS.iter().position(|t| *t == target).unwrap();
+
+    let mut deliver = |model: &mut Vec<ModelClock>, target: usize, traces: Vec<String>, now| {
+        let deliveries = vec![(CELL_TARGETS[target].to_string(), row(None))];
+        let trace_refs: Vec<&str> = traces.iter().map(String::as_str).collect();
+        let mut registry = registry.lock().unwrap();
+        let slot = registry.slot(ClockOrigin::Ui);
+        let closed = close_batch(slot, &deliveries, &trace_refs, now, now);
+
+        let winner = model
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.state == Resolved::Open
+                    && c.target == target
+                    && c.pass.as_ref().is_some_and(|p| traces.contains(p))
+            })
+            .map(|(i, _)| i)
+            .next_back();
+        let expected_superseded = match winner {
+            None => 0,
+            Some(w) => {
+                let older: Vec<usize> = (0..w)
+                    .filter(|&i| model[i].state == Resolved::Open && model[i].target == target)
+                    .collect();
+                for &i in &older {
+                    model[i].state = Resolved::Superseded;
+                }
+                model[w].state = Resolved::Closed;
+                older.len()
+            }
+        };
+        assert_eq!(
+            closed.len(),
+            usize::from(winner.is_some()),
+            "a delivery of {target} with traces {traces:?} closes {winner:?}"
+        );
+        if let Some(c) = closed.first() {
+            assert_eq!(c.action, CELL_EDIT);
+            assert_eq!(c.target, CELL_TARGETS[target]);
+            assert_eq!(c.superseded.ages_ms().len(), expected_superseded);
+            closes += 1;
+            superseded += expected_superseded;
+        }
+    };
+
+    let mut pass = |model: &mut Vec<ModelClock>,
+                    passes: &mut Vec<String>,
+                    doc: u64,
+                    writes: Option<[bool; 2]>| {
+        let claim = claim_in(registry, |op| op.doc == doc);
+        let claimable: Vec<usize> = (0..model.len())
+            .rev()
+            .filter(|&i| {
+                let c = &model[i];
+                c.state == Resolved::Open && c.pass.is_none() && c.doc == doc
+            })
+            .collect();
+        assert_eq!(claim.spans().len(), claimable.len(), "pass over doc {doc}");
+        let Some(&newest) = claimable.first() else {
+            return;
+        };
+        let trace = model[newest].trace.clone();
+        assert_eq!(
+            claim.claim.trace, trace,
+            "the pass runs in its newest claim's trace"
+        );
+        let Some(writes) = writes else {
+            drop(claim);
+            return;
+        };
+        passes.push(trace.clone());
+        for i in claimable {
+            if writes[model[i].target] {
+                model[i].pass = Some(trace.clone());
+            } else {
+                model[i].state = Resolved::Retired;
+                retired += 1;
+            }
+        }
+        claim.wrote(|target| (!writes[position(target)]).then_some(Retire::Unwritten));
+    };
+
+    for (n, step) in steps.iter().enumerate() {
+        let now = base + Duration::from_millis(n as u64);
+        match step {
+            CellStep::Commit { target, doc } => {
+                counters[*doc as usize] += 1;
+                let op = CellOp {
+                    doc: *doc,
+                    peer: 7,
+                    counter: counters[*doc as usize],
+                };
+                let trace = format!("{n:032x}");
+                enrol(
+                    &mut registry.lock().unwrap(),
+                    CELL_EDIT,
+                    CELL_TARGETS[*target],
+                    Observable::CellCommit(op),
+                    ClockOrigin::Ui,
+                    Some(Interaction {
+                        span: tracing::Span::none(),
+                        trace_id: trace.clone(),
+                        pass_trace: None,
+                    }),
+                    now,
+                );
+                model.push(ModelClock {
+                    target: *target,
+                    doc: *doc,
+                    trace,
+                    pass: None,
+                    state: Resolved::Open,
+                });
+            }
+            CellStep::Pass { doc, writes } => pass(&mut model, &mut passes, *doc, *writes),
+            CellStep::Deliver { target, pass } => {
+                let traces = match pass {
+                    Some(i) if !passes.is_empty() => vec![passes[i % passes.len()].clone()],
+                    _ => vec!["f".repeat(32)],
+                };
+                deliver(&mut model, *target, traces, now);
+            }
+        }
+        let mut open: Vec<String> = registry
+            .lock()
+            .unwrap()
+            .slot(ClockOrigin::Ui)
+            .iter()
+            .map(|p| p.interaction.as_ref().unwrap().trace_id.clone())
+            .collect();
+        open.sort();
+        let mut expected: Vec<String> = model
+            .iter()
+            .filter(|c| c.state == Resolved::Open)
+            .map(|c| c.trace.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(open, expected, "pending clocks after step {n}: {step:?}");
+    }
+
+    let now = base + Duration::from_millis(steps.len() as u64 + 1);
+    for doc in 1..=2 {
+        pass(&mut model, &mut passes, doc, Some([true, true]));
+    }
+    for target in 0..CELL_TARGETS.len() {
+        deliver(&mut model, target, passes.clone(), now);
+    }
+    assert!(
+        registry.lock().unwrap().slot(ClockOrigin::Ui).is_empty(),
+        "every keystroke is resolved after the flush"
+    );
+    assert_eq!(
+        closes + superseded + retired,
+        model.len(),
+        "each keystroke ends exactly once"
+    );
+}
+
+#[test]
+fn cell_session_examples() {
+    use CellStep::*;
+    let examples: Vec<Vec<CellStep>> = vec![
+        // The same block edited twice: the older pass's delivery closes the
+        // older commit only, never the newer one with the same content.
+        vec![
+            Commit { target: 0, doc: 1 },
+            Pass {
+                doc: 1,
+                writes: Some([true, true]),
+            },
+            Commit { target: 0, doc: 1 },
+            Deliver {
+                target: 0,
+                pass: Some(0),
+            },
+        ],
+        // A claim released by a failed pass is re-claimed by the retry; a
+        // delivery without its trace never closes it.
+        vec![
+            Commit { target: 0, doc: 1 },
+            Pass {
+                doc: 1,
+                writes: None,
+            },
+            Pass {
+                doc: 1,
+                writes: Some([true, true]),
+            },
+            Deliver {
+                target: 0,
+                pass: None,
+            },
+            Deliver {
+                target: 0,
+                pass: Some(1),
+            },
+        ],
+        // The same peer and counter in both docs: a pass of the layout doc
+        // never claims the global doc's commit.
+        vec![
+            Commit { target: 0, doc: 1 },
+            Commit { target: 1, doc: 2 },
+            Pass {
+                doc: 2,
+                writes: Some([true, true]),
+            },
+            Deliver {
+                target: 0,
+                pass: Some(0),
+            },
+        ],
+        // A pass that wrote nothing for the block retires its keystroke.
+        vec![
+            Commit { target: 0, doc: 1 },
+            Commit { target: 1, doc: 1 },
+            Pass {
+                doc: 1,
+                writes: Some([false, true]),
+            },
+            Deliver {
+                target: 0,
+                pass: Some(0),
+            },
+            Pass {
+                doc: 1,
+                writes: Some([true, true]),
+            },
+        ],
+        // Coalesced: three keystrokes, one pass, one close and two superseded.
+        vec![
+            Commit { target: 0, doc: 1 },
+            Commit { target: 0, doc: 1 },
+            Commit { target: 0, doc: 1 },
+            Pass {
+                doc: 1,
+                writes: Some([true, false]),
+            },
+            Deliver {
+                target: 1,
+                pass: Some(0),
+            },
+            Deliver {
+                target: 0,
+                pass: Some(0),
+            },
+        ],
+    ];
+    for steps in examples {
+        check_cell_session(&steps);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+    #[test]
+    fn cell_session_closes_each_keystroke_once_by_its_pass_trace(
+        steps in proptest::collection::vec(cell_step(), 0..40)
+    ) {
+        check_cell_session(&steps);
+    }
+}
+
+/// One block-mirror batch after a split: its rows, each created or updated,
+/// and which of the two traces (the split's, a foreign one) it carries.
+#[derive(Clone, Debug)]
+struct SplitBatch {
+    rows: Vec<(bool, usize)>,
+    traces: [bool; 2],
+}
+
+const SPLIT_ROWS: [&str; 3] = ["block:source", "block:new", "block:other"];
+
+fn split_batch() -> impl Strategy<Value = SplitBatch> {
+    (
+        proptest::collection::vec((any::<bool>(), 0..3usize), 0..4),
+        any::<[bool; 2]>(),
+    )
+        .prop_map(|(rows, traces)| SplitBatch { rows, traces })
+}
+
+/// A split's clock closes exactly once, on the first batch that carries the
+/// split's trace, or the trace of a pass that `linked` its commit, and creates
+/// a row; a batch of the source row, a batch without either trace, or one
+/// that only updates rows leaves it open.
+fn check_split(linked: bool, batches: &[SplitBatch]) {
+    let registry: &'static Mutex<Registry> = Box::leak(Box::default());
+    let now = Instant::now();
+    let trace = format!("{:032x}", 1);
+    let traces = [trace.clone(), format!("{:032x}", 2)];
+    enrol(
+        &mut registry.lock().unwrap(),
+        "split_block",
+        SPLIT_ROWS[0],
+        Observable::of_block_op("split_block", &HashMap::new()),
+        ClockOrigin::Ui,
+        Some(Interaction {
+            span: tracing::Span::none(),
+            trace_id: trace.clone(),
+            pass_trace: None,
+        }),
+        now,
+    );
+    if linked {
+        link_rows(
+            registry.lock().unwrap().slot(ClockOrigin::Ui),
+            &[trace],
+            &traces[1],
+        );
+    }
+    let mut open = true;
+    for batch in batches {
+        let changes: Vec<crate::Change<crate::StorageEntity>> = batch
+            .rows
+            .iter()
+            .map(|&(created, row)| {
+                let mut data = crate::StorageEntity::new();
+                data.insert(
+                    "id".into(),
+                    crate::Value::String(SPLIT_ROWS[row].to_string()),
+                );
+                let origin = crate::ChangeOrigin::Local {
+                    operation_id: None,
+                    trace_id: None,
+                };
+                if created {
+                    crate::Change::Created { data, origin }
+                } else {
+                    crate::Change::Updated {
+                        id: SPLIT_ROWS[row].to_string(),
+                        data,
+                        origin,
+                    }
+                }
+            })
+            .collect();
+        let carried: Vec<&str> = (0..2)
+            .filter(|&i| batch.traces[i])
+            .map(|i| traces[i].as_str())
+            .collect();
+        let deliveries = touched_entities("block", &changes);
+        let mut registry = registry.lock().unwrap();
+        let slot = registry.slot(ClockOrigin::Ui);
+        let closed = close_batch(slot, &deliveries, &carried, now, now);
+        let closes = open
+            && (batch.traces[0] || (linked && batch.traces[1]))
+            && batch.rows.iter().any(|&(created, _)| created);
+        assert_eq!(closed.len(), usize::from(closes), "{batch:?}");
+        if closes {
+            assert_eq!(closed[0].action, "split_block");
+            assert_eq!(closed[0].target, SPLIT_ROWS[0]);
+            open = false;
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+    #[test]
+    fn a_split_closes_once_on_its_new_row_in_its_own_or_its_linking_pass_trace(
+        linked in any::<bool>(),
+        batches in proptest::collection::vec(split_batch(), 0..8)
+    ) {
+        check_split(linked, &batches);
+    }
+}
+
+/// One set_field clock on one block, oldest first: whether a pass linked its
+/// commit, and whether the batch carries its own trace.
+type RowClock = (bool, bool);
+
+/// A batch with one row of the block, under the traces it carries: the own
+/// traces marked carried, plus the linking pass's when `pass_carried`. The row
+/// carries the token of clock `token`, or none.
+/// Property: a token closes its own clock; else the newest clock the batch
+/// carries closes, by its own trace or the linking pass's, or the newest of
+/// all when the batch has no trace; every older clock on the block is
+/// superseded, and nothing else closes.
+fn check_row_close(clocks: &[RowClock], pass_carried: bool, token: Option<usize>) {
+    let registry: &'static Mutex<Registry> = Box::leak(Box::default());
+    let base = Instant::now();
+    let trace = |i: usize| format!("{:032x}", i + 1);
+    let pass = format!("{:032x}", 0xff);
+    for (i, &(linked, _)) in clocks.iter().enumerate() {
+        let mut registry = registry.lock().unwrap();
+        enrol(
+            &mut registry,
+            &format!("set_field-{i}"),
+            "block:a",
+            row(Some(i as i64 + 1)),
+            ClockOrigin::Ui,
+            Some(Interaction {
+                span: tracing::Span::none(),
+                trace_id: trace(i),
+                pass_trace: None,
+            }),
+            base + Duration::from_millis(i as u64),
+        );
+        if linked {
+            link_rows(registry.slot(ClockOrigin::Ui), &[trace(i)], &pass);
+        }
+    }
+    let own: Vec<String> = (0..clocks.len())
+        .filter(|&i| clocks[i].1)
+        .map(trace)
+        .collect();
+    let carried: Vec<&str> = own
+        .iter()
+        .map(String::as_str)
+        .chain(pass_carried.then_some(pass.as_str()))
+        .collect();
+    let token = token.filter(|&k| k < clocks.len());
+    let winner = token.or_else(|| {
+        (0..clocks.len())
+            .rev()
+            .find(|&i| carried.is_empty() || clocks[i].1 || (clocks[i].0 && pass_carried))
+    });
+    let now = base + Duration::from_secs(1);
+    let mut registry = registry.lock().unwrap();
+    let slot = registry.slot(ClockOrigin::Ui);
+    let delivered = row(token.map(|k| k as i64 + 1));
+    let closed = close_batch(
+        slot,
+        &[("block:a".to_string(), delivered)],
+        &carried,
+        now,
+        now,
+    );
+    let closed: Vec<(String, usize)> = closed
+        .iter()
+        .map(|c| (c.action.clone(), c.superseded.ages_ms().len()))
+        .collect();
+    let expected: Vec<(String, usize)> = winner
+        .map(|w| (format!("set_field-{w}"), w))
+        .into_iter()
+        .collect();
+    assert_eq!(
+        closed, expected,
+        "{clocks:?} pass carried {pass_carried} token {token:?}"
+    );
+    assert_eq!(slot.len(), clocks.len() - winner.map_or(0, |w| w + 1));
+}
+
+/// Three keystrokes in flight on one block, the batch of the first one's pass
+/// arriving before the others commit; a linked commit; a token under another
+/// trace.
+#[test]
+fn row_close_examples() {
+    check_row_close(
+        &[(false, true), (false, false), (false, false)],
+        false,
+        None,
+    );
+    check_row_close(&[(true, false), (false, false)], true, None);
+    check_row_close(&[(false, false), (false, true)], false, Some(0));
+}
+
+proptest! {
+    #[test]
+    fn a_row_closes_its_tokens_clock_or_the_newest_clock_its_batch_carries(
+        clocks in proptest::collection::vec((any::<bool>(), any::<bool>()), 1..6),
+        pass_carried in any::<bool>(),
+        token in prop::option::of(0usize..6),
+    ) {
+        check_row_close(&clocks, pass_carried, token);
+    }
+}
+
+proptest! {
+    /// Without an OpenTelemetry trace every block op, a split included, waits
+    /// on its target's row with the op's own `write_seq`.
+    #[test]
+    fn without_a_trace_a_block_op_waits_on_its_targets_row_with_its_write_seq(
+        op in prop::sample::select(vec!["split_block", "set_field", "indent"]),
+        seq in prop::option::of(1i64..i64::MAX),
+    ) {
+        let target = format!("block:no-trace-{op}-{seq:?}");
+        let params: HashMap<String, crate::Value> = seq
+            .map(|s| ("write_seq".to_string(), crate::Value::Integer(s)))
+            .into_iter()
+            .collect();
+        interaction_dispatched(op, &target, Observable::of_block_op(op, &params), ClockOrigin::Ui);
+        let mut pending = PENDING.lock().unwrap();
+        let mine: Vec<Observable> = pending.iter().filter(|p| p.target == target).map(|p| p.observable).collect();
+        pending.ui.retain(|p| p.target != target);
+        prop_assert_eq!(mine, vec![Observable::BlockRow(seq.map(WriteSeq::from_i64))]);
+    }
+}
+
+/// How a pass read the commit of one pending clock.
+#[derive(Clone, Copy, Debug)]
+enum ReadAs {
+    /// A cell commit the pass claimed.
+    Claimed,
+    /// A block-row commit the pass linked.
+    Linked,
+    /// A block-row commit of another pass.
+    Neither,
+}
+
+proptest! {
+    /// A pass retires a claimed cell clock and a linked block-row clock for
+    /// any reason it names, and nothing else.
+    #[test]
+    fn a_pass_retires_exactly_the_clocks_it_made_nothing_visible_for(
+        read in prop::sample::select(vec![ReadAs::Claimed, ReadAs::Linked, ReadAs::Neither]),
+        retire in prop::option::of(prop::sample::select(vec![
+            Retire::Unwritten,
+            Retire::NoVisibleChange,
+        ])),
+    ) {
+        let registry: &'static Mutex<Registry> = Box::leak(Box::default());
+        let now = Instant::now();
+        let trace = format!("{:032x}", 1);
+        let op = CellOp { doc: 1, peer: 7, counter: 1 };
+        let (action, observable) = match read {
+            ReadAs::Claimed => (CELL_EDIT, Observable::CellCommit(op)),
+            ReadAs::Linked | ReadAs::Neither => ("set_field", row(None)),
+        };
+        enrol(
+            &mut registry.lock().unwrap(),
+            action,
+            "block:a",
+            observable,
+            ClockOrigin::Ui,
+            Some(Interaction {
+                span: tracing::Span::none(),
+                trace_id: trace.clone(),
+                pass_trace: None,
+            }),
+            now,
+        );
+        let claim = Claim {
+            claimed: match read {
+                ReadAs::Claimed => vec![(op, "block:a".to_string())],
+                _ => Vec::new(),
+            },
+            linked: match read {
+                ReadAs::Linked => vec![trace],
+                _ => Vec::new(),
+            },
+            ..Claim::default()
+        };
+        let mut registry = registry.lock().unwrap();
+        let retired = retire_invisible(registry.slot(ClockOrigin::Ui), &claim, |_| retire, now);
+        let expected = match (read, retire) {
+            (ReadAs::Claimed, Some(reason)) => Some(reason),
+            (ReadAs::Linked, Some(reason)) => Some(reason),
+            _ => None,
+        };
+        prop_assert_eq!(retired.iter().map(|r| r.reason).collect::<Vec<_>>(), Vec::from_iter(expected));
+        prop_assert_eq!(registry.slot(ClockOrigin::Ui).len(), usize::from(expected.is_none()));
+    }
 }

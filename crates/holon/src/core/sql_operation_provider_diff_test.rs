@@ -666,3 +666,116 @@ async fn both_stores_refuse_the_same_non_finite_float_write() {
         }
     }
 }
+
+/// A content-only update of a block whose previous content was `old`: the
+/// sink stored `old` canonicalized as `stored_as_source` (a source block may
+/// have been written either way), and the new content is `new`.
+#[derive(Debug, Clone)]
+struct ContentOnlyUpdate {
+    old: String,
+    old_type: holon_api::types::ContentType,
+    stored_as_source: bool,
+    new: String,
+}
+
+fn content_only_update() -> impl proptest::strategy::Strategy<Value = ContentOnlyUpdate> {
+    use holon_api::types::ContentType;
+    use proptest::prelude::*;
+    let pad = || proptest::sample::select(vec!["", " ", "\t", "  "]);
+    let line = (
+        pad(),
+        "[ab]{0,2}",
+        proptest::sample::select(vec!["", " ", "\t"]),
+        "[ab]{0,2}",
+        pad(),
+    )
+        .prop_map(|(l, w1, inner, w2, r)| format!("{l}{w1}{inner}{w2}{r}"));
+    let old_type = prop_oneof![Just(ContentType::Text), Just(ContentType::Source)];
+    (
+        proptest::collection::vec(line, 1..=3),
+        old_type,
+        any::<bool>(),
+        any::<prop::sample::Index>(),
+        proptest::sample::select(vec!["start", "end", "inner"]),
+        proptest::sample::select(vec![' ', '\t', '\n', '\r', 'x']),
+    )
+        .prop_map(|(lines, old_type, as_source, at, place, ch)| {
+            let mut new_lines = lines.clone();
+            let line = &mut new_lines[at.index(lines.len())];
+            match place {
+                "start" => line.insert(0, ch),
+                "end" => line.push(ch),
+                _ => line.insert(line.len() / 2, ch),
+            }
+            ContentOnlyUpdate {
+                old: lines.join("\n"),
+                stored_as_source: old_type == ContentType::Source && as_source,
+                old_type,
+                new: new_lines.join("\n"),
+            }
+        })
+}
+
+/// The projection retires a clock as `no_visible_change` only when the sink
+/// writes nothing (a wrong retire is a silent sample loss), and for every
+/// block whose stored kind it can know, exactly then.
+#[test]
+fn a_content_only_update_is_named_unwritten_iff_the_sink_writes_nothing() {
+    use holon_api::content_canonical::canonicalize_stored_content;
+    use holon_api::types::ContentType;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let check =
+        |case: ContentOnlyUpdate| -> std::result::Result<(), proptest::test_runner::TestCaseError> {
+            let stored = canonicalize_stored_content(&case.old, case.stored_as_source);
+            let unwritten = rt.block_on(async {
+                let (_backend, _handle, provider, id) =
+                    make_provider_with_block(&stored, None, 1000).await;
+                let mut params = holon_api::StorageEntity::new();
+                params.insert("id".into(), Value::String(id));
+                params.insert("content".into(), Value::String(case.new.clone()));
+                params.insert("updated_at".into(), Value::Integer(99999));
+                provider
+                    .prepare_update(&params)
+                    .await
+                    .expect("prepare_update")
+                    .is_none()
+            });
+            let named = holon_loro::loro_sync_controller::content_update_unwritten(
+                &case.old,
+                case.old_type,
+                &case.new,
+            );
+            let kinds_agree = case.old_type == ContentType::Text
+                || canonicalize_stored_content(&case.old, true)
+                    == canonicalize_stored_content(&case.old, false);
+            proptest::prop_assert!(!named || unwritten, "named but the sink writes: {case:?}");
+            if kinds_agree {
+                proptest::prop_assert_eq!(named, unwritten, "{:?}", case);
+            }
+            Ok(())
+        };
+    let fixed = [
+        ("end ß", ContentType::Text, false, "end ß "),
+        (" a", ContentType::Text, false, "  a"),
+        ("a\nb", ContentType::Text, false, "a\nb "),
+        ("a\nb\nc", ContentType::Text, false, "a\n b\nc"),
+        ("a b", ContentType::Text, false, "a  b"),
+        ("a\n b", ContentType::Source, true, "a\n b "),
+        (" a", ContentType::Source, true, "  a"),
+    ];
+    for (old, old_type, stored_as_source, new) in fixed {
+        check(ContentOnlyUpdate {
+            old: old.to_string(),
+            old_type,
+            stored_as_source,
+            new: new.to_string(),
+        })
+        .unwrap_or_else(|e| panic!("fixed case {old:?} -> {new:?}: {e}"));
+    }
+    proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(96))
+        .run(&content_only_update(), check)
+        .expect("generated cases");
+}

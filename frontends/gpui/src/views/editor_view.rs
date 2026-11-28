@@ -453,8 +453,18 @@ impl EditorView {
                         // otherwise. The adapter does not need to know which —
                         // both are plain fire-and-forget `set_field`s, and the
                         // store's parse is the only thing that reads a keyword.
-                        match ctrl.lock().unwrap().apply_local_edit(&text) {
-                            Ok(Some(intent)) => services_clone.dispatch_intent(intent),
+                        match holon_frontend::editor_view_model::dispatch_text_change(
+                            &mut ctrl.lock().unwrap(),
+                            services_clone.as_ref(),
+                            &text,
+                        ) {
+                            Ok(Some(key)) => {
+                                // The span ends when the next frame starts,
+                                // before its draw.
+                                let echo =
+                                    tracing::info_span!(parent: &key, "editor.local_echo_frame");
+                                window.on_next_frame(move |_, _| drop(echo));
+                            }
                             Ok(None) => {}
                             Err(e) => {
                                 tracing::error!("apply_local_edit failed: {e}");
@@ -1232,20 +1242,6 @@ fn structural_target(services: &Arc<dyn BuilderServices>, row_id: &str) -> Optio
     }
 }
 
-fn dispatch_structural_as_commit_point(
-    ctrl: &Arc<Mutex<EditorViewModel>>,
-    services: &Arc<dyn BuilderServices>,
-    live_text: &str,
-    structural: holon_frontend::operations::OperationIntent,
-) {
-    let commit = ctrl.lock().unwrap().chord_commit_intent(live_text);
-    let intents: Vec<_> = commit
-        .into_iter()
-        .chain(std::iter::once(structural))
-        .collect();
-    holon_frontend::reactive::dispatch_intent_chain(services, intents);
-}
-
 /// Grab window keyboard focus for `input` (if it doesn't already own it) and
 /// place the caret at the pending seed offset armed for `row`.
 ///
@@ -1555,7 +1551,7 @@ impl Render for EditorView {
                             if let Some(intent) =
                                 structural_block_action(EditorKey::Enter, &target_id, caret)
                             {
-                                dispatch_structural_as_commit_point(
+                                holon_frontend::editor_view_model::dispatch_structural_key(
                                     &ctrl, &services, &live_text, intent,
                                 );
                             }
@@ -1652,7 +1648,9 @@ impl Render for EditorView {
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();
-                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                        holon_frontend::editor_view_model::dispatch_structural_key(
+                            &ctrl, &services, &live_text, intent,
+                        );
                     }
                     cx.stop_propagation();
                 }
@@ -1676,7 +1674,9 @@ impl Render for EditorView {
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();
-                        dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                        holon_frontend::editor_view_model::dispatch_structural_key(
+                            &ctrl, &services, &live_text, intent,
+                        );
                     }
                     cx.stop_propagation();
                 }
@@ -1773,7 +1773,9 @@ impl Render for EditorView {
                         journal.settle(seq, Ok(()));
                     }
                     let live_text = input.read(cx).value().to_string();
-                    dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
+                    holon_frontend::editor_view_model::dispatch_structural_key(
+                        &ctrl, &services, &live_text, intent,
+                    );
                     cx.stop_propagation();
                 }
             })

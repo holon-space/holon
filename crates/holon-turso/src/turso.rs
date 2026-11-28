@@ -2697,16 +2697,6 @@ impl TursoBackend {
         catalog: &SchemaCatalog,
     ) -> BatchWithMetadata<RowChange> {
         let mut raw_changes = Vec::new();
-        // First-seen order, deduplicated: the batch is attributed to the first
-        // writer and linked to the rest (ruling D3.a).
-        let mut origins: Vec<BatchTraceContext> = Vec::new();
-        fn record(origins: &mut Vec<BatchTraceContext>, origin: &ChangeOrigin) {
-            if let Some(ctx) = origin.to_batch_trace_context()
-                && !origins.contains(&ctx)
-            {
-                origins.push(ctx);
-            }
-        }
 
         // Convert column names to Arc<str> once per event; rows below only
         // Arc::clone
@@ -2794,7 +2784,6 @@ impl TursoBackend {
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
-                        record(&mut origins, &origin);
                         ChangeData::Created { data, origin }
                     }
                     Err(e) => {
@@ -2830,7 +2819,6 @@ impl TursoBackend {
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
-                        record(&mut origins, &origin);
                         let entity_id = data
                             .get("id")
                             .and_then(|v| match v {
@@ -2884,7 +2872,6 @@ impl TursoBackend {
                             })
                             .unwrap_or_else(|| change.id.to_string());
                         let origin = extract_change_origin_from_data(&data);
-                        record(&mut origins, &origin);
                         ChangeData::Deleted {
                             id: entity_id,
                             origin,
@@ -2924,6 +2911,24 @@ impl TursoBackend {
         }
 
         let coalesced_changes = coalesce_row_changes(raw_changes);
+        // First-seen order, deduplicated: the batch is attributed to the first
+        // writer and linked to the rest (ruling D3.a). Read after coalescing:
+        // a DELETE-then-INSERT update carries the old row's origin on its
+        // delete, which names the previous writer, not this one.
+        let mut origins: Vec<BatchTraceContext> = Vec::new();
+        for change in &coalesced_changes {
+            let origin = match &change.change {
+                ChangeData::Created { origin, .. }
+                | ChangeData::Updated { origin, .. }
+                | ChangeData::Deleted { origin, .. }
+                | ChangeData::FieldsChanged { origin, .. } => origin,
+            };
+            if let Some(ctx) = origin.to_batch_trace_context()
+                && !origins.contains(&ctx)
+            {
+                origins.push(ctx);
+            }
+        }
         let batch = Batch {
             items: coalesced_changes,
         };

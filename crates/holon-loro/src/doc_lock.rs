@@ -35,7 +35,13 @@ use crate::stable_id_index::StableIds;
 const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30);
 
 /// Identity of the inner doc a lock guards. Stable for the doc's lifetime.
-type DocKey = usize;
+pub(crate) type DocKey = usize;
+
+/// The [`DocKey`] of `doc`: every holder of one document shares one
+/// `Arc<LoroDoc>`, so its address names the document.
+pub(crate) fn doc_key(doc: &LoroDoc) -> DocKey {
+    std::ptr::from_ref(doc) as DocKey
+}
 
 /// Runs on the reading thread each time an outermost read guard is released.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -80,7 +86,7 @@ fn registry() -> std::sync::MutexGuard<'static, HashMap<DocKey, Entry>> {
 /// Keyed like [`mutate_guarded`], so a `WriteTxn` reaches its doc's index.
 pub(crate) fn stable_ids_of(doc: &LoroDoc) -> Option<StableIds> {
     registry()
-        .get(&(std::ptr::from_ref(doc) as DocKey))
+        .get(&doc_key(doc))
         .filter(|entry| entry.doc.strong_count() > 0)
         .map(|entry| entry.stable_ids.clone())
 }
@@ -88,7 +94,7 @@ pub(crate) fn stable_ids_of(doc: &LoroDoc) -> Option<StableIds> {
 /// Drops `doc`'s entry, and with it the doc's stable-id index. For the last
 /// holder of `doc`, which is about to free it.
 pub(crate) fn forget(doc: &Arc<LoroDoc>) {
-    let entry = registry().remove(&(Arc::as_ptr(doc) as DocKey));
+    let entry = registry().remove(&doc_key(doc));
     drop(entry);
 }
 
@@ -96,7 +102,7 @@ impl DocLock {
     /// The lock for `doc`, creating it on first sight. Any two `LoroDocument`s
     /// wrapping the same `Arc<LoroDoc>` receive the same lock.
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
-        let key = Arc::as_ptr(doc) as DocKey;
+        let key = doc_key(doc);
         let mut map = registry();
         // A doc whose last holder was a raw `Arc` leaves its entry; a live
         // `Arc` pins its address, so a dead entry never holds a lock still in
@@ -160,7 +166,7 @@ pub(crate) fn mutate_guarded<R>(
     what: &str,
     f: impl FnOnce() -> Result<R>,
 ) -> Result<R> {
-    if held(std::ptr::from_ref(doc) as DocKey).writes == 0 {
+    if held(doc_key(doc)).writes == 0 {
         bail!(
             "{what} ran without the document write guard. Its ops stay pending in the \
              document's shared transaction until some other writer commits them under \

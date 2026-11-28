@@ -76,6 +76,17 @@ CEILING_LINE = re.compile(
 REPORT_LINE = re.compile(r'^\s*report\.(e2e|total)\.(p50|p95)\.([A-Za-z_][\w]*)\s*$')
 
 
+# The e2e action of each editor interaction root, as a fmt line's span
+# context names it (`interaction.key{key="text" ...}:`). The json format is not
+# parsed (see `parse`).
+KEY_ROOTS = {
+    "cell_edit": re.compile(r'interaction\.cell_edit'),
+    "set_field": re.compile(r'interaction\.key\{[^}]*\bkey="?text\b'),
+    "split_block": re.compile(r'interaction\.key\{[^}]*\bkey="?split_block\b'),
+}
+KEY_ACTIONS = ("set_field", "split_block", "cell_edit")
+
+
 def parse(line):
     line = ANSI.sub("", line)
     if "holon_latency" not in line or "stage=" not in line:
@@ -256,7 +267,10 @@ def main():
     feed_progress_ticks = 0
     feed_progress_max = (0, 0)  # (present, expected) at the furthest tick
 
+    roots_seen = set()
     for line in src:
+        plain = ANSI.sub("", line)
+        roots_seen.update(a for a, root in KEY_ROOTS.items() if root.search(plain))
         f = parse(line)
         if not f:
             continue
@@ -345,6 +359,21 @@ def main():
     if dispatch_by_action:
         table("DISPATCH stage  action -> op applied  (stage=dispatch)", dispatch_by_action)
 
+    print("\n== KEY EVENT STAGES  (ui origin) ==")
+    print(f"{'action':<14}{'stage':<10}{'n':>6}{'p50':>9}{'p95':>9}  (ms)")
+    print("-" * 72)
+    for action in KEY_ACTIONS:
+        for stage, by_action in (("dispatch", dispatch_by_action), ("e2e", e2e_by_action)):
+            if by_action.get(action):
+                n, p50, p95, _, _ = stats(by_action[action])
+                print(f"{action:<14}{stage:<10}{n:>6}{p50:>9.1f}{p95:>9.1f}")
+    unclosed = [a for a in KEY_ACTIONS if a in roots_seen and not e2e_by_action.get(a)]
+    for action in unclosed:
+        print(f"RUN INVALID: `{action}` key events are in the capture but no "
+              f"stage=e2e sample of them: the capture lacks the otlp layer "
+              f"(HOLON_LOG=...,otlp) the e2e close rides on, or holon_latency is "
+              f"held at warn (HOLON_LATENCY_SLO=1).", file=sys.stderr)
+
     print("\n== PIPELINE STAGE COST (global, all actions) ==")
     print(f"{'stage':<28}{'n':>6}{'p50':>9}{'p95':>9}{'max':>9}{'mean':>9}  (ms)")
     print("-" * 72)
@@ -409,6 +438,9 @@ def main():
         print(f"\nDOMINATOR: projection accounts for {proj_sum:.0f}ms across "
               f"{len(proj_ms)} passes vs {tot_sum:.0f}ms of end-to-end action wall "
               f"({100*proj_sum/tot_sum:.0f}% of total action time).")
+
+    if unclosed:
+        sys.exit(3)
 
     if max_contention > 0:
         c = contention_ms(misc_by_stage)

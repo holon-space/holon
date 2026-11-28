@@ -57,6 +57,7 @@ use holon_views::engine::ViewEngine;
 use loro::Frontiers;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -382,6 +383,102 @@ pub fn projection_degraded_key() -> holon_conditions::condition_bus::ConditionKe
     holon_conditions::condition_bus::ConditionKey {
         subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
         kind: holon_conditions::condition_bus::ConditionKind::SQL_PROJECTION_FAILED,
+    }
+}
+
+/// Whether the SQL sink writes nothing for a content-only update to
+/// `new_content` of a block whose previous content was `old_content`. Such an
+/// op carries no `content_type`, so the sink canonicalizes it as text. A text
+/// block was always stored as text; a source block may have been stored as
+/// either kind, so for it only a content both kinds store alike counts.
+pub fn content_update_unwritten(
+    old_content: &str,
+    old_type: ContentType,
+    new_content: &str,
+) -> bool {
+    use holon_api::content_canonical::canonicalize_stored_content;
+    let stored = canonicalize_stored_content(old_content, false);
+    let one_kind =
+        old_type != ContentType::Source || stored == canonicalize_stored_content(old_content, true);
+    one_kind && canonicalize_stored_content(new_content, false) == stored
+}
+
+/// The blocks `ops` name.
+fn op_ids(ops: &[(String, holon_api::StorageEntity)]) -> HashSet<String> {
+    ops.iter()
+        .filter_map(|(_, params)| params.get("id").and_then(|v| v.as_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The blocks whose update changes only `content` and leaves their row in
+/// `base`, the rows `ops` were diffed against, as it is, per
+/// [`content_update_unwritten`].
+fn unchanged_rows(
+    ops: &[(String, holon_api::StorageEntity)],
+    base: &HashMap<String, SnapshotBlock>,
+) -> HashSet<String> {
+    ops.iter()
+        .filter(|(name, params)| {
+            name == "update"
+                && params
+                    .keys()
+                    .all(|k| matches!(&**k, "id" | "content" | "updated_at"))
+        })
+        .filter_map(|(_, params)| {
+            let id = params.get("id")?.as_string()?;
+            let content = params.get("content")?.as_string()?;
+            let old = &base.get(id)?.block;
+            content_update_unwritten(&old.content, old.content_type, content)
+                .then(|| id.to_string())
+        })
+        .collect()
+}
+
+/// The rows a pass's ops were diffed against.
+enum PassBase<'a> {
+    /// Sink truth. `live` may lag it: a full pass that does not seed `live`
+    /// (`may_seed_live`) leaves it behind that pass's writes.
+    Full {
+        before: &'a HashMap<String, SnapshotBlock>,
+    },
+    /// `live` itself.
+    Incremental,
+}
+
+/// What a pass made visible, per block, for retiring the clocks it claimed.
+struct PassRetire {
+    diffed: HashSet<String>,
+    unchanged: HashSet<String>,
+}
+
+impl PassRetire {
+    fn reason(&self, id: &str) -> Option<holon_api::latency_e2e::Retire> {
+        if !self.diffed.contains(id) {
+            Some(holon_api::latency_e2e::Retire::Unwritten)
+        } else if self.unchanged.contains(id) {
+            Some(holon_api::latency_e2e::Retire::NoVisibleChange)
+        } else {
+            None
+        }
+    }
+}
+
+/// `ops` is the diff BEFORE the withhold gates: a withheld op is owed to a
+/// later pass, so its block is not unwritten. The gates only drop ops and
+/// never a content-only update, so `unchanged` is the same either side.
+fn pass_retire(
+    base: PassBase<'_>,
+    live: &HashMap<String, SnapshotBlock>,
+    ops: &[(String, holon_api::StorageEntity)],
+) -> PassRetire {
+    let base = match base {
+        PassBase::Full { before } => before,
+        PassBase::Incremental => live,
+    };
+    PassRetire {
+        diffed: op_ids(ops),
+        unchanged: unchanged_rows(ops, base),
     }
 }
 
@@ -853,6 +950,11 @@ pub struct LoroProjection {
     /// The typed entities the Global doc's commits changed and the sink has not
     /// received yet, as `(type root, store key)`.
     entity_pending: Arc<StdMutex<std::collections::BTreeSet<(String, String)>>>,
+    /// The spans each Global / Layout doc commit ran under, queued with its
+    /// facts and taken by the read that covers it.
+    commit_spans: [Arc<StdMutex<Vec<tracing::Span>>>; 2],
+    /// The commit spans this pass's reads took: the pass runs under them.
+    pass_spans: StdMutex<Vec<tracing::Span>>,
     entity_sink: Option<Arc<dyn crate::loro_entity_operations::TypedEntitySink>>,
     #[cfg(any(test, feature = "test-helpers"))]
     read_seam: StdMutex<Option<ReadSeam>>,
@@ -863,13 +965,22 @@ pub struct LoroProjection {
 type ReadSeam = Arc<dyn Fn(CommitSource) + Send + Sync>;
 
 /// One incremental read: how many facts it drained, the blocks it changed,
-/// whether the doc settled, and the frontier it read up to.
+/// whether the doc settled, the frontier it read up to, and what it covers.
 type IncrementalRead = (
     usize,
     HashMap<String, Option<SnapshotBlock>>,
     bool,
     Frontiers,
+    ReadCover,
 );
+
+/// The ops one read of one document saw: its doc key and version vector,
+/// read under the same guard as the read's data.
+type ReadCover = (u64, loro::VersionVector);
+
+fn read_cover(doc: &loro::LoroDoc) -> ReadCover {
+    (crate::doc_lock::doc_key(doc) as u64, doc.oplog_vv())
+}
 
 impl LoroProjection {
     #[allow(clippy::too_many_arguments)] // DI wiring; each arg is a distinct subsystem
@@ -917,6 +1028,8 @@ impl LoroProjection {
             views_engine,
             unreadable_raised: StdMutex::new(HashSet::new()),
             entity_pending: Arc::new(StdMutex::new(Default::default())),
+            commit_spans: Default::default(),
+            pass_spans: StdMutex::new(Vec::new()),
             entity_sink: None,
             #[cfg(any(test, feature = "test-helpers"))]
             read_seam: StdMutex::new(None),
@@ -988,18 +1101,20 @@ impl LoroProjection {
         // never read doc state.
         let (collab_doc, layout_doc) = (collab.doc(), layout.doc());
 
-        for (doc, queue, entity_queue, source) in [
+        for (doc, queue, entity_queue, source, spans) in [
             (
                 &collab_doc,
                 self.pending.clone(),
                 Some(self.entity_pending.clone()),
                 CommitSource::LoroGlobal,
+                self.commit_spans[0].clone(),
             ),
             (
                 &layout_doc,
                 self.layout_pending.clone(),
                 None,
                 CommitSource::LoroLayout,
+                self.commit_spans[1].clone(),
             ),
         ] {
             let wake = self.wake.clone();
@@ -1010,6 +1125,10 @@ impl LoroProjection {
                     unguarded_delivery(source, &event);
                 }
                 clock.mint(source);
+                let committing = tracing::Span::current();
+                if !committing.is_disabled() {
+                    spans.lock().unwrap().push(committing);
+                }
                 let mut facts = crate::loro_backend::extract_pending_changes(&event);
                 if !facts.is_empty() {
                     queue.lock().unwrap().append(&mut facts);
@@ -1234,10 +1353,19 @@ impl LoroProjection {
         if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
-            let (global_facts, mut changed, mut settled, current) =
-                self.read_incremental(&collab, &self.pending, CommitSource::LoroGlobal)?;
-            let (layout_facts, layout_changed, layout_settled, layout_current) =
-                self.read_incremental(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
+            let (global_facts, mut changed, mut settled, current, cover) = self.read_incremental(
+                &collab,
+                &self.pending,
+                &self.commit_spans[0],
+                CommitSource::LoroGlobal,
+            )?;
+            let (layout_facts, layout_changed, layout_settled, layout_current, layout_cover) = self
+                .read_incremental(
+                    &layout,
+                    &self.layout_pending,
+                    &self.commit_spans[1],
+                    CommitSource::LoroLayout,
+                )?;
 
             // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
             if global_facts == 0
@@ -1415,15 +1543,19 @@ impl LoroProjection {
                         );
                     } else {
                         let snapshot_ms = t0.elapsed().as_millis();
+                        let retire =
+                            pass_retire(PassBase::Incremental, &self.live.lock().unwrap(), &ops);
                         let written = match self
                             .emit_ops(
                                 ops,
+                                retire,
                                 &t0,
                                 snapshot_ms,
                                 after_len,
                                 before_len,
                                 "incremental",
                                 "incremental",
+                                [cover, layout_cover],
                             )
                             .await
                         {
@@ -1498,10 +1630,18 @@ impl LoroProjection {
         // and re-establishes `live == block_raw` on success. This path is not
         // steady-state (cold boot / unsettled / orphan / oversized bootstrap),
         // so the extra sink read is not on the hot path.
-        let (mut after, mut after_settled, current) =
-            self.read_full(&collab, &self.pending, CommitSource::LoroGlobal)?;
-        let (layout_after, layout_settled, layout_current) =
-            self.read_full(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
+        let (mut after, mut after_settled, current, cover) = self.read_full(
+            &collab,
+            &self.pending,
+            &self.commit_spans[0],
+            CommitSource::LoroGlobal,
+        )?;
+        let (layout_after, layout_settled, layout_current, layout_cover) = self.read_full(
+            &layout,
+            &self.layout_pending,
+            &self.commit_spans[1],
+            CommitSource::LoroLayout,
+        )?;
         after_settled &= layout_settled;
         for (id, snap) in layout_after {
             // The two docs partition the block set. An id in both is an
@@ -1536,6 +1676,11 @@ impl LoroProjection {
         let snapshot_ms = t0.elapsed().as_millis();
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
+        let retire = pass_retire(
+            PassBase::Full { before: &before },
+            &self.live.lock().unwrap(),
+            &ops,
+        );
 
         // Delete-pass gate. An unsettled snapshot withholds every delete: a
         // live node was transiently meta-incomplete, so a still-live block
@@ -1629,12 +1774,14 @@ impl LoroProjection {
         let written = match self
             .emit_ops(
                 ops,
+                retire,
                 &t0,
                 snapshot_ms,
                 after_len,
                 before_len,
                 "full",
                 full_reason,
+                [cover, layout_cover],
             )
             .await
         {
@@ -1735,12 +1882,18 @@ impl LoroProjection {
         &self,
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
+        spans: &StdMutex<Vec<tracing::Span>>,
         source: CommitSource,
     ) -> Result<IncrementalRead> {
         let mut unreadable = Vec::new();
-        let (facts, frontier, cover, (changed, settled)) = doc.with_read(|doc| {
+        let (facts, frontier, read_cover, cover, (changed, settled)) = doc.with_read(|doc| {
             let facts = std::mem::take(&mut *queue.lock().unwrap());
+            self.pass_spans
+                .lock()
+                .unwrap()
+                .append(&mut spans.lock().unwrap());
             let frontier = doc.oplog_frontiers();
+            let read_cover = read_cover(doc);
             let cover = self.commit_clock.high_water();
             #[cfg(any(test, feature = "test-helpers"))]
             if let Some(seam) = self.read_seam.lock().unwrap().clone() {
@@ -1753,7 +1906,7 @@ impl LoroProjection {
                 &mut tid_index,
                 &mut unreadable,
             )?;
-            Ok((facts.len(), frontier, cover, read))
+            Ok((facts.len(), frontier, read_cover, cover, read))
         })?;
         self.disclose_unreadable(changed.keys(), unreadable);
         if settled {
@@ -1767,7 +1920,7 @@ impl LoroProjection {
                 .collect::<Result<Vec<_>>>()?;
             self.views_engine.feed(source, cover, delta);
         }
-        Ok((facts, changed, settled, frontier))
+        Ok((facts, changed, settled, frontier, read_cover))
     }
 
     /// The full-walk counterpart of [`Self::read_incremental`]: the doc's
@@ -1777,13 +1930,19 @@ impl LoroProjection {
         &self,
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
+        spans: &StdMutex<Vec<tracing::Span>>,
         source: CommitSource,
-    ) -> Result<(HashMap<String, SnapshotBlock>, bool, Frontiers)> {
+    ) -> Result<(HashMap<String, SnapshotBlock>, bool, Frontiers, ReadCover)> {
         let mut unreadable = Vec::new();
-        let (frontier, cover, (blocks, settled)) = doc.with_read(|doc| {
+        let (frontier, read_cover, cover, (blocks, settled)) = doc.with_read(|doc| {
             queue.lock().unwrap().clear();
+            self.pass_spans
+                .lock()
+                .unwrap()
+                .append(&mut spans.lock().unwrap());
             Ok((
                 doc.oplog_frontiers(),
+                read_cover(doc),
                 self.commit_clock.high_water(),
                 crate::loro_backend::snapshot_blocks_from_doc_noting(doc, &mut unreadable),
             ))
@@ -1793,7 +1952,7 @@ impl LoroProjection {
             self.views_engine
                 .replace(source, cover, blocks.values().cloned().collect());
         }
-        Ok((blocks, settled, frontier))
+        Ok((blocks, settled, frontier, read_cover))
     }
 
     fn disclose_unreadable<'a>(
@@ -1840,6 +1999,47 @@ impl LoroProjection {
     // level out without reducing call-site complexity.
     #[allow(clippy::too_many_arguments)]
     async fn emit_ops(
+        &self,
+        ops: Vec<(String, holon_api::StorageEntity)>,
+        retire: PassRetire,
+        t0: &std::time::Instant,
+        snapshot_ms: u128,
+        after_len: usize,
+        before_len: usize,
+        mode: &str,
+        reason: &str,
+        covers: [ReadCover; 2],
+    ) -> Result<()> {
+        let mut claim = holon_api::latency_e2e::projection_covers(|op| {
+            covers.iter().any(|(doc, vv)| {
+                *doc == op.doc && vv.includes_id(loro::ID::new(op.peer, op.counter))
+            })
+        });
+        // A commit read by an earlier pass that failed is billed to this one,
+        // which projects it again.
+        let committed = std::mem::take(&mut *self.pass_spans.lock().unwrap());
+        let parents: Vec<&tracing::Span> =
+            claim.spans().iter().chain(committed.iter().rev()).collect();
+        let pass = match parents.split_first() {
+            Some((newest, older)) => {
+                let pass = tracing::info_span!(parent: *newest, "loro.projection_pass", mode);
+                for span in older {
+                    pass.follows_from(*span);
+                }
+                pass
+            }
+            None => tracing::info_span!("loro.projection_pass", mode),
+        };
+        claim.link(&pass, &committed);
+        self.apply_ops(ops, t0, snapshot_ms, after_len, before_len, mode, reason)
+            .instrument(pass)
+            .await?;
+        claim.wrote(|id| retire.reason(id));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_ops(
         &self,
         ops: Vec<(String, holon_api::StorageEntity)>,
         t0: &std::time::Instant,
@@ -4024,5 +4224,159 @@ mod orphan_gate_tests {
         let before = sink(&[]);
         assert_eq!(retain_grounded_parent_updates(&mut ops, &before), 0);
         assert_eq!(ops.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod pass_retire_tests {
+    //! `pass_retire` against a model: a block absent from the diff is
+    //! unwritten; a content-only update equal to the pass's diff base up to
+    //! edge whitespace changes nothing visible; anything else made a change
+    //! or is owed to a later pass.
+
+    use holon_api::EntityUri;
+    use holon_api::latency_e2e::Retire;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Absent,
+        /// Diffed, then withheld by a gate (unsettled delete, ungrounded
+        /// create).
+        Withheld,
+        Update(&'static str),
+        UpdateWithParent(&'static str),
+        Create,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Row {
+        before: &'static str,
+        live: &'static str,
+        op: Op,
+    }
+
+    fn id(i: usize) -> String {
+        format!("block:b{i}")
+    }
+
+    fn rows(rows: &[Row], pick: fn(&Row) -> &'static str) -> HashMap<String, SnapshotBlock> {
+        rows.iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let block = Block::new_text(
+                    EntityUri::block(&format!("b{i}")),
+                    EntityUri::no_parent(),
+                    pick(r).to_string(),
+                );
+                (
+                    id(i),
+                    SnapshotBlock {
+                        block,
+                        sort_key: "A0".to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn op(name: &str, i: usize, fields: &[(&str, &str)]) -> (String, holon_api::StorageEntity) {
+        let mut e = holon_api::StorageEntity::new();
+        e.insert("id".into(), Value::String(id(i)));
+        for (k, v) in fields {
+            e.insert((*k).into(), Value::String(v.to_string()));
+        }
+        (name.to_string(), e)
+    }
+
+    fn check(full: bool, case: &[Row]) {
+        let before = rows(case, |r| r.before);
+        let live = rows(case, |r| r.live);
+        let mut ops = Vec::new();
+        for (i, r) in case.iter().enumerate() {
+            match r.op {
+                Op::Absent => {}
+                Op::Withheld => ops.push(op("create", i, &[("parent_id", "block:absent")])),
+                Op::Update(c) => ops.push(op("update", i, &[("content", c)])),
+                Op::UpdateWithParent(c) => {
+                    ops.push(op("update", i, &[("content", c), ("parent_id", "block:p")]))
+                }
+                Op::Create => ops.push(op("create", i, &[("content", "x")])),
+            }
+        }
+        let base = if full {
+            PassBase::Full { before: &before }
+        } else {
+            PassBase::Incremental
+        };
+        let retire = pass_retire(base, &live, &ops);
+        for (i, r) in case.iter().enumerate() {
+            let base_content = if full { r.before } else { r.live };
+            let expected = match r.op {
+                Op::Absent => Some(Retire::Unwritten),
+                Op::Update(c) if c.trim() == base_content.trim() => Some(Retire::NoVisibleChange),
+                Op::Withheld | Op::Update(_) | Op::UpdateWithParent(_) | Op::Create => None,
+            };
+            assert_eq!(
+                retire.reason(&id(i)),
+                expected,
+                "full={full} block {i}: {r:?}"
+            );
+        }
+        assert_eq!(retire.reason("block:never-diffed"), Some(Retire::Unwritten));
+    }
+
+    fn content() -> impl Strategy<Value = &'static str> {
+        prop::sample::select(vec!["C0", " C0", "C0 ", "C1", " C1"])
+    }
+
+    fn row() -> impl Strategy<Value = Row> {
+        let op = prop_oneof![
+            Just(Op::Absent),
+            Just(Op::Withheld),
+            content().prop_map(Op::Update),
+            content().prop_map(Op::UpdateWithParent),
+            Just(Op::Create),
+        ];
+        (content(), content(), op).prop_map(|(before, live, op)| Row { before, live, op })
+    }
+
+    #[test]
+    fn a_pass_retires_a_block_only_when_its_diff_base_shows_no_change() {
+        let examples = [
+            // A full pass after a non-seeding one: `live` still holds the old
+            // content the update returns to, the sink does not.
+            (
+                true,
+                vec![Row {
+                    before: "C1",
+                    live: " C0",
+                    op: Op::Update("C0"),
+                }],
+            ),
+            // A withheld orphan create is owed to a later pass.
+            (
+                true,
+                vec![Row {
+                    before: "C0",
+                    live: "C0",
+                    op: Op::Withheld,
+                }],
+            ),
+        ];
+        for (full, case) in &examples {
+            check(*full, case);
+        }
+        proptest::test_runner::TestRunner::default()
+            .run(
+                &(any::<bool>(), prop::collection::vec(row(), 0..6)),
+                |(full, case)| {
+                    check(full, &case);
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 }

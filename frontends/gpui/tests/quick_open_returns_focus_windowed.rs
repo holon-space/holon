@@ -168,7 +168,13 @@ impl Fixture {
             gpui_platform::current_headless_renderer,
         ));
 
-        let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+        // The projector closes a keystroke's root on a worker: bind the workers
+        // to the test's scope so a span collector sees that close.
+        let scope = holon_integration_tests::test_tracing::ensure_test_scope();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        holon_integration_tests::test_tracing::attach_scope_to_runtime(&mut builder, scope);
+        let runtime = Arc::new(builder.build().expect("tokio runtime"));
         let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
         if cell_registry {
             env.enable_block_cell_registry();
@@ -784,6 +790,110 @@ fn a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends() {
         born[0].1, "ab",
         "the newborn must carry the characters in typed order — \"ba\" means the second \
          keystroke was inserted at caret 0 instead of after the first; got {born:?}"
+    );
+    f.shutdown();
+}
+
+/// A keystroke into a focused row of the window is one `interaction.key`
+/// trace, and the frame that draws its local echo is a stage of it.
+///
+/// Rung: the windowed driver, because only a drawn frame ends the echo stage.
+/// An example, not a PBT: the generated key sequences run headless in
+/// `interaction_sequence_trace`; this rung adds only the drawn frame.
+#[test]
+fn a_window_keystroke_is_one_key_trace_with_its_local_echo_frame() {
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    let spans = holon_integration_tests::test_tracing::SpanCollector::global();
+
+    let mut f = Fixture::boot("Holon-TestPlatform-KeystrokeTrace");
+    f.focus_target_row();
+    spans.reset();
+    f.runtime
+        .block_on(f.driver.send_raw_keystroke("x", &[]))
+        .expect("the focused row's editor consumes a character");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let window = f.rebind.window();
+    let finished = loop {
+        f.settle();
+        // The test platform draws without a frame request, so the next-frame
+        // callbacks a display link would run are delivered here.
+        f.app.update(|cx| {
+            window
+                .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .expect("deliver the next frame")
+        });
+        let finished = spans.finished_spans();
+        if finished.iter().any(|s| s.name == "interaction.key") {
+            break finished;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the keystroke's interaction.key root never closed; finished: {:?}; pending clocks: {:?}",
+            finished
+                .iter()
+                .map(|s| s.name.as_ref())
+                .collect::<std::collections::BTreeSet<_>>(),
+            holon_api::latency_e2e::pending_targets(),
+        );
+    };
+    let roots: Vec<_> = finished
+        .iter()
+        .filter(|s| s.name == "interaction.key")
+        .collect();
+    assert_eq!(roots.len(), 1, "one key event, one root: {roots:?}");
+    let root = roots[0];
+    let attr = |key: &str| {
+        root.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.as_str().to_string())
+    };
+    assert_eq!(attr("key").as_deref(), Some("text"));
+    assert_eq!(attr("block"), Some(f.target.to_string()));
+    let echo: Vec<_> = finished
+        .iter()
+        .filter(|s| s.name == "editor.local_echo_frame")
+        .collect();
+    assert_eq!(echo.len(), 1, "one drawn echo frame per keystroke");
+    assert_eq!(echo[0].parent_span_id, root.span_context.span_id());
+    assert_eq!(
+        echo[0].span_context.trace_id(),
+        root.span_context.trace_id(),
+        "the echo frame is a stage of the keystroke's trace"
+    );
+    // A root also closes when its clock expires or retires; only a block
+    // mirror's delivery is the e2e sample.
+    let mut under_root = vec![root.span_context.span_id()];
+    loop {
+        let reached = under_root.len();
+        for s in &finished {
+            let id = s.span_context.span_id();
+            if under_root.contains(&s.parent_span_id) && !under_root.contains(&id) {
+                under_root.push(id);
+            }
+        }
+        if under_root.len() == reached {
+            break;
+        }
+    }
+    let visible: Vec<_> = finished
+        .iter()
+        .filter(|s| {
+            let has = |key: &str, value: &str| {
+                s.attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == key && kv.value.as_str() == value)
+            };
+            s.name == "interaction.visible"
+                && under_root.contains(&s.parent_span_id)
+                && has("action", "set_field")
+                && has("source", "block")
+        })
+        .collect();
+    assert_eq!(
+        visible.len(),
+        1,
+        "the keystroke's set_field closes one e2e sample on a block delivery: {visible:?}"
     );
     f.shutdown();
 }

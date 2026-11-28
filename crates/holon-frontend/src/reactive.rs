@@ -4345,22 +4345,23 @@ impl BuilderServices for ReactiveEngine {
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
+        let dispatch_span =
+            interaction_span(entity_name.as_str(), &op_name, latency_target.as_deref());
         if let Some(target) = &latency_target {
-            holon_api::latency_e2e::interaction_dispatched(
-                &op_name,
-                target,
-                holon_api::latency_e2e::Observable::BlockRow(
-                    holon_api::latency_e2e::write_seq_from_params(&params),
-                ),
-                holon_api::latency_e2e::ClockOrigin::Ui,
-            );
+            dispatch_span.in_scope(|| {
+                holon_api::latency_e2e::interaction_dispatched(
+                    &op_name,
+                    target,
+                    holon_api::latency_e2e::Observable::of_block_op(&op_name, &params),
+                    holon_api::latency_e2e::ClockOrigin::Ui,
+                )
+            });
         }
         // The op's subject for the stage line: the entity it addresses, or the
         // entity NAME when it addresses none.
         let latency_block = latency_target
             .clone()
             .unwrap_or_else(|| entity_name.as_str().to_string());
-        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
         // The `dispatch` half of the measurement, which `dispatch_intent_sync`
         // has emitted all along and this path did not — so every gesture that
         // reaches the backend through a CLICK (the settings switch, an
@@ -4502,7 +4503,6 @@ impl BuilderServices for ReactiveEngine {
 
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
-        let dispatch_span = interaction_span(intent.entity_name.as_str(), &intent.op_name);
         let keystroke = intent.keystroke();
         let crate::operations::OperationIntent {
             entity_name,
@@ -4532,15 +4532,17 @@ impl BuilderServices for ReactiveEngine {
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
+        let dispatch_span =
+            interaction_span(entity_name.as_str(), &op_name, latency_target.as_deref());
         if let Some(target) = &latency_target {
-            holon_api::latency_e2e::interaction_dispatched(
-                &op_name,
-                target,
-                holon_api::latency_e2e::Observable::BlockRow(
-                    holon_api::latency_e2e::write_seq_from_params(&params),
-                ),
-                holon_api::latency_e2e::ClockOrigin::Ui,
-            );
+            dispatch_span.in_scope(|| {
+                holon_api::latency_e2e::interaction_dispatched(
+                    &op_name,
+                    target,
+                    holon_api::latency_e2e::Observable::of_block_op(&op_name, &params),
+                    holon_api::latency_e2e::ClockOrigin::Ui,
+                )
+            });
         }
         let t_dispatch = std::time::Instant::now();
         let run = dispatch_span
@@ -4623,17 +4625,18 @@ impl BuilderServices for ReactiveEngine {
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
+        let dispatch_span =
+            interaction_span(entity_name.as_str(), &op_name, latency_target.as_deref());
         if let Some(target) = &latency_target {
-            holon_api::latency_e2e::interaction_dispatched(
-                &op_name,
-                target,
-                holon_api::latency_e2e::Observable::BlockRow(
-                    holon_api::latency_e2e::write_seq_from_params(&params),
-                ),
-                holon_api::latency_e2e::ClockOrigin::Ui,
-            );
+            dispatch_span.in_scope(|| {
+                holon_api::latency_e2e::interaction_dispatched(
+                    &op_name,
+                    target,
+                    holon_api::latency_e2e::Observable::of_block_op(&op_name, &params),
+                    holon_api::latency_e2e::ClockOrigin::Ui,
+                )
+            });
         }
-        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
         let run = dispatch_span
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
@@ -4713,17 +4716,18 @@ impl BuilderServices for ReactiveEngine {
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
+        let dispatch_span =
+            interaction_span(entity_name.as_str(), &op_name, latency_target.as_deref());
         if let Some(target) = &latency_target {
-            holon_api::latency_e2e::interaction_dispatched(
-                &op_name,
-                target,
-                holon_api::latency_e2e::Observable::BlockRow(
-                    holon_api::latency_e2e::write_seq_from_params(&params),
-                ),
-                holon_api::latency_e2e::ClockOrigin::Ui,
-            );
+            dispatch_span.in_scope(|| {
+                holon_api::latency_e2e::interaction_dispatched(
+                    &op_name,
+                    target,
+                    holon_api::latency_e2e::Observable::of_block_op(&op_name, &params),
+                    holon_api::latency_e2e::ClockOrigin::Ui,
+                )
+            });
         }
-        let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
         let run = dispatch_span
             .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
@@ -5581,12 +5585,13 @@ fn clear_focus_after_delete(focused_block: &Mutable<Option<EntityUri>>, target: 
 /// its detached future this span, so the operation, the Turso writes it causes,
 /// and the `ChangeOrigin` trace context that rides the CDC hop all share one
 /// trace id instead of each becoming a disconnected root.
-fn interaction_span(entity_name: &str, op_name: &str) -> tracing::Span {
+fn interaction_span(entity_name: &str, op_name: &str, block: Option<&str>) -> tracing::Span {
     tracing::span!(
         tracing::Level::INFO,
         "interaction.dispatch",
         "operation.entity" = entity_name,
-        "operation.name" = op_name
+        "operation.name" = op_name,
+        block
     )
 }
 
@@ -5665,6 +5670,8 @@ fn apply_structural_focus(
     response: &Option<holon_api::Value>,
 ) {
     if let Some((block, offset)) = structural_focus_target(op_name, response) {
+        let _focus =
+            tracing::info_span!("interaction.focus_new_block", block = block.as_str()).entered();
         caret_seed.set(Some((block.clone(), offset)));
         // Re-notify even when the target is ALREADY focused. A position-0
         // split's focus response names the block the caret is in (the id
