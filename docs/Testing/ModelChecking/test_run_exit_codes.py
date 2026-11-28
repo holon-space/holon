@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 RUN = Path(__file__).resolve().parent / "run.py"
@@ -83,11 +84,21 @@ def test_a_diff_touching_nothing_modelled_skips():
         assert (done.returncode, done.stdout.strip()) == (0, "SKIP: no modelled file touched"), (done.stdout, done.stderr)
 
 
-def test_an_empty_or_missing_path_list_is_an_error_not_a_skip():
+def test_a_clean_tree_skips_naming_its_reason():
     with tempfile.TemporaryDirectory() as tmp:
-        for name, paths in (("empty", ""), ("blank lines", "\n\n"), ("missing", None)):
+        for name, paths in (("empty", ""), ("blank lines", "\n\n")):
             done = gate(Path(tmp), paths)
-            assert done.returncode == 2 and "SKIP" not in done.stdout, (name, done.returncode, done.stdout, done.stderr)
+            assert (done.returncode, done.stdout.strip()) == (0, "SKIP: no changed path"), (name, done.stdout, done.stderr)
+
+
+def test_a_missing_or_unreadable_path_list_is_an_error_not_a_skip():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        done = gate(root, None)
+        assert done.returncode == 2 and "SKIP" not in done.stdout, (done.returncode, done.stdout, done.stderr)
+        (root / "changed.txt").mkdir()
+        done = gate(root, None)
+        assert done.returncode == 2 and "SKIP" not in done.stdout, (done.returncode, done.stdout, done.stderr)
 
 
 def test_missing_java_exits_2_naming_the_search_path():
@@ -121,6 +132,46 @@ def test_an_anchor_with_a_renamed_function_or_missing_file_names_its_spec_line()
                 assert str(e).startswith(f"A.tla:2: {anchor}") and text in str(e), str(e)
             else:
                 raise AssertionError(f"{anchor}: no error")
+
+
+def unparsable_models_lines():
+    """`Models:` texts that name no <file>.rs:<function>: prose, a non-Rust file, a Rust file without a function."""
+    return ["the apply actor", "crates/holon-api/src/live_data.py:subscribe",
+            "crates/holon-api/src/live_data.rs (the apply)", "live_data.rs: subscribe"]
+
+
+def test_a_models_line_naming_no_anchor_names_its_spec_line():
+    os.chdir(ROOT)
+    run = load_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        specs = Path(tmp)
+        for text in unparsable_models_lines():
+            (specs / "A.tla").write_text(f"---- MODULE A ----\n\\* Models: {text}\nAct == TRUE\n")
+            try:
+                run.modelled_files(specs)
+            except run.ToolError as e:
+                assert str(e).startswith("A.tla:2:"), str(e)
+            else:
+                raise AssertionError(f"{text}: no error")
+
+
+def long_words():
+    """64 KiB words of the characters that the path part of a `Models:` anchor repeats."""
+    for unit in ("a", ".rs", "a/", "-", "_."):
+        yield unit * (65536 // len(unit))
+
+
+def test_a_long_word_in_a_models_comment_is_read_in_linear_time():
+    os.chdir(ROOT)
+    run = load_run()
+    with tempfile.TemporaryDirectory() as tmp:
+        specs = Path(tmp)
+        for word in long_words():
+            (specs / "A.tla").write_text(f"---- MODULE A ----\n\\* Models: {SPEC_ANCHOR} {word}\nAct == TRUE\n")
+            start = time.monotonic()
+            run.modelled_files(specs)
+            took = time.monotonic() - start
+            assert took < 0.3, (word[:6], len(word), took)
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ class Anchor(NamedTuple):
     line: int
 
 
-MODELS_ANCHOR = re.compile(r"([\w./-]+\.rs):(\w+(?:::\w+)*)")
+MODELS_ANCHOR = re.compile(r"(?<![\w./-])([\w./-]+\.rs):(\w+(?:::\w+)*)")
 SKIP_MESSAGE = "SKIP: no modelled file touched"
 
 
@@ -113,14 +113,15 @@ def modelled_files(specs_dir: Path) -> set[Anchor]:
     return anchors
 
 
-def touch_reason(changed_file: Path) -> str | None:
-    """Why the specs must run for these changed paths, None when no modelled file is touched."""
+def touch_reason(changed_file: Path) -> str:
+    """`RUN: <why>` when the specs must run for these changed paths, else a `SKIP: <why>` message.
+    A missing or unreadable list is an error; a readable list without a path is a clean tree."""
     try:
         changed = [p for p in changed_file.read_text().splitlines() if p.strip()]
     except OSError as e:
         raise ToolError(f"changed-paths file {changed_file}: {e}")
     if not changed:
-        raise ToolError(f"changed-paths file {changed_file} lists no path")
+        return "SKIP: no changed path"
     anchors = modelled_files(HERE)
     folder = HERE.relative_to(Path.cwd().resolve()).as_posix() + "/"
     for path in changed:
@@ -129,7 +130,7 @@ def touch_reason(changed_file: Path) -> str | None:
         for a in sorted(anchors):
             if a.path == path:
                 return f"RUN: {path} is modelled by {a.spec}:{a.line} ({a.function})"
-    return None
+    return SKIP_MESSAGE
 
 
 def require_java():
@@ -312,8 +313,8 @@ def main():
         except ToolError as e:
             print(f"TOOL ERROR: {e}", file=sys.stderr)
             sys.exit(2)
-        print(reason or SKIP_MESSAGE)
-        if reason is None:
+        print(reason)
+        if reason.startswith("SKIP:"):
             sys.exit(0)
     out = Path(args.out)
     (out / "states").mkdir(parents=True, exist_ok=True)
