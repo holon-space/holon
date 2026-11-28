@@ -165,6 +165,8 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
         });
     }
     if let Some(org) = &progress.org {
+        // A shutdown leaves queued file changes to the next boot; a settle here
+        // waits for them, because the next step reads what ingest made of them.
         if org.processed < org.changed {
             owed.push(Owed::Stage {
                 stage: "org-ingest",

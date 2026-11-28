@@ -4,7 +4,8 @@
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR]
 
 Each spec is checked once per shared property (SettleProperties.tla) and the
-outcome is compared with EXPECTED. The oracle of a red test is checked on the
+outcome is compared with EXPECTED; a spec with invariants only is checked per
+INVARIANT_CHECKS, its witnesses included. The oracle of a red test is checked on the
 design that closes its race (RED_TEST_ORACLES): a violation there means the
 test cannot turn green after the fix, so it is no red-first test. Logs and `numbers.txt` (`key: value`
 lines) go to DIR (default target/model-checking/logs).
@@ -56,6 +57,20 @@ QUINT_EXPECTED_VIOLATED = "settledReadsNewest"
 # config whose INVARIANT is a red test's oracle on the fixed design -> whether
 # TLC must find that oracle violated
 RED_TEST_ORACLES = {"Writeback_through_oracle": ("RedTestOracle", True)}
+# config of a spec with invariants only -> invariant -> whether TLC must find
+# it violated. A witness is expected violated: the state it excludes is
+# reachable, so the property is not vacuous.
+WITNESSES = [
+    "QuietReadAfterChangeUnreached",
+    "FoldNeverParked",
+    "ChannelNeverHolds",
+    "ConsumerNeverTakes",
+    "CursorNeverApplied",
+]
+INVARIANT_CHECKS = {
+    "HomeBySettle_flag": {INVARIANT: True},
+    "HomeBySettle_through": {INVARIANT: False, **{w: True for w in WITNESSES}},
+}
 
 TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
 
@@ -117,7 +132,7 @@ def run_tlc(jar, spec, prop, out, extra=(), name=None):
         (specs / tla.name).write_text(tla.read_text())
     base = (HERE / f"{spec}.cfg").read_text()
     name = name or prop or "graph"
-    kind = "INVARIANT" if prop == INVARIANT else "PROPERTY"
+    kind = "PROPERTY" if prop in TEMPORAL else "INVARIANT"
     cfg = f"{spec}-{name}.cfg"
     (specs / cfg).write_text(f"{base}{kind} {prop}\n" if prop else base)
     log = out / f"{spec}.{name}.log"
@@ -186,6 +201,30 @@ def check_red_test_oracles(jar, out, numbers):
     return mismatches
 
 
+def check_invariants(jar, out, numbers):
+    mismatches = []
+    for spec, invariants in INVARIANT_CHECKS.items():
+        for inv, expect_violated in invariants.items():
+            code, log, seconds = run_tlc(jar, spec, inv, out)
+            text = log.read_text()
+            if code == TLC_HOLDS and "No error has been found" in text:
+                violated = False
+            elif code == TLC_SAFETY and f"Invariant {inv} is violated" in text:
+                violated = True
+            else:
+                raise ToolError(f"{log}: TLC exit {code} without a verdict")
+            key = f"{spec}.{inv}"
+            numbers[f"{key}.result"] = "violated" if violated else "holds"
+            numbers[f"{key}.distinct_states"] = number(r"([\d,]+) distinct states found", text, log)
+            numbers[f"{key}.seconds"] = f"{seconds:.1f}"
+            if violated:
+                numbers[f"{key}.trace_states"] = number(r"\nState (\d+):", text, log)
+            print(f"{key}: {numbers[f'{key}.result']}, log {log}", flush=True)
+            if violated != expect_violated:
+                mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
+    return mismatches
+
+
 def check_windows(jar, out, numbers):
     for spec in WINDOWS:
         graph = (out / f"{spec}.dot").resolve()
@@ -237,6 +276,7 @@ def main():
     try:
         mismatches = check_tlc(tla_jar(), out, numbers)
         mismatches += check_red_test_oracles(tla_jar(), out, numbers)
+        mismatches += check_invariants(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)
         mismatches += check_quint(quint_bin(), out, numbers)
     except Exception as e:

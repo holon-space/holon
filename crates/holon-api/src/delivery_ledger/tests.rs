@@ -466,6 +466,84 @@ proptest! {
     }
 }
 
+/// A settle read over an untaken cursor (`sent`, applied `back` below it)
+/// and the ledger `inputs` build: it reads the feed behind exactly while a
+/// demux has not routed through the start or the cursor owes a batch up to
+/// it, and the wait ends once every demux routes through the start and the
+/// consumer applies what it was sent.
+fn an_untaken_feed_waits_until_the_demux_routes_through_start(
+    inputs: &[Input],
+    sent: u64,
+    back: u64,
+) -> Result<(), TestCaseError> {
+    let mut ledger = DeliveryLedger::default();
+    let mut model = Model::default();
+    for input in inputs {
+        let Some(event) = resolve(&model, input) else {
+            continue;
+        };
+        feed(&mut ledger, &event);
+        model.events.push(event);
+    }
+    let start = model.emitted();
+    let cursor = crate::live_data::DeliveryCursor::default();
+    cursor.routed(sent);
+    let applied = sent.saturating_sub(back);
+    cursor.applied_through(applied);
+    prop_assert!(!cursor.is_taken());
+
+    let read = |ledger: &DeliveryLedger| {
+        settle_verdict(&cursor, Some(start.0), || ledger.routed_through(), || true)
+    };
+    let behind = model.routed_through() < start || (applied < sent && applied < start.0);
+    let expected = if behind {
+        SettleVerdict::FeedBehind(start.0)
+    } else {
+        SettleVerdict::Settled
+    };
+    prop_assert_eq!(read(&ledger), expected);
+
+    for (d, routed) in model.live_demuxes() {
+        ledger.routed(d, routed.max(start));
+    }
+    cursor.applied_through(sent);
+    prop_assert_eq!(
+        read(&ledger),
+        SettleVerdict::Settled,
+        "the wait did not end"
+    );
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn an_untaken_feed_waits_only_until_the_demux_routes_through_start(
+        inputs in proptest::collection::vec(input(), 0..60),
+        sent in 0u64..8,
+        back in 0u64..8,
+    ) {
+        an_untaken_feed_waits_until_the_demux_routes_through_start(&inputs, sent, back)?;
+    }
+}
+
+/// The production shape: nothing routes to the untaken cursor while a demux
+/// is behind the emitted seq.
+#[test]
+fn an_untaken_feed_waits_for_a_demux_behind_the_start() {
+    let cases: [(&[Input], u64, u64); 2] = [
+        (&[Input::Routed(0, 1), Input::Emitted(3)], 0, 0),
+        (
+            &[Input::Emitted(2), Input::Routed(1, 2), Input::Emitted(1)],
+            2,
+            1,
+        ),
+    ];
+    for (inputs, sent, back) in cases {
+        an_untaken_feed_waits_until_the_demux_routes_through_start(inputs, sent, back)
+            .unwrap_or_else(|e| panic!("{inputs:?} sent {sent} back {back}: {e}"));
+    }
+}
+
 /// A view sent `sent`, an apply `ahead` above it, then a later send at or
 /// below that apply.
 fn applied_ahead_of_sent() -> impl Strategy<Value = (u8, u64, u64, u64)> {

@@ -2079,4 +2079,6 @@ mod supervision {
             );
         }
     }
+
+    mod settle_spec;
 }

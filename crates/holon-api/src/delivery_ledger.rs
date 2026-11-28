@@ -233,6 +233,36 @@ impl View {
     }
 }
 
+/// What a settle read of the block feed's write-back consumer finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettleVerdict {
+    Settled,
+    /// The consumer has not applied through this emitted seq.
+    FeedBehind(u64),
+    WritebackOwes,
+}
+
+/// The settle read of the write-back feed. `start` is the seq emitted when the
+/// read began, `None` without a database; `routed_through` reads the seq every
+/// demux has routed through. The feed is behind until every batch emitted by
+/// `start` is routed and the cursor applied what it was sent, up to `start`.
+pub fn settle_verdict(
+    feed: &crate::live_data::DeliveryCursor,
+    start: Option<u64>,
+    routed_through: impl FnOnce() -> Seq,
+    writeback_owes_empty: impl FnOnce() -> bool,
+) -> SettleVerdict {
+    match start {
+        Some(start)
+            if routed_through() < Seq(start) || (feed.is_lagging() && feed.applied() < start) =>
+        {
+            SettleVerdict::FeedBehind(start)
+        }
+        _ if writeback_owes_empty() => SettleVerdict::Settled,
+        _ => SettleVerdict::WritebackOwes,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     CdcRouted,
