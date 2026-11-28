@@ -2,8 +2,8 @@
 //! effects and probes — as the types one YAML file parses into.
 //!
 //! This module is the format and nothing else. It holds no marking, runs no
-//! effect and builds no [`crate::exec::NetDef`]: the loader (#370), the shell
-//! effect (#371) and the probe host (#373) each read these types and own their
+//! effect and builds no [`crate::exec::NetDef`]: the loader, the shell
+//! effect and the probe host each read these types and own their
 //! own behaviour. What the format does own is every refusal a reader can
 //! decide from the file alone, and each one names the place, the transition or
 //! the effect it refused.
@@ -134,7 +134,7 @@ impl NetFile {
 #[serde(deny_unknown_fields)]
 pub struct PlaceSpec {
     pub capacity: PlaceCapacity,
-    /// `N` interchangeable tokens — a slot pool or a budget (#372).
+    /// `N` interchangeable tokens — a slot pool or a budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<u32>,
 }
@@ -417,7 +417,7 @@ impl EffectSpec {
     }
 }
 
-/// A child process group, its log and the meaning of its exit code (#371).
+/// A child process group, its log and the meaning of its exit code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShellEffect {
@@ -501,7 +501,7 @@ impl CommandSpec {
 }
 
 /// A command the host runs on its own interval, whose stdout is facts: one
-/// JSON object per line, each becoming one token in `facts_into` (#373).
+/// JSON object per line, each becoming one token in `facts_into`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeSpec {

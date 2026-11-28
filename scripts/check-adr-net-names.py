@@ -3,7 +3,7 @@
 
 A whole code span of one PascalCase word (`DiskChanged`, `Base`) in the ADR names
 a transition or place, unless EXEMPT lists it. Each such name must equal the
-value of a `const NAME: &str = "Value";` in crates/holon-net/ or
+value of a `const NAME: &str = "Value";` in crates/holon-net/, crates/petri-workflow/ or
 crates/holon-filesystem/src/writeback_net.rs. An exemption must still occur in
 the ADR and must not resolve, so the list does not outlive its reason.
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ADR = Path("docs/adr/0032-petri-net-execution-semantics.md")
-NET_SOURCES = ["crates/holon-net/**/*.rs", "crates/holon-filesystem/src/writeback_net.rs"]
+NET_SOURCES = ["crates/holon-net/**/*.rs", "crates/petri-workflow/**/*.rs", "crates/holon-filesystem/src/writeback_net.rs"]
 
 NAME = re.compile(r"`([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)*)`")
 CONST = re.compile(r'\bconst\s+[A-Z][A-Z0-9_]*\s*:\s*&str\s*=\s*"([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)*)"')
