@@ -34,6 +34,7 @@ use super::BindFn;
 use super::NativeBody;
 use super::NativeParts;
 use crate::exec::AskMeta;
+use crate::exec::AskMetas;
 use crate::exec::Body;
 use crate::exec::Class;
 use crate::exec::Content;
@@ -48,6 +49,7 @@ use crate::exec::Trigger;
 use crate::exec::answer_transition;
 use crate::exec::answered_place;
 use crate::exec::ask_hash;
+use crate::exec::ask_places;
 use crate::exec::asks_place;
 use crate::exec::expired_place;
 use crate::exec::hash_text;
@@ -137,6 +139,25 @@ pub enum LowerTwin {
     /// `Asks` offers the ask while an occurrence is parked with an unknown
     /// outcome.
     AskWhileOutcomeUnknown,
+}
+
+/// The side table [`Asks::asks`](crate::exec::Asks::asks) reads: the
+/// [`AskMeta`] of each manual transition of `descriptors`.
+pub fn ask_metas<'a>(descriptors: impl IntoIterator<Item = &'a TransitionDescriptor>) -> AskMetas {
+    descriptors
+        .into_iter()
+        .filter_map(|d| {
+            let ask = d.ask.as_ref()?;
+            Some((
+                d.name.0.clone(),
+                AskMeta {
+                    input: ask.input.clone(),
+                    irreversible: d.irreversible,
+                    has_preview: ask.preview.is_some(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Lowers one high-level transition into `net`: the work transition and, for
@@ -410,14 +431,7 @@ fn lower_as(
         .place(&failed, Class::Process)
         .place(&expired, Class::Process)
         .derived(&asks, derive)
-        .ask(
-            t,
-            AskMeta {
-                input: ask.input.clone(),
-                irreversible: d.irreversible,
-                has_preview: ask.preview.is_some(),
-            },
-        )
+        .ask(t, ask_places(t))
         .transition(answer)
         .transition(work);
     // ExpireAnswer goes before ReleaseFailed, so only its WorkFailed inhibitor,
@@ -460,7 +474,8 @@ fn lower_as(
 
 /// The work's binding without the answer, plus the arc checks the executor
 /// makes before a binding runs. `Asks`, the work and `ExpireAnswer` all
-/// evaluate it, so they agree on the ask hash.
+/// evaluate it, so they agree on the ask hash. It reads the committed view,
+/// so an open take never holds an ask's `Answer`.
 struct Situation {
     transition: Arc<str>,
     needs: Vec<String>,
@@ -472,12 +487,14 @@ impl Situation {
     /// The bound situation and the hex ask hash over the trace of this check.
     fn eval(&self, r: &mut Reader<'_>, s: &Subject) -> Option<(Content, String)> {
         let (content, trace) = r.traced(|r| {
-            if !self.needs.iter().all(|p| r.present(p, s))
-                || self.inhibits.iter().any(|p| r.present(p, s))
-            {
-                return None;
-            }
-            (self.bind)(r, s)
+            r.committed(|r| {
+                if !self.needs.iter().all(|p| r.present(p, s))
+                    || self.inhibits.iter().any(|p| r.present(p, s))
+                {
+                    return None;
+                }
+                (self.bind)(r, s)
+            })
         });
         let hash = hash_text(&ask_hash(&self.transition, s, &trace));
         Some((content?, hash))

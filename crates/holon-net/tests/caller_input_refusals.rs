@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use holon_api::RemovedTag;
 use holon_api::Value;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -50,6 +52,7 @@ use holon_net::uft::Generated;
 use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::AnswerCall;
@@ -69,6 +72,7 @@ use proptest::prelude::*;
 use proptest::sample::select;
 
 use crate::exec_support::Checked;
+use crate::exec_support::values::value;
 
 const I64_NS: u64 = i64::MAX as u64;
 const W: &str = "W";
@@ -147,24 +151,6 @@ fn load(net: NetDef) -> Result<Checked, TestCaseError> {
 
 // ------------------------------------------------------------ generators
 
-fn value() -> impl Strategy<Value = Value> {
-    let leaf = prop_oneof![
-        Just(Value::Null),
-        any::<bool>().prop_map(Value::Boolean),
-        any::<i64>().prop_map(Value::Integer),
-        any::<f64>().prop_map(Value::Float),
-        ".{0,6}".prop_map(Value::String),
-        ".{0,6}".prop_map(Value::DateTime),
-        ".{0,6}".prop_map(Value::Json),
-    ];
-    leaf.prop_recursive(2, 6, 3, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Array),
-            prop::collection::hash_map(".{0,3}", inner, 0..3).prop_map(Value::Object),
-        ]
-    })
-}
-
 fn content() -> impl Strategy<Value = Content> {
     prop::collection::btree_map(
         prop_oneof![
@@ -233,7 +219,30 @@ fn ask_net(
     bind: holon_net::exec::Read,
     effectful: bool,
 ) -> Result<NetDef, TestCaseError> {
-    let d = TransitionDescriptor {
+    let d = ask_descriptor(effectful);
+    let body = if effectful {
+        NativeBody::Effectful(Receiver::None)
+    } else {
+        NativeBody::Pure(Arc::new(|s: &Subject, _: &Content| {
+            Ok(vec![Output::new("Out", s, tagged(W))])
+        }))
+    };
+    let parts = NativeParts {
+        bind,
+        body,
+        preview: None,
+    };
+    let net = net.place("P", Class::Process).fifo("Out", Class::Process);
+    premise("the ask lowers", lower(net, &d, Some(parts)))
+}
+
+/// The side table of [`ask_net`]'s ask.
+fn metas() -> AskMetas {
+    ask_metas([&ask_descriptor(false)])
+}
+
+fn ask_descriptor(effectful: bool) -> TransitionDescriptor {
+    TransitionDescriptor {
         name: TransitionName(W.to_owned()),
         arcs: vec![HlArc {
             kind: ArcKind::Read,
@@ -252,21 +261,7 @@ fn ask_net(
             persist: false,
         }),
         undoes: None,
-    };
-    let body = if effectful {
-        NativeBody::Effectful(Receiver::None)
-    } else {
-        NativeBody::Pure(Arc::new(|s: &Subject, _: &Content| {
-            Ok(vec![Output::new("Out", s, tagged(W))])
-        }))
-    };
-    let parts = NativeParts {
-        bind,
-        body,
-        preview: None,
-    };
-    let net = net.place("P", Class::Process).fifo("Out", Class::Process);
-    premise("the ask lowers", lower(net, &d, Some(parts)))
+    }
 }
 
 fn ask_transitions() -> Vec<String> {
@@ -308,7 +303,7 @@ fn answer_call(subject: &str, seen: AskHash, id: &str) -> AnswerCall {
 
 /// The hash the `Asks` row of `W` for `subject` offers.
 fn offered(exec: &Executor, subject: &str) -> Result<Option<AskHash>, TestCaseError> {
-    let rows = no_panic("asks", || exec.asks())?;
+    let rows = no_panic("asks", || exec.asks(&metas()))?;
     Ok(rows.ok().and_then(|rows| {
         rows.into_iter()
             .find(|r| r.transition.0 == W && r.subject.0 == subject)
@@ -340,7 +335,7 @@ fn output_net(trigger: Trigger, into: Vec<String>) -> NetDef {
         }),
     )
     .consumes("In");
-    NetDef::default()
+    holon_net::exec::new_net()
         .place("In", Class::Process)
         .fifo("Out", Class::Process)
         .derived("D", Arc::new(|_: &mut Reader<'_>, _: &Subject| None))
@@ -423,7 +418,7 @@ fn payloads(exec: &Checked, place: &str, s: &str) -> Vec<Payload> {
 fn effect_output_net(trigger: Trigger) -> NetDef {
     let t = TransitionDef::new("T", trigger, bind_true(), Body::Effectful(Receiver::None))
         .consumes("In");
-    NetDef::default()
+    holon_net::exec::new_net()
         .fifo("In", Class::Process)
         .fifo("Out", Class::Process)
         .derived("D", Arc::new(|_: &mut Reader<'_>, _: &Subject| None))
@@ -644,7 +639,7 @@ proptest! {
         s in subject(),
         offered_hash in any::<bool>(),
     ) {
-        let mut exec = load(ask_net(NetDef::default(), bind_true(), false)?)?;
+        let mut exec = load(ask_net(holon_net::exec::new_net(), bind_true(), false)?)?;
         let _ = premise("the write", no_panic("write", || exec.write("P", &s, Content::new(), Duration::ZERO))?)?;
         let clock = Duration::from_nanos(clock_ns);
         premise("the step", no_panic("step", || exec.step(clock))?)?;
@@ -677,7 +672,7 @@ proptest! {
         c in content(),
         now_ms in 0u64..5_000,
     ) {
-        let mut exec = load(NetDef::default().pool("Pool", Class::Process, n))?;
+        let mut exec = load(holon_net::exec::new_net().pool("Pool", Class::Process, n))?;
         let shown = places(&["Pool"], &[]);
         let before = snapshot(&exec, &shown);
         let now = Duration::from_millis(now_ms);
@@ -695,7 +690,7 @@ proptest! {
         t in subject(),
         c in content(),
     ) {
-        let mut exec = load(NetDef::default().pool("Pool", Class::Process, n))?;
+        let mut exec = load(holon_net::exec::new_net().pool("Pool", Class::Process, n))?;
         let r = no_panic("retract", || exec.retract("Pool", &t, Duration::ZERO))?;
         prop_assert!(r.is_ok(), "a retract of a pool token was refused: {r:?}");
         prop_assert_eq!(exec.tokens().free("Pool"), n as usize - 1);
@@ -713,9 +708,9 @@ proptest! {
         c in content(),
     ) {
         let net = match capacity {
-            0 => NetDef::default().place("P", Class::Process),
-            1 => NetDef::default().fifo("P", Class::Process),
-            _ => NetDef::default().register("P", Class::Process),
+            0 => holon_net::exec::new_net().place("P", Class::Process),
+            1 => holon_net::exec::new_net().fifo("P", Class::Process),
+            _ => holon_net::exec::new_net().register("P", Class::Process),
         };
         let mut exec = load(net)?;
         let shown = places(&["P"], &[]);
@@ -733,7 +728,7 @@ proptest! {
 /// `n` and `m` and a fifo `Out`.
 fn pool_net(n: u32, m: u32, t: TransitionDef, takes_pool: bool) -> NetDef {
     let t = if takes_pool { t.consumes("Pool") } else { t };
-    NetDef::default()
+    holon_net::exec::new_net()
         .pool("Pool", Class::Process, n)
         .pool("Pool2", Class::Process, m)
         .fifo("In", Class::Process)
@@ -965,7 +960,9 @@ fn owned_net(trigger: Trigger, effectful: bool) -> Result<NetDef, TestCaseError>
         .consumes("In")
         .retry(Duration::from_millis(10), 3);
     ask_net(
-        NetDef::default().fifo("In", Class::Process).transition(t),
+        holon_net::exec::new_net()
+            .fifo("In", Class::Process)
+            .transition(t),
         bind_true(),
         false,
     )
@@ -1144,7 +1141,7 @@ proptest! {
         for t in ["T".to_owned(), W.to_owned(), Generated::Answer.name(W), Generated::ExpireAnswer.name(W)] {
             let _ = no_panic(&format!("why_not({t})"), || format!("{:?}", exec.why_not(&t, &s)))?;
         }
-        let _ = no_panic("asks", || format!("{:?}", exec.asks()))?;
+        let _ = no_panic("asks", || format!("{:?}", exec.asks(&metas())))?;
         let _ = no_panic("derive_all", || format!("{:?}", exec.derive_all(&Generated::Asks.name(W))))?;
         let _ = no_panic("answer_settlement", || format!("{:?}", exec.answer_settlement(&AnswerId("a1".to_owned()))))?;
         let seen = offered(&exec, &s)?.unwrap_or(AskHash([0; 32]));
@@ -1175,7 +1172,7 @@ fn reading(place: &'static str, kind: usize) -> holon_net::exec::Read {
 /// `D` reads `D1` and `D1` reads `D`; an auto `T` over `In` reads `D` when
 /// `read_by_t`.
 fn cycle_net(two: bool, kind: usize, read_by_t: bool) -> NetDef {
-    let mut net = NetDef::default().fifo("In", Class::Process);
+    let mut net = holon_net::exec::new_net().fifo("In", Class::Process);
     net = if two {
         net.derived("D", reading("D1", kind))
             .derived("D1", reading("D", kind))
@@ -1235,7 +1232,7 @@ proptest! {
     /// derives.
     #[test]
     fn a_net_whose_derived_places_form_a_chain_loads(kind in 0usize..3, s in subject()) {
-        let net = NetDef::default()
+        let net = holon_net::exec::new_net()
             .fifo("In", Class::Process)
             .derived("D", Arc::new(|r: &mut Reader<'_>, s: &Subject| r.present("In", s).then(Content::new)))
             .derived("D1", reading("D", kind))
@@ -1264,7 +1261,7 @@ proptest! {
             (r.present("P", s) && reads(r, "D", s, kind)).then(Content::new)
         });
         let bind = if read_by_t { reading("D", kind) } else { bind_true() };
-        let net = NetDef::default()
+        let net = holon_net::exec::new_net()
             .fifo("P", Class::Process)
             .derived("D", d)
             .transition(
@@ -1306,7 +1303,7 @@ proptest! {
         let mut out = extra;
         out.insert(field.to_owned(), v);
         let bind: holon_net::exec::Read = Arc::new(move |_: &mut Reader<'_>, _: &Subject| Some(out.clone()));
-        let mut exec = load(ask_net(NetDef::default(), bind, effectful)?)?;
+        let mut exec = load(ask_net(holon_net::exec::new_net(), bind, effectful)?)?;
         let _ = premise("the write", no_panic("write", || exec.write("P", &s, Content::new(), Duration::ZERO))?)?;
         let seen = offered(&exec, &s)?.unwrap_or(AskHash([0; 32]));
         let r = no_panic("answer", || exec.answer(answer_call(&s, seen, "a1"), Duration::from_secs(1)))?;
@@ -1379,7 +1376,7 @@ proptest! {
             1 => TransitionDef::new("T", Trigger::Auto, bind_true(), Body::Effectful(Receiver::None)).run_timer(timer),
             _ => TransitionDef::new("T", Trigger::Auto, bind_true(), Body::Effectful(Receiver::None)).abandon(timer),
         };
-        let mut exec = load(NetDef::default().fifo("In", Class::Process).transition(t.consumes("In")))?;
+        let mut exec = load(holon_net::exec::new_net().fifo("In", Class::Process).transition(t.consumes("In")))?;
         let now = Duration::from_nanos(I64_NS - back_ns);
         let shown = places(&["In"], &["T"]);
         let before = snapshot(&exec, &shown);
@@ -1430,7 +1427,7 @@ fn ghost_net(ghost: &str, kind: usize) -> Result<NetDef, TestCaseError> {
         ghost_read(r, &g, s, kind);
         Some(Content::new())
     });
-    let net = NetDef::default().derived(
+    let net = holon_net::exec::new_net().derived(
         "D",
         Arc::new(move |r: &mut Reader<'_>, s: &Subject| r.present(&d, s).then(Content::new)),
     );
@@ -1511,7 +1508,7 @@ proptest! {
             Body::pure(|_: &Subject, _: &Content| Ok(vec![])),
         )
         .consumes("In");
-        let mut exec = load(NetDef::default().fifo("In", Class::Process).transition(t))?;
+        let mut exec = load(holon_net::exec::new_net().fifo("In", Class::Process).transition(t))?;
         let removal = Content::from([("x".to_owned(), Value::Removed(RemovedTag))]);
         let _ = no_panic("write", || format!("{:?}", exec.write("In", &s, removal, Duration::ZERO)))?;
         let _ = no_panic("why_not", || format!("{:?}", exec.why_not("T", &s)))?;
@@ -1557,7 +1554,7 @@ proptest! {
         effectful in any::<bool>(),
         s in subject(),
     ) {
-        let mut exec = load(ask_net(NetDef::default(), bind_true(), effectful)?)?;
+        let mut exec = load(ask_net(holon_net::exec::new_net(), bind_true(), effectful)?)?;
         let _ = premise("the write into P", no_panic("write P", || exec.write("P", &s, Content::new(), Duration::ZERO))?)?;
         let mut value = Content::new();
         if let Some(v) = &named {
@@ -1590,7 +1587,7 @@ fn revealed_cycle_net(kind: usize, t_reads: bool, w_reads: bool) -> Result<NetDe
     } else {
         bind_true()
     };
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .fifo("In", Class::Process)
         .derived("D", d)
         .transition(
@@ -1657,7 +1654,7 @@ proptest! {
         prop_assert!(names_error(&all, "Cycle"), "derive_all of D: {all:?}");
         let other = no_panic("derive without the token", || exec.derive("D", &Subject::new(&t)))?;
         prop_assert!(matches!(other, Ok(None)), "derive of D for {t:?}: {other:?}");
-        let asks = no_panic("asks", || exec.asks())?;
+        let asks = no_panic("asks", || exec.asks(&metas()))?;
         if w_reads {
             prop_assert!(names_error(&asks, "Cycle"), "asks with W reading D: {asks:?}");
             let mut shown = ask_places();
@@ -1699,7 +1696,7 @@ fn linked_net(trigger: Trigger, edit: impl FnOnce(TransitionDef) -> TransitionDe
         Body::pure(|_: &Subject, _: &Content| Ok(vec![])),
     )
     .consumes("In2");
-    NetDef::default()
+    holon_net::exec::new_net()
         .fifo("In", Class::Process)
         .fifo("In2", Class::Process)
         .fifo("Out", Class::Process)
@@ -1789,7 +1786,9 @@ fn timed_net(kind: usize, timer: Duration) -> NetDef {
         1 => t.abandon(timer),
         _ => t.retry(timer, 2),
     };
-    NetDef::default().fifo("In", Class::Process).transition(t)
+    holon_net::exec::new_net()
+        .fifo("In", Class::Process)
+        .transition(t)
 }
 
 fn past_i64_ns() -> impl Strategy<Value = Duration> {
@@ -1833,7 +1832,7 @@ fn recursion_net(kind: usize, bound: Option<usize>) -> NetDef {
         }
         reads(r, "D", &Subject::new(&format!("{}x", s.as_str())), kind).then(x)
     });
-    NetDef::default()
+    holon_net::exec::new_net()
         .fifo("In", Class::Process)
         .derived("D", d)
         .transition(
@@ -1897,7 +1896,7 @@ proptest! {
             .run_timer(Duration::from_secs(1))
             .consumes("In");
         let t = if timeout { t.on_timeout(&place) } else { t.on_failure(&place) };
-        let net = ask_net(NetDef::default().fifo("In", Class::Process), bind_true(), false)?.transition(t);
+        let net = ask_net(holon_net::exec::new_net().fifo("In", Class::Process), bind_true(), false)?.transition(t);
         let r = no_panic("load", || Executor::new(net).map(|_| ()))?;
         prop_assert!(
             names_error(&r, "PortLacksAnswerField") && names_error(&r, &format!("{place:?}")),

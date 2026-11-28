@@ -279,7 +279,7 @@ fn net() -> NetDef {
     )
     .consumes(PLACE_CLAIMS);
 
-    NetDef::default()
+    holon_net::exec::new_net()
         .place(PLACE_CLAIMS, Class::Process)
         .place(PLACE_SLOT, Class::Process)
         .place(PLACE_DISPLACED, Class::Process)

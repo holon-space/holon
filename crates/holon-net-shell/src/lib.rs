@@ -235,7 +235,7 @@ mod tests {
     }
 
     fn net() -> NetDef {
-        NetDef::default()
+        holon_net::exec::new_net()
             .place("In", Class::Process)
             .register("Out", Class::Process)
             .transition(

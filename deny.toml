@@ -148,6 +148,7 @@ exceptions = [
     { crate = "holon-waterui",allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-worker", allow = ["FSL-1.1-ALv2"] },
     { crate = "petri-net", allow = ["FSL-1.1-ALv2"] },
+    { crate = "petri-workflow", allow = ["FSL-1.1-ALv2"] },
     { crate = "symlink", allow = ["FSL-1.1-ALv2"] },
 ]
 

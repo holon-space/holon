@@ -1,0 +1,19 @@
+[package]
+name = "petri-workflow"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Workflow nets over a token value V: effects, retry, timers, undo and asks, independent of Holon."
+
+[dependencies]
+blake3.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[features]
+# Each twin breaks one executor rule, so a property test shows red for that rule.
+naive-twins = []

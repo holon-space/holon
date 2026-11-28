@@ -5,6 +5,7 @@
 //! @c4 uses holon-net-layout "viewer geometry & wire contract" "Rust"
 //! @c4 uses holon-pattern "guard AST & parser" "Rust"
 //! @c4 uses holon-rules "holon_rule YAML front-end" "Rust"
+//! @c4 uses petri-workflow "generic workflow-net executor" "Rust"
 //!
 //! The derived Petri-net projection (ADR 0032 §2): rule blocks and operation
 //! descriptors compiled into one read-only net, plus the conflict and cycle
@@ -16,9 +17,9 @@
 //! cannot go stale whether a caller pulls them on demand or holds them as a
 //! reactive var recomputed on source change.
 //!
-//! [`exec`] and [`probe`] hold runtime state: the executor of runtime nets
-//! (ADR 0032 §9), which owns a marking of process-class tokens, and the run
-//! state of the probes that feed facts into it.
+//! [`exec`], [`load`] and [`probe`] are the Holon faces of the generic
+//! executor in `petri-workflow` (ADR 0032 §9): its types at the token value
+//! [`holon_pattern::Value`], the host functions, and the Holon ask surface.
 //!
 //! Petri-net vocabulary — transition, place, arc, marking — lives in this
 //! crate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one
@@ -31,6 +32,7 @@ pub mod enabledness;
 pub mod exec;
 pub mod file;
 pub mod guards;
+pub mod host;
 pub mod load;
 pub mod marking;
 pub mod net;

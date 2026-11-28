@@ -2945,6 +2945,7 @@ dependencies = [
  "holon-rules",
  "holon-transition-contract",
  "indexmap",
+ "petri-workflow",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3107,6 +3108,7 @@ name = "holon-transition-contract"
 version = "0.1.0"
 dependencies = [
  "holon-api",
+ "petri-workflow",
  "serde",
  "thiserror 2.0.21",
  "workspace-hack",
@@ -5077,6 +5079,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f986f248b4241ac359b831f6139aaa34e03b08a37b6caf7e201a33f95c869e1"
 dependencies = [
  "pest",
+]
+
+[[package]]
+name = "petri-workflow"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

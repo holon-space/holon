@@ -8,6 +8,7 @@
 pub mod model;
 
 pub mod twin_names;
+pub mod values;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -19,12 +20,16 @@ use std::time::Duration;
 use holon_api::Value;
 use holon_net::exec::Accepted;
 use holon_net::exec::AskMeta;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
 use holon_net::exec::Capacity;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
+use holon_net::exec::Condition;
 use holon_net::exec::Content;
+use holon_net::exec::DeriveError;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
@@ -50,8 +55,10 @@ use holon_net::exec::Trigger;
 use holon_net::exec::UndoError;
 use holon_net::exec::Undone;
 use holon_net::exec::WhyNot;
+use holon_net::exec::ask_places;
 use holon_transition_contract::AnswerCall;
 use holon_transition_contract::AnswerId;
+use holon_transition_contract::AskRow;
 use holon_transition_contract::UftError;
 use model::Head;
 use model::Model;
@@ -65,6 +72,11 @@ pub trait Reads {
     fn cause(&mut self, place: &str, subject: &str) -> Option<String>;
     /// The output of a candidate token.
     fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content>;
+    /// `f` on the committed view, as an ask's situation reads it.
+    fn committed_view(
+        &mut self,
+        f: &mut dyn FnMut(&mut dyn Reads) -> Option<Content>,
+    ) -> Option<Content>;
 
     /// A field as a string; `None` when absent or not a string.
     fn text(&mut self, place: &str, subject: &str, field: &str) -> Option<String> {
@@ -90,6 +102,13 @@ impl Reads for Reader<'_> {
 
     fn candidate_output(&mut self, place: &str, subject: &str) -> Option<Content> {
         Reader::candidate_output(self, place, subject)
+    }
+
+    fn committed_view(
+        &mut self,
+        f: &mut dyn FnMut(&mut dyn Reads) -> Option<Content>,
+    ) -> Option<Content> {
+        self.committed(|r| f(r))
     }
 }
 
@@ -145,7 +164,8 @@ pub enum PlaceSpec {
 pub struct Spec {
     pub places: BTreeMap<&'static str, PlaceSpec>,
     pub transitions: Vec<Transition>,
-    pub asks: BTreeMap<String, AskMeta>,
+    /// The ask side table: [`Asks::asks`] reads it.
+    pub asks: AskMetas,
 }
 
 impl Spec {
@@ -216,39 +236,39 @@ impl Spec {
     }
 
     pub fn netdef(&self) -> NetDef {
-        let net = self
-            .places
-            .iter()
-            .fold(NetDef::default(), |net, (name, def)| match def {
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Single,
-                } => net.place(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Register,
-                } => net.register(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Fifo,
-                } => net.fifo(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: Some(c),
-                    ..
-                } => {
-                    assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
-                    net.place_with_candidate(name, c)
-                }
-                PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
-            });
+        let net =
+            self.places
+                .iter()
+                .fold(holon_net::exec::new_net(), |net, (name, def)| match def {
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Single,
+                    } => net.place(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Register,
+                    } => net.register(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Fifo,
+                    } => net.fifo(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: Some(c),
+                        ..
+                    } => {
+                        assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
+                        net.place_with_candidate(name, c)
+                    }
+                    PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
+                });
         let net = self
             .asks
             .iter()
-            .fold(net, |net, (work, meta)| net.ask(work, meta.clone()));
+            .fold(net, |net, (work, _)| net.ask(work, ask_places(work)));
         self.transitions.iter().fold(net, |net, t| {
             let mut def =
                 TransitionDef::new(&t.name, t.trigger, t.bind.sut.clone(), t.body.clone());
@@ -437,6 +457,7 @@ fn observable(e: &Executor) -> impl Debug + PartialEq + '_ {
         e.in_flight().collect::<Vec<_>>(),
         e.retrying().collect::<Vec<_>>(),
         e.conditions(),
+        e.held(),
     )
 }
 
@@ -683,6 +704,10 @@ impl Driver {
         &self.exec
     }
 
+    pub fn asks(&self) -> Result<Vec<AskRow>, DeriveError> {
+        self.exec.asks(&self.spec.asks)
+    }
+
     /// Compares the answers of one external call, then queues the effect
     /// requests it returned.
     fn quiesced<T: Debug + PartialEq, E: Debug + PartialEq>(
@@ -862,6 +887,54 @@ impl Driver {
             self.model.conditions(),
             "disclosed conditions after {op}"
         );
+        assert!(
+            self.model.dirty_commits().is_empty(),
+            "P1 soundness after {op}: a commit on a view that differs from the committed front: {:?}",
+            self.model.dirty_commits()
+        );
+        for c in self.exec.conditions() {
+            let Condition::WaitsOnParkedTake {
+                reader_occurrence,
+                take_occurrence,
+                ..
+            } = c
+            else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    self.exec.settled(take_occurrence),
+                    Ok(Some(Settled::OutcomeUnknown(_)))
+                ),
+                "P4 wait condition after {op}: {c}, but the take is not parked"
+            );
+            assert!(
+                matches!(
+                    self.exec.settled(reader_occurrence),
+                    Ok(None | Some(Settled::OutcomeUnknown(_))) | Err(_)
+                ),
+                "P4 wait condition after {op}: {c}, but the reader's wait ended"
+            );
+        }
+        for (occ, edges) in self.exec.held() {
+            assert_eq!(
+                self.model.stale(&occ),
+                None,
+                "stale after hold, after {op}: the held reader {occ} read a row a write moved"
+            );
+            assert_eq!(
+                self.exec.settled(&occ),
+                Ok(None),
+                "P3 commit wait after {op}: the held reader {occ} is settled"
+            );
+            for (place, subject, take) in edges {
+                assert!(
+                    self.model.open_take(&take),
+                    "P3 commit wait after {op}: {occ} waits on {place} of {subject} for {take}, \
+                     which is not open"
+                );
+            }
+        }
     }
 
     fn check(&self, op: &str) {
@@ -1045,6 +1118,7 @@ impl Driver {
             .map(|(o, s)| (o.clone(), s.cloned()))
             .collect();
         agree(op, "occurrences", sut_occs, self.model.occurrences());
+        agree(op, "held readers", self.exec.held(), self.model.held());
 
         let sut_flight: Vec<_> = self
             .exec
@@ -1074,7 +1148,7 @@ impl Driver {
         agree(
             op,
             "asks",
-            self.exec.asks().expect("the asks derive"),
+            self.exec.asks(&self.spec.asks).expect("the asks derive"),
             self.model.ask_rows(),
         );
         for (p, d) in &self.spec.places {
@@ -1187,6 +1261,16 @@ pub fn subject(s: &str) -> Subject {
 /// `ExpireAnswer.Accept` expires an answer whose ask is gone or changed;
 /// `ReleaseFailed.Accept` clears a failed answer, so the user can answer
 /// again.
+/// The lowered busy set of an asked transition (`uft::lower`): its ask is
+/// offered, and `Answer` enabled, only while none of these holds a token.
+const ACCEPT_BUSY: [&str; 5] = [
+    "Answered.Accept",
+    "Accept.Running",
+    "Accept.RetryPending",
+    "Accept.OutcomeUnknown",
+    "WorkFailed.Accept",
+];
+
 pub fn answer_spec() -> Spec {
     Spec::default()
         .place("Item", Class::Process)
@@ -1199,8 +1283,7 @@ pub fn answer_spec() -> Spec {
         .derived(
             "Asks.Accept",
             bind!(|r, s| {
-                let busy = ["Answered.Accept", "Accept.Running", "WorkFailed.Accept"];
-                if busy.iter().any(|p| r.present(p, s)) {
+                if ACCEPT_BUSY.iter().any(|p| r.present(p, s)) {
                     return None;
                 }
                 ask_row(r, s)
@@ -1214,15 +1297,15 @@ pub fn answer_spec() -> Spec {
                 has_preview: false,
             },
         )
-        .transition(
+        .transition(ACCEPT_BUSY.iter().fold(
             Transition::new(
                 "Answer.Accept",
                 Trigger::Manual,
                 bind!(|r, s| r.present("Asks.Accept", s).then(Content::new)),
                 Body::pure(|s, input| Ok(vec![Output::new("Answered.Accept", s, input.clone())])),
-            )
-            .inhibits("Answered.Accept"),
-        )
+            ),
+            |t, p| t.inhibits(p),
+        ))
         .transition(
             Transition::new(
                 "Accept",
@@ -1300,10 +1383,13 @@ fn item_n(r: &mut dyn Reads, s: &Subject) -> Option<i64> {
     }
 }
 
+/// The lowered situation reads the committed view.
 fn ask_row(r: &mut dyn Reads, s: &Subject) -> Option<Content> {
-    let n = item_n(r, s)?;
-    let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
-    (n >= 0).then(|| content(&[("hash", text(&hash))]))
+    r.committed_view(&mut |r| {
+        let n = item_n(r, s)?;
+        let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
+        (n >= 0).then(|| content(&[("hash", text(&hash))]))
+    })
 }
 
 /// An answer of `Accept` for `s`; `stale` or a missing ask gives a seen

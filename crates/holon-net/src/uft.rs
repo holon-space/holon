@@ -10,6 +10,7 @@ mod lower;
 pub use lower::Generated;
 pub use lower::LowerError;
 pub use lower::LowerTwin;
+pub use lower::ask_metas;
 pub use lower::lower;
 #[cfg(feature = "naive-twins")]
 pub use lower::lower_twin;

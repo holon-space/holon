@@ -54,6 +54,33 @@ fn archlint_all_passes() {
     }
 }
 
+/// petri-workflow is the L1 layer of docs/Architecture/PetriNetLayers.md: it
+/// builds without Holon.
+#[test]
+fn petri_workflow_depends_on_no_holon_crate() {
+    let manifest = repo_root().join("crates/petri-workflow/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+
+    let offenders: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| {
+            ["holon", "workspace-hack"].iter().any(|name| {
+                line.starts_with(name)
+                    || line.contains(&format!("dep:{name}"))
+                    || line.contains(&format!(r#"package = "{name}"#))
+            })
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "crates/petri-workflow/Cargo.toml declares a Holon or workspace-hack dependency: {offenders:?}"
+    );
+}
+
 /// `holon-frontend` must never depend on `holon-loro` (D172.a, F1a layering).
 ///
 /// The read model's port lives in `holon-api`, which already owns `LiveData`,
