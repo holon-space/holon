@@ -659,8 +659,8 @@ fn step(state: &S, input: Input) -> (S, Vec<Effect>)
 cores are plain pure functions. The engines (Loro, Turso) own the domain
 state; the marking holds coordination state only. A pure transition is a core
 step; an effectful transition is the shell's effect. The sans-IO executor in
-`holon-net` (`exec`, [CrateMap.md](CrateMap.md)) is the house example of the
-sans-IO shape; the Time rule below is not built into it yet. The
+`petri-workflow` (`exec`, [PetriNetLayers.md](PetriNetLayers.md)) is the house
+example of the sans-IO shape; the Time rule below is not built into it yet. The
 companion rules for places, tokens and guards are in
 [Vision-PetriNetCoordination.md §5](Vision-PetriNetCoordination.md#5-engines-as-substitution-transitions).
 
@@ -692,7 +692,7 @@ engine transaction: `doc.transact(|view| plan(text, view))`.
 - A pure transition that only needs the date reads a coarse `Today` place, not
   `Clock`.
 
-Built today: the `holon-net` executor takes `now: Duration` on each call that
+Built today: the `petri-workflow` executor takes `now: Duration` on each call that
 can move time, and it has no next-due output and no `Tick` transition. The
 bullets above are the target. The places and transitions that this section and
 the companion rules name (`Tick`, `Clock`, `Today`, `Dirty`, `LastWritten`,
