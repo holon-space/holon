@@ -4185,8 +4185,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
- "windows-result 0.3.4",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
 ]
 
 [[package]]
@@ -5148,6 +5148,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.21",
+ "tla-checker",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -13840,6 +13841,17 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tla-checker"
+version = "0.24.11"
+source = "git+https://github.com/nightscape/tla-rs?rev=f6bb735b5784e714fd59750e5a7da52b5383d3c4#f6bb735b5784e714fd59750e5a7da52b5383d3c4"
+dependencies = [
+ "fastrand",
+ "indexmap 2.14.2",
+ "serde_json",
+ "stacker",
+]
 
 [[package]]
 name = "tokio"
