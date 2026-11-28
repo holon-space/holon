@@ -124,7 +124,36 @@ def test_counts_model_line_sums_to_entries(draws):
         assert counts[cls] == sum(1 for m, _ in draws if m == cls), (line, draws)
 
 
+INVALID_PAIRS = [pair for pair in ALL_PAIRS if expected_failures(*pair)]
+
+
+def sets_with_an_invalid_entry():
+    return st.tuples(
+        st.lists(st.sampled_from(ALL_PAIRS), max_size=7),
+        st.sampled_from(INVALID_PAIRS),
+        st.integers(min_value=0, max_value=7),
+    ).map(lambda t: t[0][: t[2]] + [t[1]] + t[0][t[2]:])
+
+
+def with_every_invalid_pair(test):
+    for pair in INVALID_PAIRS:
+        test = example(draws=[pair])(test)
+    return test
+
+
+@with_every_invalid_pair
+@settings(max_examples=60, deadline=None)
+@given(draws=sets_with_an_invalid_entry())
+def test_counts_refuses_a_set_with_an_invalid_entry(draws):
+    with tempfile.TemporaryDirectory() as tmp:
+        funnel, _ = write_entries(Path(tmp), draws)
+        rc, out = run("counts", "--dir", str(funnel))
+    assert rc != 0, (draws, out)
+    assert not any(l.startswith("MODEL CLASSES:") for l in out.splitlines()), (draws, out)
+
+
 if __name__ == "__main__":
     test_check_enforces_model_and_spec_rules()
     test_counts_model_line_sums_to_entries()
+    test_counts_refuses_a_set_with_an_invalid_entry()
     print("OK")

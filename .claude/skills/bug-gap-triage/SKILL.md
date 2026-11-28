@@ -54,14 +54,14 @@ the same lines). Pick ONE class for the `model:` field:
 | Class | Definition | Litmus question | Remedy |
 |---|---|---|---|
 | `none` | Not an order or hand-over bug | "Could any order of the same events make it go away?" No | nothing |
-| `UNMODELLED` | An order or hand-over bug in code that no spec anchors (`Models:`) | "Does a `Models:` line name the failing function?" No | Name a spec candidate, or say in one line why a spec does not pay off |
+| `UNMODELLED` | An order or hand-over bug in code that no spec anchors (`Models:`) | "Does a `Models:` line name the failing function?" No | Remedy names a spec candidate, or why a spec does not pay off (one line) |
 | `SPEC-COVERAGE` | A spec anchors the code but cannot reach the bad state: an abstracted variable, a missing action, or a bound too small | "Can TLC, within the bound, reach a state where this happens?" No | Add the variable or action, or raise the bound; a `.cfg` replay of the design before the fix must violate a property |
 | `SPEC-ORACLE` | The spec reaches the state but no property is violated | "If TLC reached this state, would a property go red?" No | Add a user-level property (not one written for this bug) and a witness that must FAIL |
-| `CONFORMANCE` | The spec forbids the step; the code takes it | "Does the spec allow the step that the code made?" No | The conformance PBT or the keystone step check goes red on the code before the fix; extend its generator or mapping |
+| `CONFORMANCE` | The spec forbids the step; the code takes it | "Does the spec allow the step that the code made?" No | The conformance PBT or the keystone step check must go red on the code before the fix; extend its generator or mapping |
 
-- If torn between SPEC-COVERAGE and SPEC-ORACLE: the fix decides. An added
+- If torn between SPEC-COVERAGE and SPEC-ORACLE: the fix decides, as in the existing triage. An added
   variable, action or bound = SPEC-COVERAGE. An added property = SPEC-ORACLE.
-- A spec that the fix changes is updated in the same change, and the replay row
+- A spec that the fix changes is updated in the same lane, and the replay row
   goes into the spec's report and `run.py`.
 
 ## Procedure
