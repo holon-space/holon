@@ -243,17 +243,21 @@ pub enum SettleVerdict {
 }
 
 /// The settle read of the write-back feed. `start` is the seq emitted when the
-/// read began, `None` without a database. `applied` reads the seq through
-/// which the feed's view is complete; it is only valid for a taken cursor, so
-/// it runs only then. A feed nothing took is not waited on.
+/// read began, `None` without a database; `routed_through` reads the seq every
+/// demux has routed through. The feed is behind until every batch emitted by
+/// `start` is routed and the cursor applied what it was sent, up to `start`.
 pub fn settle_verdict(
-    feed_taken: bool,
+    feed: &crate::live_data::DeliveryCursor,
     start: Option<u64>,
-    applied: impl FnOnce() -> Seq,
+    routed_through: impl FnOnce() -> Seq,
     writeback_owes_empty: impl FnOnce() -> bool,
 ) -> SettleVerdict {
     match start {
-        Some(start) if feed_taken && applied() < Seq(start) => SettleVerdict::FeedBehind(start),
+        Some(start)
+            if routed_through() < Seq(start) || (feed.is_lagging() && feed.applied() < start) =>
+        {
+            SettleVerdict::FeedBehind(start)
+        }
         _ if writeback_owes_empty() => SettleVerdict::Settled,
         _ => SettleVerdict::WritebackOwes,
     }

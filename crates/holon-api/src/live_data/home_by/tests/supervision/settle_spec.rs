@@ -17,7 +17,6 @@ use super::*;
 use crate::delivery_ledger::DeliveryLedger;
 use crate::delivery_ledger::Seq;
 use crate::delivery_ledger::SettleVerdict;
-use crate::delivery_ledger::ViewKey;
 use crate::delivery_ledger::settle_verdict;
 use crate::live_data::DeliveryCursor;
 use crate::live_data::reporting_cursor;
@@ -401,21 +400,17 @@ impl Slice {
     }
 
     /// The session's settle verdict (`settle_verdict`) over the values the
-    /// code gives: the ledger the matview manager builds from the write-back
-    /// cursor answers `complete_through_for`. `owes_empty` is the write-back
-    /// stage's answer: the slice writes no documents, so the caller chooses it.
+    /// code gives: the slice's router routes each batch as it emits it, so
+    /// the ledger has routed through every emitted seq. `owes_empty` is the
+    /// write-back stage's answer: the slice writes no documents, so the caller
+    /// chooses it.
     fn verdict(&self, owes_empty: bool) -> SettleVerdict {
-        let view = ViewKey {
-            name: VIEW.into(),
-            instance: Arc::as_ptr(&self.cursor) as usize as u64,
-        };
         let mut ledger = DeliveryLedger::default();
         ledger.emitted(Seq(self.emitted));
-        self.cursor.feed(&mut ledger, view.clone(), true);
         settle_verdict(
-            self.cursor.is_taken(),
+            &self.cursor,
             Some(self.emitted),
-            || ledger.complete_through_view(&view),
+            || ledger.routed_through(),
             || owes_empty,
         )
     }

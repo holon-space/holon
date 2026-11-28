@@ -377,6 +377,8 @@ async fn writeback_settles(
     stage: &std::sync::Mutex<Stage>,
 ) -> Result<()> {
     let set = |s: Stage| *stage.lock().expect("stage mutex") = s;
+    // Queued file changes are not imported: the files on disk keep them, and
+    // the next boot imports them.
     idle.seal_backlog().await;
 
     if let Some(sync) = loro_sync {
@@ -405,13 +407,14 @@ async fn writeback_settles(
         }
         net.borrow_and_update();
         let verdict = settle_verdict(
-            feed.is_taken(),
+            feed,
             start,
             || {
                 engine
                     .expect("a settle start is read from an engine")
                     .matview_manager()
-                    .complete_through_for(feed)
+                    .delivery_ledger()
+                    .routed_through()
             },
             || idle.writeback_owes_handed_over().is_empty(),
         );
