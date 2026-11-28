@@ -351,7 +351,9 @@ Open at commit 104f32fe:
   record only), `staleatrecordlive.StaleReleased` is violated: T1 binds the
   hole and is held on T0; a write to P0 makes T1 stale; T0 parks; T1 waits
   for a resolve that may never come. The spec releases a stale held reader
-  at once; whether the ruling covers this case is asked on the work issue.
+  at once. Ruled on 2026-11-28: the release round takes the stale path for
+  every held reader that a write makes stale, and drops its edges and its
+  wait Condition.
 
 ## Fairness
 
@@ -398,6 +400,8 @@ per-transition state (`t0`, `t1`) would become a function over transitions.
 - G5 step check: random runs of the test model, each step checked as a spec
   step, with the planted mutant. Waits for the final commit of the
   commit-wait change.
+- The case scan and the case-table rows run again at that final commit: the
+  scan here ran at 104f32fe, and the final commit may add case tests.
 - Two takes of one FIFO row in one subject (the findings of G5 come from
   reading the code).
 - Retract of a row token: the isolation machine has no retract operation.
