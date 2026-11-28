@@ -918,6 +918,11 @@ impl Driver {
         }
         for (occ, edges) in self.exec.held() {
             assert_eq!(
+                self.model.stale(&occ),
+                None,
+                "stale after hold, after {op}: the held reader {occ} read a row a write moved"
+            );
+            assert_eq!(
                 self.exec.settled(&occ),
                 Ok(None),
                 "P3 commit wait after {op}: the held reader {occ} is settled"
