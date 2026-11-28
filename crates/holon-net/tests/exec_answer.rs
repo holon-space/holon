@@ -206,7 +206,7 @@ const CASES_RUN: u32 = 512;
 /// no work in flight or parked, no `WorkFailed.T` (`answer_spec` has no
 /// retry). An offered ask has its Answer enabled: an external call returns
 /// only after the auto transitions it caused, so no answer waits for a
-/// `step` (D151.a, #167 idle rule, #192).
+/// `step`.
 fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
     for row in d.asks().expect("the asks derive") {
         let (work, s) = (&row.transition.0, &row.subject.0);
@@ -448,7 +448,7 @@ prop_state_machine! {
 
 /// The held arm with `before = Some`: a firing of another transition took an
 /// earlier `Item` row of the subject and still runs, so the undo of `a2`
-/// leaves the row its work consumed and the reach counter must see it (#195).
+/// leaves the row its work consumed and the reach counter must see it.
 /// The holder is not an earlier answer's work: the ask is offered only while
 /// the work is idle, so no second work of the same subject runs beside it.
 #[test]
@@ -795,10 +795,15 @@ fn a_work_takes_the_front_its_answer_saw_when_a_take_starts_after_the_answer() {
 }
 
 /// The take that holds the front is parked: the waiting work is disclosed
-/// until `resolve`. `Drop` commits the take, so the answer's situation is
-/// gone and the work never takes the newer token.
+/// until `resolve`. `Verify` and `Drop` commit the take, so the answer's
+/// situation is gone and the work never takes the newer token.
 #[test]
 fn a_work_waiting_on_a_parked_front_is_disclosed_until_resolve() {
+    work_waits_on_a_parked_front_until("Verify", Resolution::Verify(Vec::new()));
+    work_waits_on_a_parked_front_until("Drop", Resolution::Drop);
+}
+
+fn work_waits_on_a_parked_front_until(label: &str, resolution: Resolution) {
     let spec = answer_spec().fifo("Item", Class::Process).transition(
         Transition::new(
             "Grab",
@@ -829,13 +834,15 @@ fn a_work_waiting_on_a_parked_front_is_disclosed_until_resolve() {
                 if &**reader == "Accept" && &**t == "Grab" && *take_occurrence == take)
         })
     };
-    assert!(waits(&d), "{:?}", d.exec().conditions());
-    assert!(d.pending.is_empty(), "the work waits for the parked take");
-    d.resolve(&take, Resolution::Drop)
-        .expect("the net quiesces");
-    assert!(!waits(&d), "{:?}", d.exec().conditions());
+    assert!(waits(&d), "{label}: {:?}", d.exec().conditions());
+    assert!(
+        d.pending.is_empty(),
+        "{label}: the work waits for the parked take"
+    );
+    d.resolve(&take, resolution).expect("the net quiesces");
+    assert!(!waits(&d), "{label}: {:?}", d.exec().conditions());
     assert!(
         d.pending.iter().all(|req| &*req.transition != "Accept"),
-        "the work took n = 2 on an answer about n = 1"
+        "{label}: the work took n = 2 on an answer about n = 1"
     );
 }

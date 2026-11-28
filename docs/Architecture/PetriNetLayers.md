@@ -219,9 +219,15 @@ Rules:
   the commit or rollback of the take, so a record never nests in another.
 - The edges are acyclic: a reader waits only on takes that started before
   its bind, and a held reader's own takes stay open for later readers.
+- A reader that a write already made stale records stale at once and is
+  never held: no take's outcome can make its read current again.
+- A failed take puts a FIFO token back at its place by token id, which grows
+  with write order; the committed front of a FIFO row is the oldest token of
+  the row and of the open takes that hold its tokens.
 - A parked take (outcome unknown) has neither committed nor failed, so its
   readers wait until `resolve`. `Condition::WaitsOnParkedTake` discloses each
-  such wait and goes away at `resolve`. `Verify` and `Drop` commit the take.
+  such wait and goes away when the wait ends: at `resolve`, or when the
+  reader settles or is dropped. `Verify` and `Drop` commit the take.
   `Retry` keeps the wait; a retried attempt that fails definitely parks the
   take again, because an earlier attempt may have taken effect.
 - An ask reads the committed view (`Reader::committed`, through
@@ -233,6 +239,9 @@ Rules:
   an open take holds that front (a FIFO row), the work waits; a parked
   holder is disclosed by `Condition::WaitsOnParkedTake` until `resolve`.
   Other FIFO consumers take the next token behind a held front.
+- The `WaitsOnParkedTake` set is derived again at the end of each quiesce
+  from both sources (held readers' edges, asked works on a parked front);
+  no other code raises or removes it.
 
 ### L2 `holon-net`
 

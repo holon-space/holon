@@ -50,6 +50,9 @@ enum ReadKind {
     Field,
     /// T1's bind reads whether T0 runs.
     TakerRunning,
+    /// T1's bind reads the field `x` of P0 in the committed view, as an
+    /// ask's situation does.
+    Committed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +91,10 @@ fn x_of_p0(r: &mut dyn exec_support::Reads, s: &Subject) -> Option<Content> {
             .map(|x| content(&[("x", x)]))
             .unwrap_or_default(),
     )
+}
+
+fn committed_x_of_p0(r: &mut dyn exec_support::Reads, s: &Subject) -> Option<Content> {
+    r.committed_view(&mut |r| x_of_p0(r, s))
 }
 
 fn taker_runs(r: &mut dyn exec_support::Reads, s: &Subject) -> Option<Content> {
@@ -150,6 +157,7 @@ impl Net {
         let bind = match self.read {
             ReadKind::Field => bind!(x_of_p0),
             ReadKind::TakerRunning => bind!(taker_runs),
+            ReadKind::Committed => bind!(committed_x_of_p0),
         };
         let t1 = Transition::new("T1", Trigger::Auto, bind, body).consumes("P1");
         let t1 = if self.body == ReaderBody::Keyed {
@@ -173,7 +181,11 @@ fn net() -> impl Strategy<Value = Net> {
     (
         prop::sample::select(vec![Capacity::Single, Capacity::Register, Capacity::Fifo]),
         any::<bool>(),
-        prop::sample::select(vec![ReadKind::Field, ReadKind::TakerRunning]),
+        prop::sample::select(vec![
+            ReadKind::Field,
+            ReadKind::TakerRunning,
+            ReadKind::Committed,
+        ]),
         prop::sample::select(vec![
             ReaderBody::Pure,
             ReaderBody::Keyed,
@@ -384,9 +396,10 @@ impl Sut {
         self.observe();
     }
 
-    /// Resolves `o` and checks that exactly its wait conditions go; a
-    /// refused retry (a later run of the same transition holds `Running`)
-    /// resolves nothing, so every condition stays.
+    /// Resolves `o` and checks that exactly its wait conditions as a take
+    /// go; a refused retry (a later run of the same transition holds
+    /// `Running`) resolves nothing, so every condition stays. The waits of
+    /// `o` as a reader are P4's.
     fn resolve(&mut self, o: &OccurrenceId, resolution: Resolution) {
         let before = self.d.exec().conditions().to_vec();
         let resolved = match self.d.resolve(o, resolution) {
@@ -395,7 +408,9 @@ impl Sut {
             Err(e) => panic!("resolve of {o}: {e}"),
         };
         let after = self.d.exec().conditions();
-        for c in &before {
+        for c in before.iter().filter(|c| {
+            !matches!(c, Condition::WaitsOnParkedTake { reader_occurrence, .. } if reader_occurrence == o)
+        }) {
             let this_wait = resolved
                 && matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == o);
             assert_eq!(
@@ -1047,4 +1062,164 @@ fn reader_waits_on_a_parked_take_drop() {
 #[test]
 fn reader_waits_on_a_parked_take_retry_then_fails() {
     reader_waits_on_a_parked_take(Resolve::RetryThenFails);
+}
+
+const FIFO_TAKES: Net = Net {
+    p0: Capacity::Fifo,
+    read: ReadKind::Committed,
+    t2: true,
+    ..READER
+};
+
+fn p0_order(sut: &Sut) -> Vec<Option<Value>> {
+    sut.d
+        .exec()
+        .tokens()
+        .row("P0", S)
+        .map(|t| t.record().get("x").cloned())
+        .collect()
+}
+
+fn committed_read_of_t1(sut: &Sut) -> Content {
+    sut.d
+        .requests_of("T1")
+        .next()
+        .expect("T1 fired")
+        .input
+        .clone()
+}
+
+/// T0 takes k1, T2 takes k2 and parks, T0 fails and puts k1 back, a second
+/// T2 run takes k1: k1 is the older held token, so it is the committed front
+/// although the take that holds k2 started first.
+#[test]
+fn committed_front_is_the_oldest_token_of_a_later_take() {
+    let unknown = || Complete {
+        who: Who::T2,
+        res: Res::Unknown,
+    };
+    let mut sut = Sut::new(FIFO_TAKES);
+    for op in [
+        wx(true, true),
+        wx(true, false),
+        Op::FireT2,
+        fails(Who::T0, false),
+        unknown(),
+        unknown(),
+        Op::FireT2,
+        w(false),
+    ] {
+        sut.apply(&op);
+    }
+    assert_eq!(
+        committed_read_of_t1(&sut),
+        content(&[("x", Value::Boolean(true))]),
+        "T1 reads k1, which the second T0 run holds"
+    );
+}
+
+/// T0 takes k1, T2 takes k2, T0 fails and puts k1 back: the row's own k1
+/// is older than k2, which T2 holds, so k1 is the committed front.
+#[test]
+fn committed_front_is_a_restored_token_older_than_a_held_one() {
+    let mut sut = Sut::new(FIFO_TAKES);
+    for op in [
+        wx(true, true),
+        wx(true, false),
+        Op::FireT2,
+        fails(Who::T0, false),
+        w(false),
+    ] {
+        sut.apply(&op);
+    }
+    assert_eq!(
+        committed_read_of_t1(&sut),
+        content(&[("x", Value::Boolean(true))]),
+        "T1 reads the restored k1, not k2 that T2 holds"
+    );
+}
+
+/// T0 takes k1, T2 takes k2, both fail: each token goes back to its place
+/// by token id, so the row is k1, k2, k3 again.
+#[test]
+fn failed_takes_put_fifo_tokens_back_in_write_order() {
+    let net = Net {
+        p0: Capacity::Fifo,
+        t2: true,
+        ..READER
+    };
+    let mut sut = Sut::new(net);
+    for op in [
+        wx(true, true),
+        wx(true, false),
+        w(true),
+        Op::FireT2,
+        fails(Who::T0, false),
+        fails(Who::T2, false),
+    ] {
+        sut.apply(&op);
+    }
+    assert_eq!(
+        p0_order(&sut),
+        vec![
+            Some(Value::Boolean(true)),
+            Some(Value::Boolean(false)),
+            None
+        ],
+        "P0 after both takes failed"
+    );
+}
+
+fn t1_waits_on_parked_t0(sut: &Sut) -> bool {
+    sut.d.exec().conditions().iter().any(|c| {
+        matches!(c, Condition::WaitsOnParkedTake { reader, take, .. }
+            if &**reader == "T1" && &**take == "T0")
+    })
+}
+
+fn park_t0(sut: &mut Sut) {
+    for _ in 0..2 {
+        sut.apply(&Complete {
+            who: Who::T0,
+            res: Res::Unknown,
+        });
+    }
+}
+
+/// T1 binds the hole of T0, T0 parks, and T1's own effect fails
+/// definitely: T1 waits no more, so the condition goes.
+#[test]
+fn a_wait_condition_goes_when_the_reader_fails() {
+    let mut sut = Sut::new(READER);
+    sut.apply(&w(true));
+    sut.apply(&w(false));
+    park_t0(&mut sut);
+    assert!(
+        t1_waits_on_parked_t0(&sut),
+        "{:?}",
+        sut.d.exec().conditions()
+    );
+    sut.apply(&fails(Who::T1, false));
+    assert!(
+        !t1_waits_on_parked_t0(&sut),
+        "{:?}",
+        sut.d.exec().conditions()
+    );
+    sut.check();
+}
+
+/// T1 binds the hole of T0, a write moves P0, T0 parks, T1's effect ends:
+/// T1 is stale by the write, so it records stale at once instead of waiting
+/// on the parked take.
+#[test]
+fn a_reader_stale_by_a_write_is_not_held() {
+    let mut sut = Sut::new(READER);
+    for op in [w(true), w(false), wx(true, true)] {
+        sut.apply(&op);
+    }
+    park_t0(&mut sut);
+    sut.apply(&done(Who::T1));
+    assert!(!sut.t1_held(), "T1 waits on the parked take");
+    assert_eq!(sut.verdict(), Verdict::Stale);
+    sut.check();
 }

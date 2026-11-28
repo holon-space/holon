@@ -1982,7 +1982,16 @@ impl Machine {
                     .subjects(&Generated::Expired.name(&work))
                     .iter()
                     .any(|t| t.as_str() == id);
-                if r.is_ok() && !expired && self.net.binds_answer_input(&work) {
+                // An asked work waits while an open take holds the committed
+                // front its answer saw; it has not bound yet.
+                let waits_on_front = matches!(
+                    self.exec.why_not(&work, subject),
+                    Ok(Some(WhyNot::Needs {
+                        held_by: Some(_),
+                        ..
+                    }))
+                );
+                if r.is_ok() && !expired && !waits_on_front && self.net.binds_answer_input(&work) {
                     let conditions = format!("{:?}", self.exec.conditions());
                     let why = format!("{:?}", self.exec.why_not(&work, subject));
                     prop_assert!(
@@ -2197,7 +2206,7 @@ fn load(net: &NetGen) -> Result<Option<Checked>, TestCaseError> {
 fn no_sequence_of_caller_calls_panics() {
     // The third field: the attempt number of each of T0's requests; a retry
     // of the same run counts on, a new run starts at 1 again.
-    let found: [(&str, FoundCase, Option<&[u32]>); 10] = [
+    let found: [(&str, FoundCase, Option<&[u32]>); 11] = [
         (
             "free_of_an_answer_place_counts_its_answer",
             free_of_an_answer_place_counts_its_answer(),
@@ -2246,6 +2255,11 @@ fn no_sequence_of_caller_calls_panics() {
         (
             "an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice",
             an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice(),
+            None,
+        ),
+        (
+            "an_answer_whose_work_waits_on_a_held_front_is_not_yet_disclosed",
+            an_answer_whose_work_waits_on_a_held_front_is_not_yet_disclosed(),
             None,
         ),
     ];
@@ -2522,7 +2536,42 @@ fn a_retry_input_consumed_by_another_keeps_the_run() -> FoundCase {
 /// answers of that ask: the first must settle at once, so the second is
 /// refused, never met by a held `Answer`.
 fn an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice() -> FoundCase {
-    let net = NetGen {
+    let net = fifo_take_and_work(Some(vec![]));
+    let write = || Op::Write {
+        place: Name::Held(0),
+        subject: "s".to_owned(),
+        content: vec![],
+        dt: Dt::Same,
+    };
+    let answer = || Op::Answer {
+        work: Name::Held(0),
+        subject: "s".to_owned(),
+        seen: SeenGen::Offered(0),
+        answer: OccGen::Fresh,
+        value: None,
+        forward: 0,
+    };
+    let ops = vec![
+        write(),
+        Op::Complete {
+            attempt: Pick::Known(0),
+            result: ResultGen::Failed(true),
+            dt: Dt::Same,
+        },
+        write(),
+        Op::Step {
+            dt: Dt::Forward(10_000_000),
+        },
+        answer(),
+        answer(),
+    ];
+    (net, ops)
+}
+
+/// FIFO P0; T0 (auto, Keyed) consumes it; the work W0 consumes it and binds
+/// `out`.
+fn fifo_take_and_work(out: Option<Vec<(String, Value)>>) -> NetGen {
+    NetGen {
         places: vec![PlaceGen {
             capacity: PlaceCapacity::Fifo,
             pool: None,
@@ -2551,40 +2600,38 @@ fn an_ask_on_a_row_whose_front_a_retry_holds_is_answered_twice() -> FoundCase {
             input: None,
             irreversible: false,
             undoes: None,
-            bind: BindProg {
-                reads: vec![],
-                out: Some(vec![]),
-            },
+            bind: BindProg { reads: vec![], out },
             body: BodyProg::Outputs(vec![]),
         }],
-    };
-    let write = || Op::Write {
-        place: Name::Held(0),
-        subject: "s".to_owned(),
-        content: vec![],
-        dt: Dt::Same,
-    };
-    let answer = || Op::Answer {
-        work: Name::Held(0),
-        subject: "s".to_owned(),
-        seen: SeenGen::Offered(0),
-        answer: OccGen::Fresh,
-        value: None,
-        forward: 0,
-    };
+    }
+}
+
+/// A generator find, kept as its state: T0 holds the front of the FIFO P0
+/// when W0, whose binding produces the answer input, is answered. The work
+/// waits for T0 and has not bound, so nothing is disclosed yet; T0 then
+/// commits, and the answer about the taken token expires.
+fn an_answer_whose_work_waits_on_a_held_front_is_not_yet_disclosed() -> FoundCase {
+    let net = fifo_take_and_work(Some(vec![("@input".to_owned(), Value::Null)]));
     let ops = vec![
-        write(),
-        Op::Complete {
-            attempt: Pick::Known(0),
-            result: ResultGen::Failed(true),
+        Op::Write {
+            place: Name::Held(0),
+            subject: "s".to_owned(),
+            content: vec![],
             dt: Dt::Same,
         },
-        write(),
-        Op::Step {
-            dt: Dt::Forward(10_000_000),
+        Op::Answer {
+            work: Name::Held(0),
+            subject: "s".to_owned(),
+            seen: SeenGen::Offered(0),
+            answer: OccGen::Fresh,
+            value: None,
+            forward: 0,
         },
-        answer(),
-        answer(),
+        Op::Complete {
+            attempt: Pick::Known(0),
+            result: ResultGen::Done(vec![]),
+            dt: Dt::Same,
+        },
     ];
     (net, ops)
 }
