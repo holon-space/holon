@@ -402,9 +402,9 @@ impl Slice {
 
     /// The session's settle verdict (`settle_verdict`) over the values the
     /// code gives: the ledger the matview manager builds from the write-back
-    /// cursor answers `complete_through_for`. No write-back owes anything: the
-    /// slice writes no documents.
-    fn settled(&self) -> bool {
+    /// cursor answers `complete_through_for`. `owes_empty` is the write-back
+    /// stage's answer: the slice writes no documents, so the caller chooses it.
+    fn verdict(&self, owes_empty: bool) -> SettleVerdict {
         let view = ViewKey {
             name: VIEW.into(),
             instance: Arc::as_ptr(&self.cursor) as usize as u64,
@@ -416,8 +416,12 @@ impl Slice {
             self.cursor.is_taken(),
             Some(self.emitted),
             || ledger.complete_through_view(&view),
-            || true,
-        ) == SettleVerdict::Settled
+            || owes_empty,
+        )
+    }
+
+    fn settled(&self) -> bool {
+        self.verdict(true) == SettleVerdict::Settled
     }
 
     /// Runs one step; `false` when a `FeedChange` changes nothing (no step).
@@ -658,17 +662,9 @@ fn static_examples() -> Vec<Vec<Drawn>> {
     ]
 }
 
-/// Runs the static examples, then the drawn cases: `each_step` after every
-/// step, `at_end` once per run. Prints how often each spec action ran.
-fn run_slice(
-    test: &str,
-    each_step: impl Fn(&Slice) -> std::result::Result<(), String>,
-    at_end: impl Fn(&Slice) -> std::result::Result<(), String>,
-) {
-    run_slice_of(test, false, each_step, at_end)
-}
-
-/// [`run_slice`] over a write-back cursor that a subscription `feed_taken`.
+/// Runs the static examples, then the drawn cases, over a write-back cursor
+/// that a subscription took when `feed_taken`: `each_step` after every step,
+/// `at_end` once per run. Prints how often each spec action ran.
 fn run_slice_of(
     test: &str,
     feed_taken: bool,
@@ -829,24 +825,49 @@ fn a_spec_the_tool_cannot_read_is_an_error() {
     }
 }
 
-/// The session settle reads the write-back cursor only once a subscription
-/// took it (`DeliveryCursor::is_taken`); a settle read of a cursor no
-/// subscription took is no read of the production settle predicate.
-#[test]
-fn a_settle_read_reads_the_cursor_the_session_settle_reads() {
-    run_slice(
-        "session cursor",
+/// A settle read with a write-back still handed over does not return, whatever
+/// the feed stage says: it waits on the feed when the feed is behind and on
+/// the write-back when it is not.
+fn a_writeback_that_owes_holds_a_settle_read_open(test: &str, feed_taken: bool) {
+    let feed_settled_reads = Cell::new(0u64);
+    run_slice_of(
+        test,
+        feed_taken,
         |slice| {
             let last = slice.trace.steps.last().expect("a step was recorded");
-            if last.action == Action::SettleRead && !slice.cursor.is_taken() {
+            if last.action != Action::SettleRead {
+                return Ok(());
+            }
+            let owing = slice.verdict(false);
+            if last.state.returned {
+                feed_settled_reads.set(feed_settled_reads.get() + 1);
+                if owing != SettleVerdict::WritebackOwes {
+                    return Err(format!(
+                        "the feed stage settled but a write-back is handed over: {owing:?}"
+                    ));
+                }
+            } else if !matches!(owing, SettleVerdict::FeedBehind(_)) {
                 return Err(format!(
-                    "SettleRead read a delivery cursor that no subscription took; the session \
-                     settle skips its feed stage for such a cursor\n  trace: {:#?}",
-                    slice.trace
+                    "the feed stage is behind but the verdict is {owing:?}"
                 ));
             }
             Ok(())
         },
         |_| Ok(()),
     );
+    eprintln!("FEED_SETTLED_READS {}", feed_settled_reads.get());
+    assert!(
+        feed_settled_reads.get() > 0,
+        "no settle read found the feed settled: the write-back arm was never reached"
+    );
+}
+
+#[test]
+fn a_writeback_that_owes_holds_a_settle_read_of_an_untaken_feed_open() {
+    a_writeback_that_owes_holds_a_settle_read_open("owes untaken feed", false);
+}
+
+#[test]
+fn a_writeback_that_owes_holds_a_settle_read_of_a_taken_feed_open() {
+    a_writeback_that_owes_holds_a_settle_read_open("owes taken feed", true);
 }
