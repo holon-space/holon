@@ -227,11 +227,13 @@ Rules:
   with write order; the committed front of a FIFO row is the oldest token of
   the row and of the open takes that hold its tokens.
 - A parked take (outcome unknown) has neither committed nor failed, so its
-  readers wait until `resolve`. `Condition::WaitsOnParkedTake` discloses each
-  such wait and goes away when the wait ends: at `resolve`, or when the
-  reader settles or is dropped. `Verify` and `Drop` commit the take.
-  `Retry` keeps the wait; a retried attempt that fails definitely parks the
-  take again, because an earlier attempt may have taken effect.
+  readers wait until `resolve`, unless a write makes a reader stale first
+  (see above). `Condition::WaitsOnParkedTake` discloses each such wait and
+  goes away when the wait ends: at `resolve`, when a write releases the
+  reader to the stale path, or when the reader settles or is dropped.
+  `Verify` and `Drop` commit the take. `Retry` keeps the wait; a retried
+  attempt that fails definitely parks the take again, because an earlier
+  attempt may have taken effect.
 - An ask reads the committed view (`Reader::committed`, through
   `Executor::committed_front`, which uses `Executor::superseded`): a token
   an open take holds reads as still in its row. No take's outcome changes
