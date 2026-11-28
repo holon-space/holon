@@ -1223,3 +1223,43 @@ fn a_reader_stale_by_a_write_is_not_held() {
     assert_eq!(sut.verdict(), Verdict::Stale);
     sut.check();
 }
+
+/// T1 binds the hole of T0, its effect ends and T1 waits; then a write
+/// moves P0: T1 is stale, so the next quiesce records it stale without any
+/// settle of T0, parked or still running.
+fn a_reader_stale_by_a_write_after_its_hold(park: bool) {
+    let mut sut = Sut::new(READER);
+    for op in [w(true), w(false), done(Who::T1)] {
+        sut.apply(&op);
+    }
+    assert!(sut.t1_held(), "T1 waits on the open take");
+    sut.apply(&wx(true, true));
+    if park {
+        park_t0(&mut sut);
+    }
+    let t0_parked = sut
+        .d
+        .exec()
+        .occurrences()
+        .any(|(o, s)| of(o, Who::T0) && matches!(s, Some(Settled::OutcomeUnknown(_))));
+    let t0_runs = sut.d.pending.iter().any(|r| &*r.transition == "T0");
+    assert_eq!((t0_parked, t0_runs), (park, !park), "T0's take is open");
+    assert!(!sut.t1_held(), "T1 still waits: {:?}", sut.d.exec().held());
+    assert!(
+        !t1_waits_on_parked_t0(&sut),
+        "{:?}",
+        sut.d.exec().conditions()
+    );
+    assert_eq!(sut.verdict(), Verdict::Stale);
+    sut.check();
+}
+
+#[test]
+fn a_reader_stale_by_a_write_after_its_hold_is_released() {
+    a_reader_stale_by_a_write_after_its_hold(true);
+}
+
+#[test]
+fn a_reader_stale_by_a_write_after_its_hold_is_released_while_the_take_runs() {
+    a_reader_stale_by_a_write_after_its_hold(false);
+}

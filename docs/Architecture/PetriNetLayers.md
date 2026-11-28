@@ -220,7 +220,9 @@ Rules:
 - The edges are acyclic: a reader waits only on takes that started before
   its bind, and a held reader's own takes stay open for later readers.
 - A reader that a write already made stale records stale at once and is
-  never held: no take's outcome can make its read current again.
+  never held: no take's outcome can make its read current again. A write
+  that makes a held reader stale releases it to the stale path in the next
+  quiesce round, with its edges and its `WaitsOnParkedTake` Condition.
 - A failed take puts a FIFO token back at its place by token id, which grows
   with write order; the committed front of a FIFO row is the oldest token of
   the row and of the open takes that hold its tokens.

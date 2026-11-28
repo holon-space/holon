@@ -3811,13 +3811,14 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             .chain(self.held.values_mut().map(|(a, _)| a))
     }
 
-    /// Records every held reader whose takes all committed or failed, until
-    /// none is left: one release can end the wait of another.
+    /// Records every held reader whose takes all committed or failed, or that
+    /// a write made stale, until none is left: one release can end the wait
+    /// of another. No outcome of a take makes a stale reader current again.
     fn release_held(&mut self, now: Duration) {
         while let Some(occurrence) = self
             .held
             .iter()
-            .find(|(_, (a, _))| a.waits_on.is_empty())
+            .find(|(_, (a, _))| a.waits_on.is_empty() || self.stale(a).is_some())
             .map(|(o, _)| o.clone())
         {
             let (a, outputs) = self.held.remove(&occurrence).expect("found above");

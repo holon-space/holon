@@ -1581,7 +1581,7 @@ impl Model {
 
     /// The first READ row whose version moved: a consumed row is held by the
     /// firing (REV11-running.a) and cannot be stale.
-    fn stale(&self, occ: &OccurrenceId) -> Option<Key> {
+    pub fn stale(&self, occ: &OccurrenceId) -> Option<Key> {
         let o = &self.occs[occ];
         if let Some(row) = o.stale_rows.first() {
             return Some(row.clone());
@@ -2058,13 +2058,13 @@ impl Model {
         self.conditions.extend(waits.into_values());
     }
 
-    /// Records every held reader whose takes all committed or failed, until
-    /// none is left.
+    /// Records every held reader whose takes all committed or failed, or that
+    /// a write made stale, until none is left.
     fn release_held(&mut self) {
         while let Some(occ) = self
             .occs
             .iter()
-            .find(|(_, o)| o.held.is_some() && o.waits_on.is_empty())
+            .find(|(id, o)| o.held.is_some() && (o.waits_on.is_empty() || self.stale(id).is_some()))
             .map(|(id, _)| id.clone())
         {
             let outputs = self.occ_mut(&occ).held.take().expect("found above");
