@@ -148,7 +148,7 @@ pub fn net() -> NetDef {
 /// [`net`] with `backoff` between the tries of a catch-up the disk does not
 /// take, so a test can hold a retry pending for as long as it runs.
 pub fn net_with_backoff(backoff: Duration) -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .place(DISK_CHANGED, Class::Process)
         .register(ON_DISK, Class::Process)
         .register(BASE, Class::Process)

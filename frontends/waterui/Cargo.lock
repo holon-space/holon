@@ -3271,6 +3271,7 @@ dependencies = [
  "holon-rules",
  "holon-transition-contract",
  "indexmap",
+ "petri-workflow",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3369,6 +3370,7 @@ name = "holon-transition-contract"
 version = "0.1.0"
 dependencies = [
  "holon-api",
+ "petri-workflow",
  "serde",
  "thiserror 2.0.21",
  "workspace-hack",
@@ -5840,6 +5842,18 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "petri-workflow"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pico-args"

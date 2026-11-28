@@ -36,7 +36,7 @@ fn always() -> Read {
 /// `Take` moves a waiting subject into `Held` while it holds a slot;
 /// `Release` hands the slot back.
 fn slot_net(slots: impl FnOnce(NetDef) -> NetDef, bind: Read) -> NetDef {
-    slots(NetDef::default().fifo("Waiting", Class::Process))
+    slots(holon_net::exec::new_net().fifo("Waiting", Class::Process))
         .place("Held", Class::Process)
         .transition(
             TransitionDef::new(
@@ -211,7 +211,7 @@ proptest! {
 
 /// `Take` runs an effect, so its pool token stays held across calls.
 fn effect_net() -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .fifo("Waiting", Class::Process)
         .pool("Slots", Class::Process, 1)
         .transition(
@@ -255,7 +255,7 @@ fn a_failed_firing_gives_its_token_back_once() {
 #[test]
 fn concurrent_effects_behind_a_free_guard_both_land() {
     let free: Read = Arc::new(|r, _| (r.free("Slots") > 0).then(Content::new));
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .fifo("Waiting", Class::Process)
         .pool("Slots", Class::Process, 2)
         .place("Held", Class::Process)

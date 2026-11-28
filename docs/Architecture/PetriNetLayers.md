@@ -1,15 +1,15 @@
 # Petri-net layers: petri-net, petri-workflow, holon-net
 
-*Target design, ruled. The executor in `crates/holon-net/src/exec.rs` is one
-crate today; the migration section below carves it into these layers. Ratified
+*Target design, ruled. The executor is in `crates/petri-workflow/src/exec.rs`
+today; the migration section below carves it into these layers. Ratified
 semantics: [ADR 0032](../adr/0032-petri-net-execution-semantics.md) §8, §9.*
 
 The engine has three layers, like UDP, TCP and HTTP:
 
 | Layer | Crate | Knows |
 |---|---|---|
-| L0 | `petri-net` (planned) | an ordinary coloured Petri net |
-| L1 | `petri-workflow` (planned) | workflow features: effects, retry, timers, undo, human tasks; nothing of Holon |
+| L0 | `petri-net` | an ordinary coloured Petri net |
+| L1 | `petri-workflow` | workflow features: effects, retry, timers, undo, human tasks; nothing of Holon |
 | L2 | `holon-net` | Holon: values, the Loro store, Holon names |
 
 ## Worked example: one effectful transition
@@ -96,16 +96,30 @@ Constraints:
 - **Place ids.** Generic. L0 does not name places.
 - **Places.** A store trait with the disciplines Single (one token, kept),
   Register (one token, replaced), Fifo and Counted. A pool is a counted place.
-- **Stamp.** One stamp per row: the last firing that changed it. The store
-  trait owns the stamp type, so a replicated store can bring its own.
+- **Stamp.** Each token carries a stamp, and each row has a row stamp. The
+  store trait owns the stamp type, so a replicated store can bring its own.
+  Every store keeps two laws: equal row stamps mean equal row content
+  (stamp-sound), and a token that moves out and back, with no other change
+  of the row, gives the same row stamp (move-neutral). The in-memory store
+  uses the list of the row's token stamps as the row stamp (rule L); an
+  empty row is the empty list, a Counted row uses its count. The stamp of
+  the head token alone is not a row stamp: an append to a Fifo row keeps the
+  head and changes the content, so it breaks stamp-sound. The shadow-stamp
+  spike shows this.
 - **Arcs.** Consume, read, inhibit and produce, declared per transition.
 - **Bind.** Guard and binding in one predicate. It reads through a view.
 - **Footprint.** The view records every row it read, every row it found
-  absent and every place it scanned. Reading an undeclared place is a
-  refusal.
+  absent and every place it scanned. It also holds the output rows whose
+  discipline can refuse. `enabled` returns the footprint also for a disabled
+  pair, because a change-driven scheduler must check that pair again when
+  one of these rows changes. Reading an undeclared place is a refusal.
 - **Fire.** Pure and atomic. It returns the outputs of one firing.
-- **Triggers.** Auto, Manual and External. An external transition fires with
-  a binding that the caller supplies.
+- **Outputs.** A new token, or `Moved { from, at: Front | Back }`: a token
+  that the firing consumed, with its stamp, put at the front or the back of
+  the row. `Front` is legal only on Fifo places. Ruled in
+  [holon-work#1476](https://github.com/holon-space/holon-work/issues/1476#issuecomment-7205138440).
+- **Triggers.** Auto and External. An external transition fires with a
+  binding that the caller supplies; a manual transition is an external one.
 - **No outside writes.** Every change from outside is a firing of an external
   transition. L0 has no put, take or revert API.
 - **Firing rule: level semantics, interleaving.** Fire one enabled
@@ -146,9 +160,22 @@ Constraints:
     `next_try` with the Clock place;
   - run timers and abandon timers, as guards over the Clock place;
   - failure and timeout ports;
+  - the fail or restore of a take, which moves the old token back to its
+    row:
+    - when a newer token was written to the row while the take ran, a
+      Single or Register row drops the old token;
+    - a Fifo row moves the old token back with `Front`;
+    - the old token is also dropped when the newer token is now held by
+      another take;
   - undo: UndoRow tokens and compiled inverse transitions;
   - human tasks as generic primitives: offer, witness,
     fire-if-witness-unchanged, expiry.
+- **A take is an exclusivity lock.** A token that a take holds is hidden from
+  every other transition. A reader that saw the hole of an open take may run
+  its effect, but its commit waits until the take commits or fails. When the
+  take fails and restores the token, the reader is stale and binds again.
+  Ruled in
+  [holon-work#1474](https://github.com/holon-space/holon-work/issues/1474#issuecomment-7212524683).
 - **Typed place ids.** A user place, or (transition, role).
 - **Decompile.** A first-class map from an L0 marking back to high-level
   state. The viewer, why-not and the differential test use it.
@@ -165,7 +192,10 @@ Constraints:
 
 - `V = holon_pattern::Value`.
 - The Loro data-class store.
-- Holon names: `Answer.T`, `AskRow`, the `TypeHint` table.
+- The host functions of `Host<Value>`: the value encoder, text, probe
+  facts and the answer codec.
+- Holon names: `Answer.T`, `AskRow`, the `TypeHint` table, the `AskMeta`
+  side table that `Asks::asks` reads.
 - The uft lowering.
 - The mapping from header fields to holon-expr fields, so guards read
   `tries` (planned, not in the code) and `cause` (planned, not in the code).
@@ -228,7 +258,7 @@ Laws, checked as PBT invariants:
 - **Crash.** Drop the driver and every cache, rebuild from the marking: the
   observable run is the same. Today the executor PBTs check it with a shadow
   executor that crashes before every call; a drawn `Crash` action is planned.
-  Of the fields of `Executor` (crates/holon-net/src/exec.rs), `net` is the
+  Of the fields of `Executor` (crates/petri-workflow/src/exec.rs), `net` is the
   definition and `tokens` the marking. `crash()` rebuilds the caches
   `watchers`, `preferred`, `waiters`, `pending` and `pending_all`. Every other
   field is state outside the marking that later carve steps compile into
@@ -245,8 +275,17 @@ Laws, checked as PBT invariants:
 Not a strangler rewrite. Each step keeps the existing executor PBT green and
 adds the two laws as invariants.
 
-1. Give today's executor typed bookkeeping tokens. Then it no longer needs
-   Holon, and it moves to `petri-workflow`.
+1. Make today's executor generic over the token value `V` and move it to
+   `petri-workflow`. Done: `crates/petri-workflow` holds the executor, the
+   net file format, the loader and probes. The host passes a `Host<V>` of
+   plain functions in `NetDef` (the value encoder, text in and out of `V`,
+   the probe fact parser, and the answer codec with the keys of an answer
+   token), and an ask is declared by its places and transition. `holon-net`
+   keeps the faces at `V = Value`: type aliases, the host functions, the ask
+   names and `AskMeta` side table, and the `Asks` surface of the UI and MCP.
+   `petri-workflow` depends on no Holon crate: it owns the occurrence, answer
+   and ask-hash ids, and `holon-transition-contract` re-exports them.
+   Typed bookkeeping tokens follow in this step.
 2. Carve the kernel under the executor into `petri-net`: marking, stores,
    arcs, atomic fire, level semantics with interleaving.
 3. Compile one feature at a time down to L0: timers, the effect lifecycle,
