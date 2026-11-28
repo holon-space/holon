@@ -1,18 +1,20 @@
 # The net file format
 
 *Part of [Architecture](../Architecture.md). Status: the format is built
-(`crates/holon-net/src/file.rs`, pinned by
+(`crates/petri-workflow/src/file.rs`, pinned by
 `crates/holon-net/tests/net_file.rs`) and the loader builds the executor's net
-from it (`crates/holon-net/src/load.rs`, pinned by
+from it (`crates/petri-workflow/src/load.rs`, pinned by
 `crates/holon-net/tests/net_load.rs`). Probes run through
-`crates/holon-net/src/probe.rs` (pinned by `crates/holon-net/tests/probe_facts.rs`)
+`crates/petri-workflow/src/probe.rs` (pinned by `crates/holon-net/tests/probe_facts.rs`)
 and `crates/holon-net-shell/src/probe.rs`; netd hosts a net file and
-schedules them ([NetHost.md](NetHost.md)).*
+schedules them ([NetHost.md](NetHost.md)). `holon-net` is the Holon face of
+this code: it fixes the token value to Holon's `Value` and supplies the host
+functions ([PetriNetLayers.md](PetriNetLayers.md)).*
 
 A **net file** is one YAML file that holds one whole runtime net: its places,
 its transitions, the shell commands its firings run, and the probes that feed
 it facts from outside. It is the input of the sans-IO executor in
-`crates/holon-net/src/exec.rs`, which owns the marking and enforces the firing
+`crates/petri-workflow/src/exec.rs`, which owns the marking and enforces the firing
 axiom of [ADR 0032 §9](../adr/0032-petri-net-execution-semantics.md).
 
 It is not the simulation net of `crates/holon-engine/src/yaml/net.rs`
@@ -270,8 +272,8 @@ means no arcs of that kind, and every other absent field is an error.
 Each of these is a field a later card adds, not a silent default:
 
 - **Token class.** A place carries no class field. The executor refuses
-  anything but process class (`LoadError::ClassNotSupported` in
-  `crates/holon-net/src/exec.rs`), so the loader of holon-space/holon-work#370
+  device class (`LoadError::ClassNotSupported` in
+  `crates/petri-workflow/src/exec.rs`), so the loader of holon-space/holon-work#370
   declares process class for every place, and this runtime rebuilds its
   marking from its probes after a restart. Device class needs the device store
   of ADR 0032 §9.4 first. A later `class` is an optional field whose default

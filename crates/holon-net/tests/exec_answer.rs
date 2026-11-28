@@ -90,9 +90,9 @@ enum Kind {
 /// The drawn net shape: `answer_spec` plus the downstream consumer of
 /// `Accepted`, the row the work writes. `Item`, the row the work consumes,
 /// needs no knob: a consumer of `Item` can only take a row written after the
-/// work, which bumps the slot version and makes the reversal `Changed`. The
-/// holder of an `Item` row is an earlier answer's own parked work, which the
-/// generator reaches without a knob.
+/// work, which bumps the slot version and makes the reversal `Changed`. A
+/// holder of an earlier `Item` row is a firing of another transition, which
+/// `a_held_row_the_work_consumed_is_counted` builds.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     consume_accepted: Option<Kind>,
@@ -203,10 +203,10 @@ static HELD_CASES: AtomicUsize = AtomicUsize::new(0);
 const CASES_RUN: u32 = 512;
 
 /// An ask for (T, s) is offered only while (T, s) is idle: no `Answered.T`,
-/// no work in flight, no `WorkFailed.T` (`answer_spec` has no retry). An
-/// offered ask has its Answer enabled: an external call returns only after
-/// the auto transitions it caused, so no answer waits for a `step` (D151.a,
-/// #167 idle rule, #192).
+/// no work in flight or parked, no `WorkFailed.T` (`answer_spec` has no
+/// retry). An offered ask has its Answer enabled: an external call returns
+/// only after the auto transitions it caused, so no answer waits for a
+/// `step`.
 fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
     for row in d.asks().expect("the asks derive") {
         let (work, s) = (&row.transition.0, &row.subject.0);
@@ -214,6 +214,7 @@ fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
         for busy in [
             answered_place(work),
             Place::running(work).to_string(),
+            Place::outcome_unknown(work).to_string(),
             format!("WorkFailed.{work}"),
         ] {
             assert!(
@@ -445,33 +446,55 @@ prop_state_machine! {
     fn idle_rule_and_quiescence_hold(sequential 1..30 => IdleOnly);
 }
 
-/// The held arm with `before = Some`: the parked work of `a0` holds the `Item`
-/// row that the work of `a2` consumed, so the undo of `a2` leaves that row and
-/// the reach counter must see it (#195). Needs no drawn shape: the holder is an
-/// earlier answer's own work.
+/// The held arm with `before = Some`: a firing of another transition took an
+/// earlier `Item` row of the subject and still runs, so the undo of `a2`
+/// leaves the row its work consumed and the reach counter must see it.
+/// The holder is not an earlier answer's work: the ask is offered only while
+/// the work is idle, so no second work of the same subject runs beside it.
 #[test]
 fn a_held_row_the_work_consumed_is_counted() {
-    let shape = Shape {
-        consume_accepted: None,
-    };
-    let answer = |id| Op::Answer {
-        s: "y",
-        id,
-        stale: false,
-        value: None,
-    };
-    let mut sut = Test::init_test(&shape);
-    for op in [
-        Op::WriteItem { s: "y", n: 0 },
-        answer("a0"),
-        Op::WriteItem { s: "y", n: 0 },
-        Op::CompleteUnknown,
-        answer("a2"),
-        Op::CompleteDone,
-        Op::Undo("a2"),
-    ] {
-        sut = Test::apply(sut, &shape, op);
-    }
+    let spec = answer_spec().transition(
+        Transition::new(
+            "Grab",
+            Trigger::Manual,
+            bind!(|r, s| r.present("Item", s).then(Content::new)),
+            Body::Effectful(Receiver::None),
+        )
+        .consumes("Item"),
+    );
+    let mut sut = init_sut(&spec, Driver::new(spec.clone()));
+    sut = apply_op(sut, Op::WriteItem { s: "y", n: 0 });
+    sut.d
+        .fire("Grab", "y", OccurrenceId::caller("g0"))
+        .expect("Grab fires");
+    sut = apply_op(sut, Op::WriteItem { s: "y", n: 0 });
+    sut = apply_op(
+        sut,
+        Op::Answer {
+            s: "y",
+            id: "a2",
+            stale: false,
+            value: None,
+        },
+    );
+    let work = sut
+        .d
+        .pending
+        .iter()
+        .position(|req| &*req.transition == "Accept")
+        .and_then(|i| sut.d.pending.remove(i))
+        .expect("the work of a2 runs");
+    let n = Value::Integer(0);
+    sut.d
+        .complete(
+            work.attempt,
+            EffectResult::Done(vec![
+                Output::new("Accepted", &work.subject, content(&[("n", n.clone())])),
+                Output::new("Out", &work.subject, content(&[("n", n)])),
+            ]),
+        )
+        .expect("the net quiesces");
+    sut = apply_op(sut, Op::Undo("a2"));
     assert_eq!(sut.held.rows, 1, "the undo of a2 leaves the held Item row");
     assert_eq!(
         sut.held.before_some_rows, 1,
@@ -563,7 +586,7 @@ fn no_ask_is_offered_while_its_work_runs() {
         "an ask of y while a1 works"
     );
     let c = answer_call(&d, "y", "a0", false, None);
-    assert_eq!(d.answer(c), Err(UftError::NoLongerApplies));
+    assert_eq!(d.answer(c), Err(UftError::AlreadyAnswered));
     d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
         .expect("the net quiesces");
     offered_asks_have_their_answer_enabled(&d, "the failure of a1");
@@ -675,4 +698,151 @@ fn no_ask_is_offered_while_its_work_failed() {
     assert!(d.exec().tokens().token("WorkFailed.Accept", "x").is_some());
     assert!(d.exec().tokens().token("Answered.Accept", "x").is_none());
     offered_asks_have_their_answer_enabled(&d, "the drop of a0");
+}
+
+/// The `n` of the `Item` token the work of the answer took, read from its
+/// effect request; it must be the `n` the ask showed when the user answered.
+fn work_n(d: &Driver) -> Value {
+    let i = d
+        .pending
+        .iter()
+        .position(|req| &*req.transition == "Accept")
+        .expect("the work runs");
+    d.pending[i].input["n"].clone()
+}
+
+/// A take holds the front of a FIFO `Item` row when the user answers: the
+/// ask shows that front (n = 1) as in the committed state, so the work must
+/// take that token, not the newer one behind it (n = 2).
+#[test]
+fn a_work_takes_the_front_its_answer_saw_while_a_take_holds_it() {
+    let spec = answer_spec().fifo("Item", Class::Process).transition(
+        Transition::new(
+            "Grab",
+            Trigger::Manual,
+            bind!(|r, s| r.present("Item", s).then(Content::new)),
+            Body::Effectful(Receiver::None),
+        )
+        .consumes("Item"),
+    );
+    let mut d = Driver::new(spec);
+    d.write("Item", "y", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    d.fire("Grab", "y", OccurrenceId::caller("g0"))
+        .expect("Grab fires");
+    d.write("Item", "y", content(&[("n", Value::Integer(2))]))
+        .expect("the net quiesces");
+    let c = answer_call(&d, "y", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    let grab = d
+        .pending
+        .iter()
+        .position(|req| &*req.transition == "Grab")
+        .and_then(|i| d.pending.remove(i))
+        .expect("Grab runs");
+    d.complete(
+        grab.attempt,
+        EffectResult::Failed(Cause::definite("rejected")),
+    )
+    .expect("the net quiesces");
+    assert_eq!(
+        work_n(&d),
+        Value::Integer(1),
+        "the work took n = 2 on an answer about n = 1"
+    );
+}
+
+/// The take starts after the answer, in the same quiescence and ahead of
+/// the work: `Absorb` comes first in the net and is enabled by the answer.
+/// The work waits for it and then takes the token its answer saw.
+#[test]
+fn a_work_takes_the_front_its_answer_saw_when_a_take_starts_after_the_answer() {
+    let mut spec = answer_spec().fifo("Item", Class::Process);
+    spec.transitions.insert(
+        0,
+        Transition::new(
+            "Absorb",
+            Trigger::Auto,
+            bind!(|r, s| r.present("Item", s).then(Content::new)),
+            Body::Effectful(Receiver::None),
+        )
+        .consumes("Item")
+        .reads("Answered.Accept"),
+    );
+    let mut d = Driver::new(spec);
+    for n in [1, 2] {
+        d.write("Item", "y", content(&[("n", Value::Integer(n))]))
+            .expect("the net quiesces");
+    }
+    let c = answer_call(&d, "y", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    let absorb = d
+        .pending
+        .iter()
+        .position(|req| &*req.transition == "Absorb")
+        .and_then(|i| d.pending.remove(i))
+        .expect("Absorb took the front before the work");
+    d.complete(
+        absorb.attempt,
+        EffectResult::Failed(Cause::definite("rejected")),
+    )
+    .expect("the net quiesces");
+    assert_eq!(
+        work_n(&d),
+        Value::Integer(1),
+        "the work took n = 2 on an answer about n = 1"
+    );
+}
+
+/// The take that holds the front is parked: the waiting work is disclosed
+/// until `resolve`. `Verify` and `Drop` commit the take, so the answer's
+/// situation is gone and the work never takes the newer token.
+#[test]
+fn a_work_waiting_on_a_parked_front_is_disclosed_until_resolve() {
+    work_waits_on_a_parked_front_until("Verify", Resolution::Verify(Vec::new()));
+    work_waits_on_a_parked_front_until("Drop", Resolution::Drop);
+}
+
+fn work_waits_on_a_parked_front_until(label: &str, resolution: Resolution) {
+    let spec = answer_spec().fifo("Item", Class::Process).transition(
+        Transition::new(
+            "Grab",
+            Trigger::Manual,
+            bind!(|r, s| r.present("Item", s).then(Content::new)),
+            Body::Effectful(Receiver::None),
+        )
+        .consumes("Item"),
+    );
+    let mut d = Driver::new(spec);
+    d.write("Item", "y", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    let take = OccurrenceId::caller("g0");
+    d.fire("Grab", "y", take.clone()).expect("Grab fires");
+    let grab = d.pending.pop_front().expect("Grab runs");
+    d.complete(
+        grab.attempt,
+        EffectResult::Unknown(Cause::definite("reset")),
+    )
+    .expect("the net quiesces");
+    d.write("Item", "y", content(&[("n", Value::Integer(2))]))
+        .expect("the net quiesces");
+    let c = answer_call(&d, "y", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    let waits = |d: &Driver| {
+        d.exec().conditions().iter().any(|c| {
+            matches!(c, Condition::WaitsOnParkedTake { reader, take: t, take_occurrence, .. }
+                if &**reader == "Accept" && &**t == "Grab" && *take_occurrence == take)
+        })
+    };
+    assert!(waits(&d), "{label}: {:?}", d.exec().conditions());
+    assert!(
+        d.pending.is_empty(),
+        "{label}: the work waits for the parked take"
+    );
+    d.resolve(&take, resolution).expect("the net quiesces");
+    assert!(!waits(&d), "{label}: {:?}", d.exec().conditions());
+    assert!(
+        d.pending.iter().all(|req| &*req.transition != "Accept"),
+        "{label}: the work took n = 2 on an answer about n = 1"
+    );
 }

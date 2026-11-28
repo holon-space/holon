@@ -174,6 +174,7 @@ Constraints:
   every other transition. A reader that saw the hole of an open take may run
   its effect, but its commit waits until the take commits or fails. When the
   take fails and restores the token, the reader is stale and binds again.
+  See [Reader isolation during a take](#reader-isolation-during-a-take).
   Ruled in
   [holon-work#1474](https://github.com/holon-space/holon-work/issues/1474#issuecomment-7212524683).
 - **Typed place ids.** A user place, or (transition, role).
@@ -187,6 +188,64 @@ Constraints:
 - **Also L1:** occurrence ids, conditions, derived places, token class
   semantics, the net file format, the loader, probes.
 - The crate doc states that it does not check workflow-net soundness.
+
+### Reader isolation during a take
+
+Worked example. `T0` takes the token `k` from `P0[s]` and runs an effect.
+`T1` binds for `s` and reads `P0[s]`: empty, because the take hides `k`.
+- `T1` records an edge "waits on `T0`'s take of `k`" (`waits_on` in
+  `crates/petri-workflow/src/exec.rs`).
+- `T1`'s effect may finish; its commit is held (`Executor::held()`) while the
+  edge is open. `T1.Running[s]` stays, so `T1` does not fire again for `s`.
+- `T0` commits: `k` leaves the net. `T1` read the row as it is now committed,
+  so its read version moves along with the take's commit, unless another
+  write moved the row meanwhile. The edge goes; `T1` commits.
+- `T0` fails: `k` goes back. `T1` read a state that never committed, so it is
+  stale (`stale_rows`) and its effect's outputs take the stale path: a fact
+  of `T1` into a row that got its token back is withheld.
+
+Rules:
+- A reader commits only on rows as they are committed: the row's tokens plus
+  the tokens that open takes hold from it. P1 in
+  `crates/holon-net/tests/exec_support/` checks this against the model on
+  every op of every executor PBT.
+- A reader waits only where a failed take could put its token back into
+  what the reader saw. A single-token row that moved since the take got a
+  newer token (in the row, held by a later take, or already consumed), so
+  the failed take drops its older token. One function decides this for the
+  edge and for the restore (`Executor::superseded`). A FIFO row always
+  waits.
+- Held readers are released at the top of each quiesce round, never inside
+  the commit or rollback of the take, so a record never nests in another.
+- The edges are acyclic: a reader waits only on takes that started before
+  its bind, and a held reader's own takes stay open for later readers.
+- A reader that a write already made stale records stale at once and is
+  never held: no take's outcome can make its read current again. A write
+  that makes a held reader stale releases it to the stale path in the next
+  quiesce round, with its edges and its `WaitsOnParkedTake` Condition.
+- A failed take puts a FIFO token back at its place by token id, which grows
+  with write order; the committed front of a FIFO row is the oldest token of
+  the row and of the open takes that hold its tokens.
+- A parked take (outcome unknown) has neither committed nor failed, so its
+  readers wait until `resolve`, unless a write makes a reader stale first
+  (see above). `Condition::WaitsOnParkedTake` discloses each such wait and
+  goes away when the wait ends: at `resolve`, when a write releases the
+  reader to the stale path, or when the reader settles or is dropped.
+  `Verify` and `Drop` commit the take. `Retry` keeps the wait; a retried
+  attempt that fails definitely parks the take again, because an earlier
+  attempt may have taken effect.
+- An ask reads the committed view (`Reader::committed`, through
+  `Executor::committed_front`, which uses `Executor::superseded`): a token
+  an open take holds reads as still in its row. No take's outcome changes
+  such a read, so it waits on nothing; an ask is never offered on a hole,
+  and its `Answer` never waits.
+- An asked work takes only the committed front its situation showed. While
+  an open take holds that front (a FIFO row), the work waits; a parked
+  holder is disclosed by `Condition::WaitsOnParkedTake` until `resolve`.
+  Other FIFO consumers take the next token behind a held front.
+- The `WaitsOnParkedTake` set is derived again at the end of each quiesce
+  from both sources (held readers' edges, asked works on a parked front);
+  no other code raises or removes it.
 
 ### L2 `holon-net`
 

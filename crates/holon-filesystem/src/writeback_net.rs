@@ -1031,10 +1031,9 @@ mod tests {
                             return;
                         }
                         // shortcut: a report while `DiskChanged` is still held
-                        // is not new input to the net (a read that failed for
-                        // good stays failed, a pending read retry trips the
-                        // executor's tries check); skipped until the net counts
-                        // each report.
+                        // is not new input to the net, so a read that failed
+                        // for good stays failed; skipped until a disk-change
+                        // report is a new level.
                         if self.net.tokens().token(DISK_CHANGED, DOCS[d]).is_some() {
                             return;
                         }
@@ -1045,19 +1044,6 @@ mod tests {
                             return;
                         }
                         let req = self.outstanding.remove(i % self.outstanding.len());
-                        // shortcut: a read retry beside a running catch-up
-                        // trips the executor's tries check when the catch-up
-                        // reports a change (see `FileChanges`); such a read
-                        // fails only for good until each token counts its own
-                        // tries.
-                        let outcome = if &*req.transition == READ_DISK
-                            && matches!(outcome, Outcome::Retryable)
-                            && self.outstanding.iter().any(|r| r.subject == req.subject)
-                        {
-                            Outcome::Done
-                        } else {
-                            outcome
-                        };
                         let doc = DOCS[doc_index(&req)];
                         let subject = Subject::new(doc);
                         let read = self.fresh("h");
@@ -1699,10 +1685,9 @@ mod tests {
                             return;
                         }
                         // shortcut: a report while `DiskChanged` is still held
-                        // is not new input to the net (a read that failed for
-                        // good stays failed, a pending read retry trips the
-                        // executor's tries check); skipped until the net counts
-                        // each report.
+                        // is not new input to the net, so a read that failed
+                        // for good stays failed; skipped until a disk-change
+                        // report is a new level.
                         if self
                             .net
                             .exec(|exec| exec.tokens().token(DISK_CHANGED, DOCS[d]).is_some())
@@ -1723,24 +1708,16 @@ mod tests {
                         let (req, read, disk) = self.outstanding.remove(i % self.outstanding.len());
                         // shortcut: a `DiskChanged` that a catch-up outputs
                         // while the read runs is not new input to the net
-                        // either (see `FileChanges`), and a read retry beside a
-                        // running catch-up trips the executor's tries check
-                        // when the catch-up reports a change; such a read
-                        // succeeds or fails for good until each token counts
-                        // its own tries.
+                        // either (see `FileChanges`), so such a read succeeds;
+                        // drawn as Done until a disk-change report is a new
+                        // level.
                         let doc = doc_of(&req);
-                        let outcome = if &*req.transition == READ_DISK
-                            && (self.docs[doc].read_overtaken
-                                || (matches!(outcome, Outcome::Retryable)
-                                    && self
-                                        .outstanding
-                                        .iter()
-                                        .any(|(r, ..)| r.subject == req.subject)))
-                        {
-                            Outcome::Done
-                        } else {
-                            outcome
-                        };
+                        let outcome =
+                            if &*req.transition == READ_DISK && self.docs[doc].read_overtaken {
+                                Outcome::Done
+                            } else {
+                                outcome
+                            };
                         self.complete(&req, read, disk, outcome);
                     }
                     Step::Advance(ms) => self.now += Duration::from_millis(ms),

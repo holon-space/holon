@@ -97,6 +97,7 @@ mod forms;
 use forms::Answer;
 
 use crate::exec_support::Checked;
+use crate::exec_support::names::other_name;
 use crate::exec_support::values::value;
 
 const PLACES: [&str; 4] = ["P0", "P1", "P2", "P3"];
@@ -137,35 +138,6 @@ fn subject() -> impl Strategy<Value = String> {
 enum Name {
     Held(usize),
     Other(String),
-}
-
-fn other_name() -> impl Strategy<Value = String> {
-    prop_oneof![
-        select(vec![
-            "Nope", "", " ", "t0", "T0 ", " T0", "T", "T00", "p0", "P0 ", "Ghost", "D9", "W9",
-        ])
-        .prop_map(str::to_owned),
-        select(vec!["T0", "W0", "P0"]).prop_flat_map(|n| {
-            select(vec![
-                "Running",
-                "RetryPending",
-                "OutcomeUnknown",
-                "UndoPending",
-                "x",
-            ])
-            .prop_map(move |r| format!("{n}.{r}"))
-        }),
-        select(vec![
-            "Answer",
-            "Asks",
-            "Answered",
-            "Expired",
-            "WorkFailed",
-            "ClearFailed"
-        ])
-        .prop_map(|r| format!("{r}.T0")),
-        ".{0,8}",
-    ]
 }
 
 fn name() -> impl Strategy<Value = Name> {
