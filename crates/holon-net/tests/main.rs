@@ -7,6 +7,7 @@ mod caller_inputs_wide;
 mod catalog_totality;
 mod correlated_hop;
 mod enabledness;
+mod error_texts;
 mod exec_answer;
 mod exec_cas;
 mod exec_isolation;

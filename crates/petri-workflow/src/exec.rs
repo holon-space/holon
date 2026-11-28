@@ -882,7 +882,7 @@ pub enum LoadError {
     #[error("place '{place}' is {class:?} class; this executor holds process and data class only")]
     ClassNotSupported { place: Place, class: Class },
     #[error(
-        "transition '{transition}' consumes the data-class place '{place}'; data class has no claims yet (#168)"
+        "transition '{transition}' consumes the data-class place '{place}'; data class has no claims yet"
     )]
     ConsumesData { transition: String, place: Place },
     #[error("transition '{transition}' has an arc on the derived place '{place}'")]
@@ -914,7 +914,7 @@ pub enum LoadError {
     #[error("'{0}' has a Keyed receiver but no retry count bound")]
     KeyedWithoutCountBound(String),
     #[error(
-        "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered<V> and Expired, a manual Answer, and a work that consumes Answered"
+        "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered and Expired, a manual Answer, and a work that consumes Answered"
     )]
     IncompleteAsk { work: String, missing: String },
     #[error(

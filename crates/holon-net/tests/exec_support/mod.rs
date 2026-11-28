@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod model;
+pub mod names;
 
 pub mod twin_names;
 pub mod values;
