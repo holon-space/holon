@@ -8,7 +8,7 @@ never disagree about a counter.
 Run with `/usr/bin/python3` — the yaml module is present there and absent from
 the default `python3` on this machine.
 
-  bugfunnel.py counts                 gap distribution (the old header line)
+  bugfunnel.py counts                 gap distribution and model-class distribution
   bugfunnel.py list --status OPEN     one line per matching entry
   bugfunnel.py index                  regenerate INDEX.md
   bugfunnel.py check                  validate every entry against the schema
@@ -26,6 +26,10 @@ GAPS = ("ENVIRONMENT", "COVERAGE", "PERCEPTION", "ORACLE")
 # on its own line and kept out of the escape distribution that steers QA spend.
 FALSE_ALARM = "FALSE-ALARM"
 CLASSES = GAPS + (FALSE_ALARM,)
+# Order- or hand-over bugs say why model checking did not find them; `spec` names the spec.
+MODEL_CLASSES = ("none", "UNMODELLED", "SPEC-COVERAGE", "SPEC-ORACLE", "CONFORMANCE")
+MODEL_NEEDS_SPEC = ("SPEC-COVERAGE", "SPEC-ORACLE", "CONFORMANCE")
+NOT_ASKED = "not asked"
 STATUSES = ("FIXED", "PARTIAL", "MITIGATED", "OPEN", "NOTED", "UNCLASSIFIED")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 REQUIRED = ("id", "date", "gap", "status", "summary")
@@ -50,6 +54,13 @@ def load(entries_dir):
             problems.append(f"{path.name}: status {meta.get('status')!r} is not one of {STATUSES}")
         if meta.get("id") != path.stem:
             problems.append(f"{path.name}: id {meta.get('id')!r} does not match the filename")
+        if "model" in meta and meta["model"] not in MODEL_CLASSES:
+            problems.append(f"{path.name}: `model` {meta['model']!r} is not one of {MODEL_CLASSES}")
+        if "spec" in meta and "model" not in meta:
+            problems.append(f"{path.name}: `spec` {meta['spec']!r} given without `model`")
+        if meta.get("model") in MODEL_NEEDS_SPEC and not Path(str(meta.get("spec"))).is_file():
+            problems.append(f"{path.name}: `spec` {meta.get('spec')!r} is not an existing file "
+                            f"(required for `model` {meta['model']})")
         meta["path"] = path
         entries.append(meta)
     return entries, problems
@@ -107,6 +118,10 @@ def main():
             print(f"{gap}: {count} ({share:.1f}%)")
         print(f"TOTAL ESCAPES: {len(escapes)}")
         print(f"{FALSE_ALARM}: {len(false_alarms)} (excluded from the distribution above)")
+        model_counts = [(cls, sum(1 for e in entries if e.get("model") == cls and "model" in e))
+                        for cls in MODEL_CLASSES]
+        model_counts.append((NOT_ASKED, sum(1 for e in entries if "model" not in e)))
+        print("MODEL CLASSES: " + ", ".join(f"{cls} {n}" for cls, n in model_counts))
         for status in STATUSES:
             count = sum(1 for e in entries if e["status"] == status)
             if count:

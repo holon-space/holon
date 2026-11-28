@@ -1,6 +1,6 @@
 ---
 name: bug-gap-triage
-description: Classify every manually- or exploratorily-discovered bug into one of four escape gaps (coverage/oracle/environment/perception), or as a FALSE-ALARM test failure, and record it in the bug-funnel ledger, so QA investment is steered by data. Use whenever a bug is found OUTSIDE an automated test — by Martin dogfooding, by an agent driving the app, or reported by a user.
+description: Classify every manually- or exploratorily-discovered bug into one of four escape gaps (coverage/oracle/environment/perception), or as a FALSE-ALARM test failure, and record it in the bug-funnel ledger, so QA investment is steered by data. Use whenever a bug is found OUTSIDE an automated test — by Martin dogfooding, by an agent driving the app, or reported by a user. Also use it when a keystone or gate red hits a hand-over that a spec models.
 ---
 
 # Bug-Gap Triage
@@ -42,6 +42,28 @@ is a formalizable bug: the SLO is **p95 interaction→projection-visible
 invariant doesn't exist/fire) or ENVIRONMENT (budget holds in test scale but
 not vault scale).
 
+## The model question
+
+A spec is a test of the design, so a bug in a hand-over that a spec models is
+an escape from the spec too. Ask it only when the bug is about the order of
+events or a hand-over between components; a layout or parse bug is `none`. Find
+the specs that model a function with
+`rg -n 'Models:' docs/Testing/ModelChecking/*.tla` (the model-check gate reads
+the same lines). Pick ONE class for the `model:` field:
+
+| Class | Definition | Litmus question | Remedy |
+|---|---|---|---|
+| `none` | Not an order or hand-over bug | "Could any order of the same events make it go away?" No | nothing |
+| `UNMODELLED` | An order or hand-over bug in code that no spec anchors (`Models:`) | "Does a `Models:` line name the failing function?" No | Remedy names a spec candidate, or why a spec does not pay off (one line) |
+| `SPEC-COVERAGE` | A spec anchors the code but cannot reach the bad state: an abstracted variable, a missing action, or a bound too small | "Can TLC, within the bound, reach a state where this happens?" No | Add the variable or action, or raise the bound; a `.cfg` replay of the design before the fix must violate a property |
+| `SPEC-ORACLE` | The spec reaches the state but no property is violated | "If TLC reached this state, would a property go red?" No | Add a user-level property (not one written for this bug) and a witness that must FAIL |
+| `CONFORMANCE` | The spec forbids the step; the code takes it | "Does the spec allow the step that the code made?" No | The conformance PBT or the keystone step check must go red on the code before the fix; extend its generator or mapping |
+
+- If torn between SPEC-COVERAGE and SPEC-ORACLE: the fix decides, as in the existing triage. An added
+  variable, action or bound = SPEC-COVERAGE. An added property = SPEC-ORACLE.
+- A spec that the fix changes is updated in the same lane, and the replay row
+  goes into the spec's report and `run.py`.
+
 ## Procedure
 
 1. **Classify** using the litmus questions above. If torn between COVERAGE and
@@ -62,6 +84,8 @@ not vault scale).
    date: 2026-08-16
    gap: PERCEPTION              # ENVIRONMENT | COVERAGE | PERCEPTION | ORACLE | FALSE-ALARM
    secondary: ENVIRONMENT       # null when the bug is not genuinely dual
+   model: none                  # none | UNMODELLED | SPEC-COVERAGE | SPEC-ORACLE | CONFORMANCE
+   spec: docs/Testing/ModelChecking/<Spec>.tla   # required for SPEC-COVERAGE, SPEC-ORACLE, CONFORMANCE
    status: FIXED                # FIXED | PARTIAL | MITIGATED | OPEN | NOTED
    summary: >-
      One sentence naming the observable defect.
@@ -92,14 +116,16 @@ not vault scale).
    (add the transition/invariant) so the keystone goes red before the prod fix
    lands. For ENVIRONMENT gaps, note what prod/test parity work would be
    needed. For PERCEPTION, pin with a windowed/layout test or a gherkin
-   `.feature` replay (`src/pbt/fixtures/gherkin.rs`).
+   `.feature` replay (`src/pbt/fixtures/gherkin.rs`). For a model class other
+   than `none` and `UNMODELLED`: the TLC replay (or the conformance PBT) is red
+   for the right reason before the fix, as the keystone is.
 4. **Validate — there is no counter to update.** The gap distribution is
    derived from the entry files, never stored, so a hand-maintained total
    cannot drift or merge wrongly:
 
    ```
-   /usr/bin/python3 scripts/bugfunnel.py check     # schema: gap, status, id vs filename
-   /usr/bin/python3 scripts/bugfunnel.py counts    # the distribution
+   /usr/bin/python3 scripts/bugfunnel.py check     # schema: gap, status, id vs filename, model and spec
+   /usr/bin/python3 scripts/bugfunnel.py counts    # the gap and model-class distributions
    /usr/bin/python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01
    /usr/bin/python3 scripts/bugfunnel.py index     # regenerate INDEX.md (gitignored)
    ```
