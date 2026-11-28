@@ -94,16 +94,16 @@ Fire_JobEnded(s) ==
   /\ MayFire("JobEnded", s)
   /\ Card' = [Card EXCEPT ![s] = TRUE]
   /\ Cpu' = (IF Cpu + Lent_Cpu - 0 < Pool_Cpu THEN Cpu + 1 ELSE Cpu)
-  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] THEN @ \cup {"Card"} ELSE @]
+  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] \/ Handoff_parked[s] > 0 THEN @ \cup {"Card"} ELSE @]
   /\ Job' = [Job EXCEPT ![s] = FALSE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Job"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Job"} ELSE @]
   /\ UNCHANGED <<Agent, Budget, Disk, Host, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Fire_AgentTurnEnded(s) ==
   /\ Enabled_AgentTurnEnded(s)
   /\ MayFire("AgentTurnEnded", s)
   /\ Job' = [Job EXCEPT ![s] = FALSE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Job"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Job"} ELSE @]
   /\ Waiting' = [Waiting EXCEPT ![s] = @ + 1]
   /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, JobRecord, Process, Stalled, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
@@ -153,7 +153,7 @@ Failed_StartJob(s, retryable) ==
   /\ Stalled' = IF StartJob_unk[s] THEN Stalled ELSE IF StartJob_attempts[s] > 0 /\ ~(retryable /\ StartJob_attempts[s] < 2) THEN [Stalled EXCEPT ![s] = TRUE] ELSE Stalled
   /\ StartJob_attempts' = IF StartJob_unk[s] THEN StartJob_attempts ELSE [StartJob_attempts EXCEPT ![s] = IF StartJob_attempts[s] > 0 /\ (retryable /\ StartJob_attempts[s] < 2) THEN @ ELSE 0]
   /\ StartJob_mark' = IF StartJob_unk[s] THEN [StartJob_mark EXCEPT ![s] = TRUE] ELSE [StartJob_mark EXCEPT ![s] = TRUE]
-  /\ StartJob_moved' = IF StartJob_unk[s] THEN [StartJob_moved EXCEPT ![s] = {}] ELSE [StartJob_moved EXCEPT ![s] = {}]
+  /\ StartJob_moved' = IF StartJob_unk[s] THEN StartJob_moved ELSE [StartJob_moved EXCEPT ![s] = {}]
   /\ StartJob_parked' = IF StartJob_unk[s] THEN [StartJob_parked EXCEPT ![s] = @ + 1] ELSE StartJob_parked
   /\ StartJob_retry' = IF StartJob_unk[s] THEN StartJob_retry ELSE [StartJob_retry EXCEPT ![s] = StartJob_attempts[s] > 0 /\ (retryable /\ StartJob_attempts[s] < 2)]
   /\ StartJob_running' = IF StartJob_unk[s] THEN [StartJob_running EXCEPT ![s] = FALSE] ELSE [StartJob_running EXCEPT ![s] = FALSE]
@@ -165,22 +165,20 @@ Unknown_StartJob(s) ==
   /\ Quiescent
   /\ "unknown" \in Outcomes["StartJob"]
   /\ StartJob_mark' = [StartJob_mark EXCEPT ![s] = IF FALSE THEN @ ELSE TRUE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF FALSE THEN @ ELSE {}]
   /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = IF FALSE THEN @ ELSE @ + 1]
   /\ StartJob_running' = [StartJob_running EXCEPT ![s] = FALSE]
   /\ StartJob_unk' = [StartJob_unk EXCEPT ![s] = TRUE]
-  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_moved, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Abandon_StartJob(s) ==
   /\ StartJob_running[s]
   /\ "abandon" \in Timers
   /\ StartJob_attempts[s] = 0
   /\ StartJob_mark' = [StartJob_mark EXCEPT ![s] = IF FALSE THEN @ ELSE TRUE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF FALSE THEN @ ELSE {}]
   /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = IF FALSE THEN @ ELSE @ + 1]
   /\ StartJob_running' = [StartJob_running EXCEPT ![s] = FALSE]
   /\ StartJob_unk' = [StartJob_unk EXCEPT ![s] = TRUE]
-  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_moved, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 RunTimeout_StartJob(s) ==
   /\ StartJob_attempts[s] > 0
@@ -198,29 +196,27 @@ RetryDue_StartJob(s) ==
   /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 ResolveRetry_StartJob(s) ==
-  \E m \in SUBSET {"Budget", "Job"} :
-    /\ StartJob_parked[s] > 0
-    /\ ~StartJob_running[s]
-    /\ Quiescent
-    /\ "retry" \in Resolutions
-    /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = m]
-    /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = @ - 1]
-    /\ StartJob_running' = [StartJob_running EXCEPT ![s] = TRUE]
-    /\ StartJob_unk' = [StartJob_unk EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_mark, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
+  /\ StartJob_parked[s] > 0
+  /\ ~StartJob_running[s]
+  /\ Quiescent
+  /\ "retry" \in Resolutions
+  /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = @ - 1]
+  /\ StartJob_running' = [StartJob_running EXCEPT ![s] = TRUE]
+  /\ StartJob_unk' = [StartJob_unk EXCEPT ![s] = TRUE]
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 ResolveVerify_StartJob(s) ==
-  \E m \in SUBSET {"Budget", "Job"} :
-    /\ StartJob_parked[s] > 0
-    /\ ~StartJob_running[s]
-    /\ Quiescent
-    /\ "verify" \in Resolutions
-    /\ Job' = IF m = {} THEN [Job EXCEPT ![s] = TRUE] ELSE Job
-    /\ StartJob_attempts' = [StartJob_attempts EXCEPT ![s] = 0]
-    /\ StartJob_mark' = IF m = {} THEN [StartJob_mark EXCEPT ![s] = FALSE] ELSE StartJob_mark
-    /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = @ - 1]
-    /\ StartJob_retry' = [StartJob_retry EXCEPT ![s] = FALSE]
-    /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_moved, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
+  /\ StartJob_parked[s] > 0
+  /\ ~StartJob_running[s]
+  /\ Quiescent
+  /\ "verify" \in Resolutions
+  /\ Job' = IF StartJob_moved[s] = {} THEN [Job EXCEPT ![s] = TRUE] ELSE Job
+  /\ StartJob_attempts' = [StartJob_attempts EXCEPT ![s] = 0]
+  /\ StartJob_mark' = IF StartJob_moved[s] = {} THEN [StartJob_mark EXCEPT ![s] = FALSE] ELSE StartJob_mark
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = {}]
+  /\ StartJob_parked' = [StartJob_parked EXCEPT ![s] = @ - 1]
+  /\ StartJob_retry' = [StartJob_retry EXCEPT ![s] = FALSE]
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 ResolveDrop_StartJob(s) ==
   /\ StartJob_parked[s] > 0
@@ -251,7 +247,7 @@ Failed_Handoff(s, retryable) ==
   /\ retryable \in (IF "failed" \in Outcomes["Handoff"] THEN {FALSE} ELSE {}) \cup (IF "failed_retryable" \in Outcomes["Handoff"] THEN {TRUE} ELSE {})
   /\ Handoff_attempts' = IF Handoff_unk[s] THEN Handoff_attempts ELSE [Handoff_attempts EXCEPT ![s] = IF Handoff_attempts[s] > 0 /\ (retryable /\ Handoff_attempts[s] < 3) THEN @ ELSE 0]
   /\ Handoff_mark' = IF Handoff_unk[s] THEN [Handoff_mark EXCEPT ![s] = TRUE] ELSE [Handoff_mark EXCEPT ![s] = TRUE]
-  /\ Handoff_moved' = IF Handoff_unk[s] THEN [Handoff_moved EXCEPT ![s] = {}] ELSE [Handoff_moved EXCEPT ![s] = {}]
+  /\ Handoff_moved' = IF Handoff_unk[s] THEN Handoff_moved ELSE [Handoff_moved EXCEPT ![s] = {}]
   /\ Handoff_parked' = IF Handoff_unk[s] THEN [Handoff_parked EXCEPT ![s] = @ + 1] ELSE Handoff_parked
   /\ Handoff_retry' = IF Handoff_unk[s] THEN Handoff_retry ELSE [Handoff_retry EXCEPT ![s] = Handoff_attempts[s] > 0 /\ (retryable /\ Handoff_attempts[s] < 3)]
   /\ Handoff_running' = IF Handoff_unk[s] THEN [Handoff_running EXCEPT ![s] = FALSE] ELSE [Handoff_running EXCEPT ![s] = FALSE]
@@ -264,11 +260,10 @@ Unknown_Handoff(s) ==
   /\ "unknown" \in Outcomes["Handoff"]
   /\ Handoff_attempts' = [Handoff_attempts EXCEPT ![s] = IF (Handoff_attempts[s] > 0 /\ Handoff_attempts[s] < 3) THEN @ + 1 ELSE @]
   /\ Handoff_mark' = [Handoff_mark EXCEPT ![s] = IF (Handoff_attempts[s] > 0 /\ Handoff_attempts[s] < 3) THEN @ ELSE TRUE]
-  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF (Handoff_attempts[s] > 0 /\ Handoff_attempts[s] < 3) THEN @ ELSE {}]
   /\ Handoff_parked' = [Handoff_parked EXCEPT ![s] = IF (Handoff_attempts[s] > 0 /\ Handoff_attempts[s] < 3) THEN @ ELSE @ + 1]
   /\ Handoff_running' = [Handoff_running EXCEPT ![s] = (Handoff_attempts[s] > 0 /\ Handoff_attempts[s] < 3)]
   /\ Handoff_unk' = [Handoff_unk EXCEPT ![s] = TRUE]
-  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_retry>>
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_moved, Handoff_retry>>
 
 RunTimeout_Handoff(s) ==
   /\ Handoff_attempts[s] > 0
@@ -285,29 +280,27 @@ RetryDue_Handoff(s) ==
   /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_unk>>
 
 ResolveRetry_Handoff(s) ==
-  \E m \in SUBSET {"Card"} :
-    /\ Handoff_parked[s] > 0
-    /\ ~Handoff_running[s]
-    /\ Quiescent
-    /\ "retry" \in Resolutions
-    /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = m]
-    /\ Handoff_parked' = [Handoff_parked EXCEPT ![s] = @ - 1]
-    /\ Handoff_running' = [Handoff_running EXCEPT ![s] = TRUE]
-    /\ Handoff_unk' = [Handoff_unk EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_attempts, Handoff_mark, Handoff_retry>>
+  /\ Handoff_parked[s] > 0
+  /\ ~Handoff_running[s]
+  /\ Quiescent
+  /\ "retry" \in Resolutions
+  /\ Handoff_parked' = [Handoff_parked EXCEPT ![s] = @ - 1]
+  /\ Handoff_running' = [Handoff_running EXCEPT ![s] = TRUE]
+  /\ Handoff_unk' = [Handoff_unk EXCEPT ![s] = TRUE]
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry>>
 
 ResolveVerify_Handoff(s) ==
-  \E m \in SUBSET {"Card"} :
-    /\ Handoff_parked[s] > 0
-    /\ ~Handoff_running[s]
-    /\ Quiescent
-    /\ "verify" \in Resolutions
-    /\ Handoff_attempts' = [Handoff_attempts EXCEPT ![s] = 0]
-    /\ Handoff_mark' = IF m = {} THEN [Handoff_mark EXCEPT ![s] = FALSE] ELSE Handoff_mark
-    /\ Handoff_parked' = [Handoff_parked EXCEPT ![s] = @ - 1]
-    /\ Handoff_retry' = [Handoff_retry EXCEPT ![s] = FALSE]
-    /\ Waiting' = IF m = {} THEN [Waiting EXCEPT ![s] = @ + 1] ELSE Waiting
-    /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_moved, Handoff_unk>>
+  /\ Handoff_parked[s] > 0
+  /\ ~Handoff_running[s]
+  /\ Quiescent
+  /\ "verify" \in Resolutions
+  /\ Handoff_attempts' = [Handoff_attempts EXCEPT ![s] = 0]
+  /\ Handoff_mark' = IF Handoff_moved[s] = {} THEN [Handoff_mark EXCEPT ![s] = FALSE] ELSE Handoff_mark
+  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = {}]
+  /\ Handoff_parked' = [Handoff_parked EXCEPT ![s] = @ - 1]
+  /\ Handoff_retry' = [Handoff_retry EXCEPT ![s] = FALSE]
+  /\ Waiting' = IF Handoff_moved[s] = {} THEN [Waiting EXCEPT ![s] = @ + 1] ELSE Waiting
+  /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_unk>>
 
 ResolveDrop_Handoff(s) ==
   /\ Handoff_parked[s] > 0
@@ -336,7 +329,7 @@ Write_Budget(s) ==
   /\ Quiescent
   /\ "Budget" \in Written
   /\ Budget' = [Budget EXCEPT ![s] = TRUE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Budget"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Budget"} ELSE @]
   /\ UNCHANGED <<Agent, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Retract_Budget(s) ==
@@ -344,14 +337,14 @@ Retract_Budget(s) ==
   /\ "Budget" \in Retracted
   /\ Budget[s]
   /\ Budget' = [Budget EXCEPT ![s] = FALSE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Budget"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Budget"} ELSE @]
   /\ UNCHANGED <<Agent, Card, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Write_Card(s) ==
   /\ Quiescent
   /\ "Card" \in Written
   /\ Card' = [Card EXCEPT ![s] = TRUE]
-  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] THEN @ \cup {"Card"} ELSE @]
+  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] \/ Handoff_parked[s] > 0 THEN @ \cup {"Card"} ELSE @]
   /\ UNCHANGED <<Agent, Budget, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Retract_Card(s) ==
@@ -359,7 +352,7 @@ Retract_Card(s) ==
   /\ "Card" \in Retracted
   /\ Card[s]
   /\ Card' = [Card EXCEPT ![s] = FALSE]
-  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] THEN @ \cup {"Card"} ELSE @]
+  /\ Handoff_moved' = [Handoff_moved EXCEPT ![s] = IF Handoff_running[s] \/ Handoff_parked[s] > 0 THEN @ \cup {"Card"} ELSE @]
   /\ UNCHANGED <<Agent, Budget, Cpu, Disk, Host, Job, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_moved, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Write_Disk(s) ==
@@ -392,7 +385,7 @@ Write_Job(s) ==
   /\ Quiescent
   /\ "Job" \in Written
   /\ Job' = [Job EXCEPT ![s] = TRUE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Job"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Job"} ELSE @]
   /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Retract_Job(s) ==
@@ -400,7 +393,7 @@ Retract_Job(s) ==
   /\ "Job" \in Retracted
   /\ Job[s]
   /\ Job' = [Job EXCEPT ![s] = FALSE]
-  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] THEN @ \cup {"Job"} ELSE @]
+  /\ StartJob_moved' = [StartJob_moved EXCEPT ![s] = IF StartJob_running[s] \/ StartJob_parked[s] > 0 THEN @ \cup {"Job"} ELSE @]
   /\ UNCHANGED <<Agent, Budget, Card, Cpu, Disk, Host, JobRecord, Process, Stalled, Waiting, StartJob_running, StartJob_parked, StartJob_attempts, StartJob_mark, StartJob_retry, StartJob_unk, Handoff_running, Handoff_parked, Handoff_attempts, Handoff_moved, Handoff_mark, Handoff_retry, Handoff_unk>>
 
 Write_JobRecord(s) ==

@@ -46,12 +46,15 @@ JobEndReturnsSlot == [][\A s \in Subj : (Job[s] /\ ~Job'[s]) => Cpu' = Cpu + 1]_
 \* Witness: a Job ends.
 NoJobEnds == [][\A s \in Subj : ~(Job[s] /\ ~Job'[s])]_vars
 
-\* Liveness: a waiting job with its agent, its budget and a free slot, which
-\* no stall token and no parked attempt holds, starts or stops being ready.
+\* Liveness: a waiting job with its budget, a free slot and no Job, which no
+\* parked attempt, failure mark or pending retry holds, starts or stops being
+\* ready. Only a StartJob firing or an unfair outside action makes it unready.
 \* Fairness assumption: weak fairness of every auto firing (the executor fires
 \* every enabled auto pair before a call returns) and of every timer (the clock
 \* advances). No effect result, probe or user action is fair.
-Ready(s) == Waiting[s] > 0 /\ Cpu > 0 /\ Budget[s] /\ Agent[s] /\ ~Stalled[s] /\ StartJob_parked[s] = 0
+Ready(s) ==
+  /\ Waiting[s] > 0 /\ Cpu > 0 /\ Budget[s] /\ ~Job[s]
+  /\ StartJob_parked[s] = 0 /\ ~StartJob_mark[s] /\ ~StartJob_retry[s]
 WaitingStarts == \A s \in Subj : Ready(s) ~> (StartJob_running[s] \/ ~Ready(s))
 \* Witness: a subject is ready.
 NeverReady == \A s \in Subj : ~Ready(s)
