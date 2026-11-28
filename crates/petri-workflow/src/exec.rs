@@ -104,7 +104,7 @@ impl Place {
     }
 
     /// `<T>.UndoPending`: a token keyed by an answer id while the undo of
-    /// that answer still owes rows a later firing held (#191). Its `held`
+    /// that answer still owes rows a later firing held. Its `held`
     /// field lists them, each with the holder to name if that holder used it.
     pub fn undo_pending(transition: &str) -> Self {
         Self::new(&format!("{transition}.UndoPending"))
@@ -1965,7 +1965,7 @@ pub enum Condition {
         steps: usize,
     },
     /// The undo of `answer` could not reverse `place` of `subject`: the
-    /// firing that held the row used it (#191).
+    /// firing that held the row used it.
     UndoHeld {
         answer: AnswerId,
         place: Place,
@@ -2862,7 +2862,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     }
 
     /// Settles what an undo could not reverse while a later firing held the
-    /// row (#191). A released row is reversed, unless a commit moved its
+    /// row. A released row is reversed, unless a commit moved its
     /// version: the holder's own commit is disclosed as
     /// [`Condition::UndoHeld`], any other writer's as
     /// [`Condition::UndoRewritten`], and the row stays as that writer left
