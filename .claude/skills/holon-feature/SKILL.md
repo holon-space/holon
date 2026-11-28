@@ -71,6 +71,21 @@ The change summary lists each generator restriction with its reason, and each
 failure with its verdict, under `Generators:` (the summary template of the
 `verify-lane` skill). A restriction without a reason is a verifier finding.
 
+## 1b. A changed hand-over updates its spec at the contract stage
+
+A card whose diff touches a function that a TLA+ spec anchors (a `Models:` line
+in `docs/Testing/ModelChecking/*.tla`) changes a modelled hand-over. Its contract
+sheet then names the spec change and the TLC result, and the spec change comes
+before the implementation, as the PBT does.
+
+- Find the anchors: `rg -n 'Models:' docs/Testing/ModelChecking/*.tla`. The
+  model-check gate (`run.py --if-touched`) runs the specs on the same lines.
+- The contract sheet holds the spec change (variable, action, property or bound)
+  and the TLC verdict of the changed design: the property that holds, or the
+  violation the change must close.
+- No anchored function in the diff: the sheet says so in one line.
+- A verifier refutes a card that touches an anchored function and has no spec step.
+
 ## 2. Which tier — lowest observing layer, keystone, or GPUI windowed
 
 Pick the LOWEST layer whose interface can observe the behaviour. Use the
