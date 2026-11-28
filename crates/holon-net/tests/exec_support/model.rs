@@ -95,11 +95,19 @@ pub struct Head {
     pub candidate: bool,
 }
 
+/// A stored token; `id` grows with write order, as the executor's token id.
+#[derive(Clone)]
+struct Tok {
+    id: u64,
+    head: Head,
+    content: Content,
+}
+
 #[derive(Clone, Default)]
 struct Slot {
     version: u64,
     /// Oldest first; a [`Capacity::Single`] place holds at most one.
-    content: VecDeque<(Head, Content)>,
+    content: VecDeque<Tok>,
     /// The transition whose commit set the current version, `None` for a
     /// write from outside the net (D191-rewritten.a).
     writer: Option<Arc<str>>,
@@ -189,7 +197,7 @@ enum Answer {
 struct Occ {
     transition: String,
     subject: String,
-    taken: Vec<(String, (Head, Content))>,
+    taken: Vec<(String, Tok)>,
     /// The version of each consumed row at the take.
     taken_at: BTreeMap<String, u64>,
     trace: Trace,
@@ -203,8 +211,6 @@ struct Occ {
     waits_on: BTreeSet<(Key, OccurrenceId)>,
     /// The read rows that a failed take put such a token back into.
     stale_rows: BTreeSet<Key>,
-    /// Start order: which of two takes from a FIFO row took first.
-    seq: u64,
     /// The outputs of a reader whose commit waits on an open take.
     held: Option<Vec<Output>>,
 }
@@ -237,6 +243,7 @@ pub struct Model {
     now: Duration,
     next_attempt: u64,
     next_minted: u64,
+    next_token: u64,
     /// Answer id → (work, subject).
     answers: BTreeMap<String, (String, String)>,
     undone: BTreeSet<String>,
@@ -299,7 +306,7 @@ impl Reads for Reader<'_> {
             .slots
             .get(&key(place, subject))
             .and_then(|s| s.content.front())
-            .and_then(|(head, _)| head.cause.clone());
+            .and_then(|t| t.head.cause.clone());
         model.row(self.trace, place, subject).cause = Some(cause.clone());
         cause
     }
@@ -310,8 +317,8 @@ impl Reads for Reader<'_> {
             .slots
             .get(&key(place, subject))
             .and_then(|s| s.content.front())
-            .filter(|(head, _)| head.candidate)
-            .map(|(_, c)| match &c["output"] {
+            .filter(|t| t.head.candidate)
+            .map(|t| match &t.content["output"] {
                 Value::Object(o) => o.clone().into_iter().collect(),
                 other => panic!("a candidate's output is {other:?}"),
             });
@@ -396,6 +403,7 @@ impl Model {
             now: Duration::ZERO,
             next_attempt: 0,
             next_minted: 0,
+            next_token: 0,
             answers: BTreeMap::new(),
             undone: BTreeSet::new(),
             conditions: Vec::new(),
@@ -456,7 +464,7 @@ impl Model {
         self.slots
             .get(&key(place, subject))
             .and_then(|s| s.content.front())
-            .map(|(_, c)| c)
+            .map(|t| &t.content)
     }
 
     fn is_fifo(&self, place: &str) -> bool {
@@ -528,16 +536,23 @@ impl Model {
             "a commit to the derived place '{place}'"
         );
         let fifo = self.is_fifo(place);
+        let id = self.next_token;
         let slot = self.slot_mut(place, subject);
+        let tok = Tok { id, head, content };
         if fifo {
-            slot.content.push_back((head, content));
-        } else if slot.content.front().is_some_and(|(_, c)| *c == content) {
+            slot.content.push_back(tok);
+        } else if slot
+            .content
+            .front()
+            .is_some_and(|t| t.content == tok.content)
+        {
             return;
         } else {
-            slot.content = VecDeque::from([(head, content)]);
+            slot.content = VecDeque::from([tok]);
         }
         slot.version += 1;
         slot.writer = by.map(Arc::from);
+        self.next_token += 1;
     }
 
     /// Who committed the current version: see [`Slot::writer`].
@@ -571,7 +586,12 @@ impl Model {
         let tokens = self
             .slots
             .get(&key(place, subject))
-            .map_or_else(Vec::new, |s| s.content.iter().cloned().collect());
+            .map_or_else(Vec::new, |s| {
+                s.content
+                    .iter()
+                    .map(|t| (t.head.clone(), t.content.clone()))
+                    .collect()
+            });
         (self.version(place, subject), tokens)
     }
 
@@ -1176,7 +1196,7 @@ impl Model {
                 }
             }
             if started.is_empty() {
-                self.disclose_front_waits();
+                self.derive_parked_waits();
                 return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
@@ -1385,13 +1405,10 @@ impl Model {
                 attempts,
                 waits_on,
                 stale_rows: BTreeSet::new(),
-                seq: self.next_attempt,
                 held: None,
             },
         );
-        let id = self.launch(occ, now, false);
-        self.disclose_parked_waits();
-        id
+        self.launch(occ, now, false)
     }
 
     fn launch(&mut self, occ: OccurrenceId, now: Duration, probe: bool) -> AttemptId {
@@ -1606,90 +1623,58 @@ impl Model {
     /// The open take that holds the committed front ahead of the row's own
     /// head: an asked work waits for it.
     fn front_taker(&self, place: &str, subject: &str) -> Option<&OccurrenceId> {
-        let held = self
-            .occs
-            .iter()
-            .filter(|(id, t)| t.subject == subject && self.open_take(id))
-            .filter(|(id, t)| {
-                t.taken.iter().any(|(tp, _)| tp == place) && !self.superseded(place, subject, id)
-            })
-            .map(|(id, t)| (t.seq, id));
-        if self.is_fifo(place) {
-            held.min_by_key(|(seq, _)| *seq).map(|(_, id)| id)
-        } else if self.content(place, subject).is_some() {
-            None
-        } else {
-            held.max_by_key(|(seq, _)| *seq).map(|(_, id)| id)
+        let front = self.committed_token(place, subject)?.id;
+        if self
+            .own_front(place, subject)
+            .is_some_and(|t| t.id == front)
+        {
+            return None;
         }
+        self.held_tokens(place, subject)
+            .find(|(_, t)| t.id == front)
+            .map(|(id, _)| id)
     }
 
-    /// Each asked work whose committed front a parked take holds, in net
-    /// order: it waits until `resolve`.
-    fn disclose_front_waits(&mut self) {
-        let mut waits = Vec::new();
-        for t in &self.spec.transitions {
-            let Some(answered) = self.answered_of(&t.name) else {
-                continue;
-            };
-            let subjects: BTreeSet<String> = self
-                .slots
-                .iter()
-                .filter(|((p, _), slot)| *p == answered && !slot.content.is_empty())
-                .map(|((_, s), _)| s.clone())
-                .collect();
-            for s in subjects {
-                for p in &t.consumes {
-                    let Some(take) = self.front_taker(p, &s) else {
-                        continue;
-                    };
-                    let taker = &self.occs[take];
-                    if taker.parked.is_some() {
-                        let Value::String(answer) =
-                            self.answered_field(&answered, &s, ANSWER_ID_KEY)
-                        else {
-                            panic!("an Answered token without a text answer id");
-                        };
-                        waits.push(Condition::WaitsOnParkedTake {
-                            reader: Arc::from(t.name.as_str()),
-                            subject: Subject::new(&s),
-                            reader_occurrence: work_occurrence(&t.name, &answer),
-                            take: Arc::from(taker.transition.as_str()),
-                            take_occurrence: take.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        for c in waits {
-            if !self.conditions.contains(&c) {
-                self.conditions.push(c);
-            }
-        }
-    }
-
-    /// A take holds the oldest token of a FIFO row, so the first held token
-    /// is the front; a single-token row's own token is newer than a held one,
-    /// and a superseded held token never comes back.
     fn committed_front(&self, place: &str, subject: &str) -> Option<&Content> {
-        let held = self
-            .occs
+        self.committed_token(place, subject).map(|t| &t.content)
+    }
+
+    /// The token a row shows in the committed state: in a FIFO the oldest of
+    /// its own and the held ones; a single-token row's own token is newer
+    /// than a held one.
+    fn committed_token(&self, place: &str, subject: &str) -> Option<&Tok> {
+        let own = self.own_front(place, subject);
+        let held = self.held_tokens(place, subject).map(|(_, t)| t);
+        if self.is_fifo(place) {
+            held.chain(own).min_by_key(|t| t.id)
+        } else {
+            own.or_else(|| held.max_by_key(|t| t.id))
+        }
+    }
+
+    fn own_front(&self, place: &str, subject: &str) -> Option<&Tok> {
+        self.slots
+            .get(&key(place, subject))
+            .and_then(|s| s.content.front())
+    }
+
+    /// The tokens of a row that open takes hold and would put back on
+    /// failure: a superseded one never comes back.
+    fn held_tokens<'m>(
+        &'m self,
+        place: &str,
+        subject: &str,
+    ) -> impl Iterator<Item = (&'m OccurrenceId, &'m Tok)> {
+        self.occs
             .iter()
-            .filter(|(id, t)| t.subject == subject && self.open_take(id))
-            .filter_map(|(id, t)| {
-                t.taken
+            .filter(move |(id, o)| o.subject == subject && self.open_take(id))
+            .filter_map(move |(id, o)| {
+                o.taken
                     .iter()
                     .find(|(tp, _)| tp == place)
                     .filter(|_| !self.superseded(place, subject, id))
-                    .map(|(_, c)| (t.seq, &c.1))
-            });
-        if self.is_fifo(place) {
-            held.min_by_key(|(seq, _)| *seq)
-                .map(|(_, c)| c)
-                .or_else(|| self.content(place, subject))
-        } else {
-            self.content(place, subject)
-                .or_else(|| held.max_by_key(|(seq, _)| *seq).map(|(_, c)| c))
-        }
+                    .map(|(_, t)| (id, t))
+            })
     }
 
     /// Whether `occ` holds its taken tokens uncommitted: running, parked or
@@ -1752,7 +1737,7 @@ impl Model {
     /// place's candidate, or applies on a data-class place, or is withheld;
     /// the settle discloses it.
     fn record(&mut self, occ: &OccurrenceId, outputs: Vec<Output>) {
-        if !self.occs[occ].waits_on.is_empty() {
+        if !self.occs[occ].waits_on.is_empty() && self.stale(occ).is_none() {
             let o = self.occ_mut(occ);
             o.settled = None;
             o.held = Some(outputs);
@@ -1863,7 +1848,7 @@ impl Model {
             let answered = self.answered_of(&o.transition);
             for (p, c) in &o.taken {
                 if self.content(p, &o.subject).is_none() && Some(p) != answered.as_ref() {
-                    before.insert(key(p, &o.subject), Some(c.1.clone()));
+                    before.insert(key(p, &o.subject), Some(c.content.clone()));
                 }
             }
             for (_, out) in &rows {
@@ -1932,8 +1917,8 @@ impl Model {
             let back = !self.superseded(&p, &s, occ);
             let slot = self.slot_mut(&p, &s);
             if fifo {
-                // The taken token was the oldest, so it goes back in front.
-                slot.content.push_front(c);
+                let at = slot.content.partition_point(|t| t.id < c.id);
+                slot.content.insert(at, c);
             } else if back {
                 slot.content.push_back(c);
             }
@@ -2003,20 +1988,16 @@ impl Model {
         let o = self.occ_mut(occ);
         o.parked = Some(cause.text.clone());
         o.settled = Some(Settled::OutcomeUnknown(cause));
-        self.disclose_parked_waits();
     }
 
     fn unpark(&mut self, occ: &OccurrenceId) {
-        if self.occ_mut(occ).parked.take().is_some() {
-            self.conditions.retain(|c| {
-                !matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == occ)
-            });
-        }
+        self.occ_mut(occ).parked = None;
     }
 
-    /// Each open reader with an edge to a parked take: one condition per
-    /// (take, reader), in that order.
-    fn disclose_parked_waits(&mut self) {
+    /// Every wait on a parked take, derived again from both sources: an
+    /// open reader with an edge to it, and an asked work whose committed
+    /// front it holds. One condition per (take, reader), in that order.
+    fn derive_parked_waits(&mut self) {
         let mut waits = BTreeMap::new();
         for (rid, r) in self.occs.iter().filter(|(id, _)| self.open_take(id)) {
             for (_, take) in &r.waits_on {
@@ -2035,11 +2016,46 @@ impl Model {
                 }
             }
         }
-        for c in waits.into_values() {
-            if !self.conditions.contains(&c) {
-                self.conditions.push(c);
+        for t in &self.spec.transitions {
+            let Some(answered) = self.answered_of(&t.name) else {
+                continue;
+            };
+            let subjects: BTreeSet<String> = self
+                .slots
+                .iter()
+                .filter(|((p, _), slot)| *p == answered && !slot.content.is_empty())
+                .map(|((_, s), _)| s.clone())
+                .collect();
+            for s in subjects {
+                for p in &t.consumes {
+                    let Some(take) = self.front_taker(p, &s) else {
+                        continue;
+                    };
+                    let taker = &self.occs[take];
+                    if taker.parked.is_none() {
+                        continue;
+                    }
+                    let Value::String(answer) = self.answered_field(&answered, &s, ANSWER_ID_KEY)
+                    else {
+                        panic!("an Answered token without a text answer id");
+                    };
+                    let reader_occurrence = work_occurrence(&t.name, &answer);
+                    waits.insert(
+                        (take.clone(), reader_occurrence.clone()),
+                        Condition::WaitsOnParkedTake {
+                            reader: Arc::from(t.name.as_str()),
+                            subject: Subject::new(&s),
+                            reader_occurrence,
+                            take: Arc::from(taker.transition.as_str()),
+                            take_occurrence: take.clone(),
+                        },
+                    );
+                }
             }
         }
+        self.conditions
+            .retain(|c| !matches!(c, Condition::WaitsOnParkedTake { .. }));
+        self.conditions.extend(waits.into_values());
     }
 
     /// Records every held reader whose takes all committed or failed, until

@@ -27,6 +27,7 @@ use holon_net::exec::Body;
 use holon_net::exec::Capacity;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
+use holon_net::exec::Condition;
 use holon_net::exec::Content;
 use holon_net::exec::DeriveError;
 use holon_net::exec::EffectRequest;
@@ -891,6 +892,30 @@ impl Driver {
             "P1 soundness after {op}: a commit on a view that differs from the committed front: {:?}",
             self.model.dirty_commits()
         );
+        for c in self.exec.conditions() {
+            let Condition::WaitsOnParkedTake {
+                reader_occurrence,
+                take_occurrence,
+                ..
+            } = c
+            else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    self.exec.settled(take_occurrence),
+                    Ok(Some(Settled::OutcomeUnknown(_)))
+                ),
+                "P4 wait condition after {op}: {c}, but the take is not parked"
+            );
+            assert!(
+                matches!(
+                    self.exec.settled(reader_occurrence),
+                    Ok(None | Some(Settled::OutcomeUnknown(_))) | Err(_)
+                ),
+                "P4 wait condition after {op}: {c}, but the reader's wait ended"
+            );
+        }
         for (occ, edges) in self.exec.held() {
             assert_eq!(
                 self.exec.settled(&occ),

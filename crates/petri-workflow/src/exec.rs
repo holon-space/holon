@@ -1241,10 +1241,10 @@ impl<V: Clone + PartialEq + fmt::Debug> Tokens<V> {
         Ok(())
     }
 
-    /// An input goes back with no version change: into a FIFO at the front,
-    /// where it was taken from, or into a single-token row unless a newer
-    /// token `superseded` it (see [`Executor::superseded`]). Returns whether
-    /// the token went back into the row.
+    /// An input goes back with no version change: into a FIFO at its place
+    /// by token id, which grows with write order, or into a single-token row
+    /// unless a newer token `superseded` it (see [`Executor::superseded`]).
+    /// Returns whether the token went back into the row.
     fn restore(
         &mut self,
         place: &Place,
@@ -1260,7 +1260,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Tokens<V> {
             return false;
         }
         if fifo {
-            slot.tokens.push_front(token.clone());
+            let at = slot.tokens.partition_point(|t| t.id < token.id);
+            slot.tokens.insert(at, token.clone());
         } else {
             slot.tokens.push_back(token.clone());
         }
@@ -2943,7 +2944,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                 }
             }
             if started.is_empty() {
-                self.disclose_front_waits();
+                self.derive_parked_waits();
                 return Ok(std::mem::take(&mut self.requests));
             }
             for id in started {
@@ -3298,9 +3299,6 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         );
         let (transition, subject) = (a.transition.clone(), a.subject.clone());
         self.mark_unknown(&transition, &subject);
-        self.conditions.retain(|c| {
-            !matches!(c, Condition::WaitsOnParkedTake { take_occurrence, .. } if take_occurrence == occurrence)
-        });
         Ok(a)
     }
 
@@ -3662,9 +3660,7 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
             stale_rows: BTreeSet::new(),
         };
         self.occupy_running(&a);
-        let id = self.insert_attempt(a);
-        self.disclose_parked_waits();
-        id
+        self.insert_attempt(a)
     }
 
     /// The tokens that open takes hold from the rows `trace` read, except
@@ -3757,8 +3753,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     }
 
     /// The token a row shows in the committed state: its own, or one that an
-    /// open take holds from it and would put back on failure. A take holds
-    /// the oldest tokens of a FIFO row; a single-token row's own token is
+    /// open take holds from it and would put back on failure. In a FIFO row
+    /// that is the oldest by token id; a single-token row's own token is
     /// newer than a held one.
     fn committed_front(&self, place: &str, subject: &str) -> Option<&Token<V>> {
         let (place, subject) = (Place::new(place), Subject::new(subject));
@@ -3775,8 +3771,8 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                     .map(|(_, t)| t)
             });
         if self.tokens.fifo.contains(&place) {
-            held.min_by_key(|t| t.id)
-                .or_else(|| self.tokens.token(&place, &subject))
+            held.chain(self.tokens.token(&place, &subject))
+                .min_by_key(|t| t.id)
         } else {
             self.tokens
                 .token(&place, &subject)
@@ -3798,38 +3794,6 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         }
         self.live_attempts()
             .find(|a| a.taken.iter().any(|(p, t)| p == place && t.id == front))
-    }
-
-    /// An asked work whose committed front a parked take holds waits until
-    /// `resolve`; the condition shows why it does not run.
-    fn disclose_front_waits(&mut self) {
-        let mut waits = Vec::new();
-        for t in &self.net.transitions {
-            let Some(answered) = self.net.answered_of(&t.name) else {
-                continue;
-            };
-            for s in self.tokens.subjects(&answered) {
-                for p in &t.consumes {
-                    if let Some(take) = self.front_taker(p, &s)
-                        && self.parked.contains_key(&take.occurrence)
-                    {
-                        waits.push(Condition::WaitsOnParkedTake {
-                            reader: t.name.clone(),
-                            subject: s.clone(),
-                            reader_occurrence: work_occurrence(
-                                &t.name,
-                                &self.answered(&answered, &s).id,
-                            ),
-                            take: take.transition.clone(),
-                            take_occurrence: take.occurrence.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        for c in waits {
-            self.disclose(c);
-        }
     }
 
     /// The attempts whose takes are open: in flight, parked or held.
@@ -3861,15 +3825,15 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         }
     }
 
-    /// A reader that waits on a parked take waits until `resolve`; the
-    /// condition shows why it does not finish.
-    fn disclose_parked_waits(&mut self) {
-        let waits: BTreeMap<_, _> = self
-            .live_attempts()
-            .flat_map(|r| {
-                r.waits_on.values().filter_map(|take| {
-                    let t = self.parked.get(take)?;
-                    Some((
+    /// Every wait on a parked take, derived again from both sources: a held
+    /// reader with an edge to it, and an asked work whose committed front it
+    /// holds. Each lasts while the take is parked and the reader waits.
+    fn derive_parked_waits(&mut self) {
+        let mut waits = BTreeMap::new();
+        for r in self.live_attempts() {
+            for take in r.waits_on.values() {
+                if let Some(t) = self.parked.get(take) {
+                    waits.insert(
                         (take.clone(), r.occurrence.clone()),
                         Condition::WaitsOnParkedTake {
                             reader: r.transition.clone(),
@@ -3878,13 +3842,40 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
                             take: t.transition.clone(),
                             take_occurrence: take.clone(),
                         },
-                    ))
-                })
-            })
-            .collect();
-        for c in waits.into_values() {
-            self.disclose(c);
+                    );
+                }
+            }
         }
+        for t in &self.net.transitions {
+            let Some(answered) = self.net.answered_of(&t.name) else {
+                continue;
+            };
+            for s in self.tokens.subjects(&answered) {
+                for p in &t.consumes {
+                    let Some(take) = self
+                        .front_taker(p, &s)
+                        .filter(|a| self.parked.contains_key(&a.occurrence))
+                    else {
+                        continue;
+                    };
+                    let reader_occurrence =
+                        work_occurrence(&t.name, &self.answered(&answered, &s).id);
+                    waits.insert(
+                        (take.occurrence.clone(), reader_occurrence.clone()),
+                        Condition::WaitsOnParkedTake {
+                            reader: t.name.clone(),
+                            subject: s.clone(),
+                            reader_occurrence,
+                            take: take.transition.clone(),
+                            take_occurrence: take.occurrence.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        self.conditions
+            .retain(|c| !matches!(c, Condition::WaitsOnParkedTake { .. }));
+        self.conditions.extend(waits.into_values());
     }
 
     fn insert_attempt(&mut self, a: Attempt<V>) -> AttemptId {
@@ -3966,9 +3957,10 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
     /// decides before any fact is put (322/E3.c). A stale effect happened, so
     /// each row goes to its place's candidate, applies on a data-class place,
     /// or is withheld, and a mark on its input stays: the effect never runs
-    /// twice on it.
+    /// twice on it. A reader with open edges waits in `held`, unless a write
+    /// already made it stale: no take's outcome can make it current again.
     fn record(&mut self, a: Attempt<V>, outputs: Vec<Output<V>>, now: Duration) {
-        if !a.waits_on.is_empty() && !self.twin(Twin::NoCommitWait) {
+        if !a.waits_on.is_empty() && self.stale(&a).is_none() && !self.twin(Twin::NoCommitWait) {
             self.occurrences.insert(a.occurrence.clone(), None);
             self.held.insert(a.occurrence.clone(), (a, outputs));
             return;
@@ -4366,7 +4358,6 @@ impl<V: Clone + PartialEq + fmt::Debug> Executor<V> {
         let (transition, subject) = (a.transition.clone(), a.subject.clone());
         self.parked.insert(a.occurrence.clone(), a);
         self.mark_unknown(&transition, &subject);
-        self.disclose_parked_waits();
     }
 
     /// `<T>.OutcomeUnknown` of a subject holds while any occurrence of `T`
