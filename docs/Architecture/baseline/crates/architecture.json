@@ -678,6 +678,9 @@
                 "name": "empty_question_is_unrepresentable.rs"
               },
               {
+                "name": "engine_progress_wakes.rs"
+              },
+              {
                 "name": "entity_reference_boundary.rs"
               },
               {
@@ -1799,6 +1802,9 @@
               },
               {
                 "name": "vault_shape.rs"
+              },
+              {
+                "name": "wake_witness.rs"
               },
               {
                 "name": "widget_meta.rs"
@@ -8297,7 +8303,7 @@
         "description": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it.",
         "pattern": "Projection",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nThe projection modules are pure functions of their sources, which is what\nmakes the net a derived artifact and never a second authority (ADR 0032 §2,\nADR 0024 P1a). They carry no state beyond the current derivation, so they\ncannot go stale whether a caller pulls them on demand or holds them as a\nreactive var recomputed on source change.\n\n[`exec`] and [`probe`] hold runtime state: the executor of runtime nets\n(ADR 0032 §9), which owns a marking of process-class tokens, and the run\nstate of the probes that feed facts into it.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n@c4 uses petri-workflow \"generic workflow-net executor\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nThe projection modules are pure functions of their sources, which is what\nmakes the net a derived artifact and never a second authority (ADR 0032 §2,\nADR 0024 P1a). They carry no state beyond the current derivation, so they\ncannot go stale whether a caller pulls them on demand or holds them as a\nreactive var recomputed on source change.\n\n[`exec`], [`load`] and [`probe`] are the Holon faces of the generic\nexecutor in `petri-workflow` (ADR 0032 §9): its types at the token value\n[`holon_pattern::Value`], the host functions, and the Holon ask surface.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
         "source_file": "holon-net/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -8319,6 +8325,11 @@
           {
             "target": "holon-rules",
             "label": "holon_rule YAML front-end",
+            "protocol": "Rust"
+          },
+          {
+            "target": "petri-workflow",
+            "label": "generic workflow-net executor",
             "protocol": "Rust"
           }
         ],
@@ -8402,6 +8413,9 @@
                 "name": "guards.rs"
               },
               {
+                "name": "host.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -8455,6 +8469,9 @@
                   },
                   {
                     "name": "twin_names.rs"
+                  },
+                  {
+                    "name": "values.rs"
                   }
                 ]
               },
@@ -8592,6 +8609,9 @@
               },
               {
                 "name": "uft_lower.rs"
+              },
+              {
+                "name": "value_encoding.rs"
               },
               {
                 "name": "verify_priority_probe.rs"
@@ -10179,7 +10199,7 @@
         "c4_level": "component",
         "description": "The lifecycle contract every storage provider (Turso, Loro, a plugin's store) satisfies, so the net's storage subnet can open them, let a standby catch up, swap it in and retire the old one without knowing which store it holds (net semantics revision 2, holon-work #171/#315).",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\n\nThe lifecycle contract every storage provider (Turso, Loro, a plugin's\nstore) satisfies, so the net's storage subnet can open them, let a standby\ncatch up, swap it in and retire the old one without knowing which store it\nholds (net semantics revision 2, holon-work #171/#315).\n\nA swappable pair is a **projection pair**: one store is the source (Loro)\nand the other a projection of it (Turso). Catching up therefore means\nreplaying the source's commits, and the source is wired when a provider is\nbuilt. Pairs that are not projections of one another are out of scope.\n\nThree things deliberately do NOT live here:\n- **Locking.** \"Apply the final delta while held\" is a precondition the net\n  enforces with holder tokens (queries shared, writes/swap/retirement\n  exclusive), never a lock inside a provider.\n- **Retries and priority.** Both are token data in the net (`tries` keyed by\n  the contribution's stable id on the request token, priority on the\n  `Service<X>` token), so a provider has no retry state and no rank.\n- **Time bounds.** A run timer on the transition is the net's deadline; a\n  provider is bounded by a write COUNT, which it can honour at a commit\n  boundary.",
+        "content": "@c4 component\n@c4 layer Core\n\nThe lifecycle contract every storage provider (Turso, Loro, a plugin's\nstore) satisfies, so the net's storage subnet can open them, let a standby\ncatch up, swap it in and retire the old one without knowing which store it\nholds (net semantics revision 2, holon-work #171/#315).\n\nA swappable pair is a **projection pair**: one store is the source (Loro)\nand the other a projection of it (Turso). Catching up therefore means\nreplaying the source's commits, and the source is wired when a provider is\nbuilt. Pairs that are not projections of one another are out of scope.\n\nThree things deliberately do NOT live here:\n- **Locking.** \"Apply the final delta while held\" is a precondition the net\n  enforces with holder tokens (queries shared, writes/swap/retirement\n  exclusive), never a lock inside a provider.\n- **Retries and priority.** Both are token data in the net (`tries`\n  (planned, not in the code) keyed by the contribution's stable id on the\n  request token, priority on the `Service<X>` token), so a provider has no\n  retry state and no rank.\n- **Time bounds.** A run timer on the transition is the net's deadline; a\n  provider is bounded by a write COUNT, which it can honour at a commit\n  boundary.",
         "source_file": "holon-storage-provider/src/lib.rs",
         "layer": "Core",
         "dirs": [
@@ -10304,13 +10324,18 @@
         "c4_level": "component",
         "description": "The contract of user-facing transitions (#167, increment 1).",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-api \"entity and place names\" \"Rust\"\n\nThe contract of user-facing transitions (#167, increment 1).\n\nDeclarations — the `#[transition]` macro and YAML sidecars — emit one\nhigh-level IR, [`TransitionDescriptor`]. It states WHAT a transition asks;\na lowering pass in `holon-net` generates the plumbing (`Asks`, `Answer`,\n`ExpireAnswer`). People and agents see the same [`AskRow`]s, fire the same\n[`AnswerCall`] and read the same [`AnswerSettlement`] through\n[`UserTransitions`].\n\nThe types live in their own crate, beside `holon-api`, because every\nconsumer (macro, lowering, executor, YAML loader, UI, MCP) needs them, and\nthe frontends do not depend on `holon-net`.",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-api \"entity and place names\" \"Rust\"\n@c4 uses petri-workflow \"occurrence, answer and ask-hash ids\" \"Rust\"\n\nThe contract of user-facing transitions (#167, increment 1).\n\nDeclarations — the `#[transition]` macro and YAML sidecars — emit one\nhigh-level IR, [`TransitionDescriptor`]. It states WHAT a transition asks;\na lowering pass in `holon-net` generates the plumbing (`Asks`, `Answer`,\n`ExpireAnswer`). People and agents see the same [`AskRow`]s, fire the same\n[`AnswerCall`] and read the same [`AnswerSettlement`] through\n[`UserTransitions`].\n\nThe types live in their own crate, beside `holon-api`, because every\nconsumer (macro, lowering, executor, YAML loader, UI, MCP) needs them, and\nthe frontends do not depend on `holon-net`.",
         "source_file": "holon-transition-contract/src/lib.rs",
         "layer": "Core",
         "relationships": [
           {
             "target": "holon-api",
             "label": "entity and place names",
+            "protocol": "Rust"
+          },
+          {
+            "target": "petri-workflow",
+            "label": "occurrence, answer and ask-hash ids",
             "protocol": "Rust"
           }
         ],
@@ -10905,6 +10930,48 @@
               },
               {
                 "name": "store_laws.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "petri-workflow",
+        "path": "petri-workflow",
+        "c4_level": "component",
+        "description": "Workflow nets over a token value `V`: the executor of runtime nets with effects, retry, timers, failure ports, undo and asks, the net file format, its loader and probes. The host passes the functions that meet `V` in a [`exec::Host`], so `V` needs no trait beyond `Clone + PartialEq + Debug`.",
+        "pattern": "Interpreter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n\nWorkflow nets over a token value `V`: the executor of runtime nets with\neffects, retry, timers, failure ports, undo and asks, the net file format,\nits loader and probes. The host passes the functions that meet `V` in a\n[`exec::Host`], so `V` needs no trait beyond `Clone + PartialEq + Debug`.\n\nThe crate does not check workflow-net soundness.",
+        "source_file": "petri-workflow/src/lib.rs",
+        "layer": "Engine",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "petri-workflow/src",
+            "files": [
+              {
+                "name": "exec.rs"
+              },
+              {
+                "name": "file.rs"
+              },
+              {
+                "name": "ids.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "load.rs"
+              },
+              {
+                "name": "probe.rs"
               }
             ]
           }

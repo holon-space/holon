@@ -1008,6 +1008,9 @@
                 "name": "sidebar_scroll_reaches_bottom.rs"
               },
               {
+                "name": "sim_driver_waits_windowed.rs"
+              },
+              {
                 "name": "slash_command_text_hidden_windowed.rs"
               },
               {
