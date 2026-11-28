@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every write-back and settle spec with TLC, and the Quint model.
+"""Check every write-back, settle, work-runtime and keystroke spec with TLC, and the Quint model.
 
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR] [--if-touched FILE]
 
@@ -60,12 +60,125 @@ EXPECTED = {
     "SettleWake_nowake": {"SettleReturns"},
     "SettleWake_late": {"SettleReturns"},
 }
+# work-runtime config -> property -> (TLC kind, whether TLC must find it
+# violated, why). WorkRuntimeNet.tla is generated from the net file. Every
+# property that holds has a witness row under the same config that must be
+# violated; a known defect is a violation the row expects until the net is
+# fixed, and its reason names the report finding.
+SLOT_LEAK = ("known defect: a dropped parked attempt and a stale success keep their "
+             "pool token (WorkRuntimeSpike.md, Findings, slot leaks)")
+WORK_RUNTIME = {
+    "WorkRuntime_exec": {
+        "AtMostPoolJobs": ("INVARIANT", False, "property"),
+        "NotAllSlotsBusy": ("INVARIANT", True, "witness of AtMostPoolJobs"),
+        "NoJobWhileStarting": ("INVARIANT", False, "property"),
+        "NeverJobAndWaiting": ("INVARIANT", True, "witness of NoJobWhileStarting"),
+        "SlotsConserved": ("INVARIANT", True, SLOT_LEAK),
+        "JobEndReturnsSlot": ("PROPERTY", True, "over-approximation: the spec's executor rule lets "
+                              "AgentTurnEnded take the Job without its slot, which the executor "
+                              "never fires (WorkRuntimeSpike.md, Findings, dead transition)"),
+        "NoJobEnds": ("PROPERTY", True, "witness of JobEndReturnsSlot"),
+    },
+    "WorkRuntime_l0": {
+        "NoJobWhileStarting": ("INVARIANT", False, "property"),
+        "NeverJobAndWaiting": ("INVARIANT", True, "witness of NoJobWhileStarting"),
+        "JobEndReturnsSlot": ("PROPERTY", False, "property"),
+        "NoJobEnds": ("PROPERTY", True, "witness of JobEndReturnsSlot"),
+    },
+    "WorkRuntime_execlive": {
+        "WaitingStarts": ("PROPERTY", False, "property"),
+        "NeverReady": ("INVARIANT", True, "witness of WaitingStarts"),
+    },
+    "WorkRuntime_l0live": {
+        "WaitingStarts": ("PROPERTY", False, "property"),
+        "NeverReady": ("INVARIANT", True, "witness of WaitingStarts"),
+    },
+}
+# keystroke config -> property -> (TLC kind, whether TLC must find it violated,
+# why). The design and world of each config are its constants (Keystroke.tla).
+# A known defect names its finding in KeystrokeReport.md; a replay names its
+# bug entry; a teeth row switches off the action that makes the property true.
+LOST_UPDATE = ("known defect: a whole-buffer write from a buffer that has not seen an "
+               "external write reverts it (KeystrokeReport.md, Findings, lost update)")
+TRAILING = ("known defect: a trailing whitespace key that only the editor holds is lost "
+            "when the editor converges to an external write (KeystrokeReport.md, Findings)")
+SPLIT_SPACE = ("known defect: Enter after a trailing whitespace key splits past the stored "
+               "text and fails (KeystrokeReport.md, Findings)")
+JOIN_AHEAD = ("known defect, suspected: a key typed after Backspace-at-0 and before focus "
+              "moves writes to the deleted block (KeystrokeReport.md, Findings)")
+PROPS = ("NoLostKeystroke", "ExternalWriteKept", "NoClobber", "MonotoneViews")
+
+
+def keystroke_rows(violated=None, witnesses=()):
+    violated = violated or {}
+    rows = {p: ("PROPERTY", p in violated, violated.get(p, "property")) for p in PROPS}
+    for w, of in witnesses:
+        rows[w] = ("INVARIANT", True, f"witness of {of}")
+    return rows
+
+
+def replay(entry, *props):
+    return keystroke_rows({p: f"replay of {entry}" for p in props})
+
+
+KEYSTROKE = {
+    "Keystroke_main": keystroke_rows(witnesses=[
+        ("NotTypedAndStopped", "NoLostKeystroke"), ("NoStaleEcho", "NoLostKeystroke"),
+        ("NoInSync", "NoLostKeystroke"), ("NoAdoptBaseline", "NoLostKeystroke"),
+        ("NeverRewritten", "NoClobber"), ("PanelNeverMoves", "MonotoneViews")]),
+    "Keystroke_ext": keystroke_rows({"ExternalWriteKept": LOST_UPDATE}, [
+        ("ExternalNeverAdopted", "ExternalWriteKept"), ("NoConverge", "ExternalWriteKept")]),
+    "Keystroke_fresh": keystroke_rows({"ExternalWriteKept": LOST_UPDATE}, [
+        ("ExternalNeverAdopted", "ExternalWriteKept")]),
+    "Keystroke_quiet": keystroke_rows(witnesses=[
+        ("ExternalNeverAdopted", "ExternalWriteKept"), ("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_spaceext": keystroke_rows({"NoLostKeystroke": TRAILING, "MonotoneViews": TRAILING,
+                                          "ExternalWriteKept": LOST_UPDATE}),
+    "Keystroke_split": keystroke_rows(witnesses=[("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_splitspace": keystroke_rows({"NoLostKeystroke": SPLIT_SPACE}),
+    "Keystroke_join": keystroke_rows({"NoLostKeystroke": JOIN_AHEAD}),
+    "Keystroke_birth": keystroke_rows(witnesses=[("NotTypedAndStopped", "NoLostKeystroke")]),
+    "Keystroke_teeth": {"NoLostKeystroke": ("PROPERTY", True, "teeth: no keystroke write lands")},
+    "Keystroke_delta": keystroke_rows(witnesses=[("ExternalNeverAdopted", "ExternalWriteKept")]),
+    "Keystroke_deltateeth": {"ExternalWriteKept": ("PROPERTY", True, "teeth: no echo converges")},
+    "Keystroke_r_enter": replay("2026-07-12-enter-after-typing-intermittently-creates-block",
+                                "NoLostKeystroke", "NoClobber", "MonotoneViews"),
+    "Keystroke_r_trailing": replay("2026-07-20-typed-trailing-space-deleted-100ms-later",
+                                   "NoLostKeystroke", "MonotoneViews"),
+    "Keystroke_r_noecho": replay("2026-07-21-editor-stale-buffer-clobber-new-manifestation",
+                                 "NoLostKeystroke", "ExternalWriteKept"),
+    "Keystroke_r_chord": replay("2026-08-11-structural-chord-flushes-focused-editor-stale",
+                                "ExternalWriteKept"),
+    "Keystroke_r_unordered": replay("2026-08-12-typing-through-production-fire-forget-dispatch",
+                                    "NoLostKeystroke", "NoClobber", "MonotoneViews"),
+    "Keystroke_r_noseq": {**replay("2026-08-17-editor-drops-external-write-with-no-write-seq",
+                                   "NoLostKeystroke", "ExternalWriteKept"),
+                          "NoDropNoSeq": ("INVARIANT", True, "witness: DropNoSeq is reached")},
+    "Keystroke_r_detached": replay("2026-10-01-first-keystroke-into-a-slot-races-the-detached-create",
+                                   "NoLostKeystroke"),
+    "Keystroke_r_strip": replay("2026-10-04-slash-command-strip-drops-a-key-queued-behind-enter",
+                                "NoLostKeystroke", "MonotoneViews"),
+}
+# liveness config -> (property, the auto transition it promises): with that
+# transition never enabled, TLC must find the property violated.
+WORK_RUNTIME_TEETH = {
+    "WorkRuntime_execlive": ("WaitingStarts", "StartJob"),
+    "WorkRuntime_l0live": ("WaitingStarts", "StartJob"),
+}
 # specs whose violating returns windows.py counts by pipeline stage
 WINDOWS = ["Writeback_prefix", "Writeback_main"]
 QUINT_EXPECTED_VIOLATED = "settledReadsNewest"
 # config whose INVARIANT is a red test's oracle on the fixed design -> whether
 # TLC must find that oracle violated
-RED_TEST_ORACLES = {"Writeback_through_oracle": ("RedTestOracle", True)}
+RED_TEST_ORACLES = {
+    "Writeback_through_oracle": ("RedTestOracle", True),
+    "Keystroke_oracle_whole": ("ExtStaysStored", True),
+    "Keystroke_oracle_delta": ("ExtStaysStored", False),
+    "Keystroke_oracle_spacetrim": ("SpaceStaysInEditor", True),
+    "Keystroke_oracle_spacekeep": ("SpaceStaysInEditor", False),
+    "Keystroke_oracle_splittrim": ("SplitLands", True),
+    "Keystroke_oracle_splitkeep": ("SplitLands", False),
+}
 
 TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
 
@@ -180,7 +293,7 @@ def number(pattern, text, log):
     return int(found[-1].replace(",", ""))
 
 
-def run_tlc(jar, spec, prop, out, extra=(), name=None):
+def run_tlc(jar, spec, prop, out, extra=(), name=None, kind=None):
     """TLC 1.7.4 reads a config only from the spec's own folder, so the specs
     are copied next to the generated config. prop None adds no property to
     the config."""
@@ -191,7 +304,7 @@ def run_tlc(jar, spec, prop, out, extra=(), name=None):
         (specs / tla.name).write_text(tla.read_text())
     base = (HERE / f"{spec}.cfg").read_text()
     name = name or prop or "graph"
-    kind = "INVARIANT" if prop == INVARIANT else "PROPERTY"
+    kind = kind or ("INVARIANT" if prop == INVARIANT else "PROPERTY")
     cfg = f"{spec}-{name}.cfg"
     (specs / cfg).write_text(f"{base}{kind} {prop}\n" if prop else base)
     log = out / f"{spec}.{name}.log"
@@ -234,6 +347,72 @@ def check_tlc(jar, out, numbers):
                   f"{numbers[f'{key}.seconds']} s, log {log}", flush=True)
             if violated != (prop in expected):
                 mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
+    return mismatches
+
+
+def check_work_runtime(jar, out, numbers):
+    mismatches = []
+    for spec, props in {**WORK_RUNTIME, **KEYSTROKE}.items():
+        for prop, (kind, expect_violated, why) in props.items():
+            code, log, seconds = run_tlc(jar, spec, prop, out, kind=kind)
+            text = log.read_text()
+            violation_code = TLC_SAFETY if kind == "INVARIANT" else TLC_LIVENESS
+            if code == TLC_HOLDS and "No error has been found" in text:
+                violated = False
+            elif code == violation_code and (f"{prop} is violated" in text
+                                             or "Temporal properties were violated" in text):
+                violated = True
+            else:
+                raise ToolError(f"{log}: TLC exit {code} without a verdict")
+            key = f"{spec}.{prop}"
+            numbers[f"{key}.result"] = "violated" if violated else "holds"
+            numbers[f"{key}.distinct_states"] = number(r"([\d,]+) distinct states found", text, log)
+            numbers[f"{key}.seconds"] = f"{seconds:.1f}"
+            if violated:
+                numbers[f"{key}.trace_states"] = number(r"\nState (\d+):", text, log)
+            print(f"{key}: {numbers[f'{key}.result']} ({why}), {numbers[f'{key}.distinct_states']} distinct states, "
+                  f"{numbers[f'{key}.seconds']} s, log {log}", flush=True)
+            if violated != expect_violated:
+                mismatches.append(f"{key}: {numbers[f'{key}.result']}, expected the other")
+    return mismatches
+
+
+def disabled_enabling(net, transition):
+    """The generated module with the enabling of one auto transition FALSE."""
+    old = f"Enabled_{transition}(s) == "
+    assert net.count(old) == 1, f"no single enabling of {transition}"
+    return net.replace(old, f"Enabled_{transition}(s) == FALSE /\\ ")
+
+
+def check_work_runtime_teeth(jar, out, numbers):
+    mismatches = []
+    net = (HERE / "WorkRuntimeNet.tla").read_text()
+    autos = re.search(r"AutoTransitions == \{([^}]*)\}", net).group(1)
+    for spec, (prop, promised) in WORK_RUNTIME_TEETH.items():
+        assert f'"{promised}"' in autos, f"{promised} is no auto transition"
+        specs = out / f"teeth-{spec}"
+        specs.mkdir(parents=True, exist_ok=True)
+        for tla in HERE.glob("*.tla"):
+            (specs / tla.name).write_text(tla.read_text())
+        (specs / "WorkRuntimeNet.tla").write_text(disabled_enabling(net, promised))
+        cfg = f"{spec}-{prop}.cfg"
+        (specs / cfg).write_text((HERE / f"{spec}.cfg").read_text() + f"PROPERTY {prop}\n")
+        log = out / f"teeth-{spec}.{prop}.log"
+        cmd = ["nice", "java", "-XX:+UseParallelGC", "-cp", str(jar.resolve()), "tlc2.TLC",
+               "-workers", "2", "-fp", "0", "-metadir", str((specs / "states").resolve()),
+               "-config", cfg, "WorkRuntime.tla"]
+        with open(log, "w") as f:
+            code = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, cwd=specs).returncode
+        text = log.read_text()
+        if code == TLC_HOLDS and "No error has been found" in text:
+            verdict = "holds"
+        elif code == TLC_LIVENESS and "Temporal properties were violated" in text:
+            verdict = "violated"
+        else:
+            raise ToolError(f"{log}: TLC exit {code} without a verdict")
+        print(f"{spec}.{prop} without {promised}: {verdict}, log {log}", flush=True)
+        if verdict != "violated":
+            mismatches.append(f"{spec}.{prop}: holds with {promised} never enabled")
     return mismatches
 
 
@@ -323,6 +502,8 @@ def main():
         require_java()
         mismatches = check_tlc(tla_jar(), out, numbers)
         mismatches += check_red_test_oracles(tla_jar(), out, numbers)
+        mismatches += check_work_runtime(tla_jar(), out, numbers)
+        mismatches += check_work_runtime_teeth(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)
         mismatches += check_quint(quint_bin(), out, numbers)
     except Exception as e:

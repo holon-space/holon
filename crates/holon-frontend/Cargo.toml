@@ -116,6 +116,11 @@ tempfile.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-stream.workspace = true
+tla-checker = { git = "https://github.com/nightscape/tla-rs", rev = "f6bb735b5784e714fd59750e5a7da52b5383d3c4", default-features = false }
+
+[[test]]
+name = "keystroke_conformance"
+path = "tests/keystroke_conformance.rs"
 
 [[test]]
 name = "main"

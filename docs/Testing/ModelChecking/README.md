@@ -3,6 +3,9 @@
 TLA+ specs of the org write-back pipeline and of the settle waits that tests
 use, checked with TLC. One model is also written in Quint.
 
+How model checking, the Petri-net executor and the tests fit together:
+[ModelVerification.md](ModelVerification.md).
+
 ## Files
 
 | File | What it holds |
