@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Cause;
 use holon_net::exec::Content;
@@ -53,6 +55,7 @@ use holon_net::uft::Generated;
 use holon_net::uft::NativeBody;
 use holon_net::uft::NativeParts;
 use holon_net::uft::answer::SEEN_FIELD;
+use holon_net::uft::ask_metas;
 use holon_net::uft::lower;
 use holon_transition_contract::ANSWER_ID_KEY;
 use holon_transition_contract::ANSWER_INPUT_KEY;
@@ -77,6 +80,7 @@ mod forms;
 use forms::Answer;
 
 use crate::exec_support::Checked;
+use crate::exec_support::values::value;
 
 const PLACES: [&str; 4] = ["P0", "P1", "P2", "P3"];
 const DERIVED: [&str; 2] = ["D0", "D1"];
@@ -86,24 +90,6 @@ const WORKS: [&str; 2] = ["W0", "W1"];
 const BY: &str = "by";
 
 // ------------------------------------------------------------ generators
-
-fn value() -> impl Strategy<Value = Value> {
-    let leaf = prop_oneof![
-        Just(Value::Null),
-        any::<bool>().prop_map(Value::Boolean),
-        any::<i64>().prop_map(Value::Integer),
-        any::<f64>().prop_map(Value::Float),
-        ".{0,6}".prop_map(Value::String),
-        ".{0,6}".prop_map(Value::DateTime),
-        ".{0,6}".prop_map(Value::Json),
-    ];
-    leaf.prop_recursive(2, 6, 3, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Array),
-            prop::collection::hash_map(".{0,3}", inner, 0..3).prop_map(Value::Object),
-        ]
-    })
-}
 
 /// Field names: a small alphabet, so a caller value and a bind overlap often,
 /// the answer keys, and any other text.
@@ -1096,6 +1082,12 @@ impl NetGen {
         }
     }
 
+    /// The ask side table of [`Self::net`].
+    fn metas(&self) -> AskMetas {
+        let descriptors: Vec<_> = (0..self.works.len()).map(|i| self.descriptor(i)).collect();
+        ask_metas(&descriptors)
+    }
+
     /// The net: the file, its derived places, then each lowered work.
     /// `Err` is a refusal of the loader or the lowering.
     fn net(&self) -> Result<NetDef, String> {
@@ -1900,8 +1892,8 @@ impl Machine {
                 if self.net.reads_undeclared(&work) {
                     return Ok(());
                 }
-                let exec = &self.exec;
-                let rows = match no_panic("asks", || forms::of(exec.asks()))? {
+                let (exec, metas) = (&self.exec, self.net.metas());
+                let rows = match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => rows,
                     Answer::Refused(_) => vec![],
                 };
@@ -1965,7 +1957,8 @@ impl Machine {
                     .into_iter()
                     .filter(|w| self.net.reads_undeclared(w))
                     .collect();
-                match no_panic("asks", || forms::of(exec.asks()))? {
+                let metas = self.net.metas();
+                match no_panic("asks", || forms::of(exec.asks(&metas)))? {
                     Answer::Known(rows) => {
                         for row in &rows {
                             prop_assert!(
@@ -3030,7 +3023,7 @@ fn output_net(into: &str) -> Result<Checked, TestCaseError> {
         Body::pure(move |s: &Subject, _: &Content| Ok(vec![Output::new(&into, s, Content::new())])),
     )
     .consumes("In");
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .place("In", Class::Process)
         .derived("D", Arc::new(|_: &mut Reader<'_>, _: &Subject| None))
         .transition(t);
@@ -3109,7 +3102,7 @@ fn a_derived_place_that_reads_itself_does_not_overflow() {
         Body::pure(|_: &Subject, _: &Content| Ok(vec![])),
     )
     .consumes("In");
-    let net = NetDef::default()
+    let net = holon_net::exec::new_net()
         .place("In", Class::Process)
         .derived(
             "D",

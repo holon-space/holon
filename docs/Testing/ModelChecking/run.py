@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every write-back and settle spec with TLC, and the Quint model.
+"""Check every write-back, settle and reader-isolation spec with TLC, and the Quint model.
 
 Run from the repository root:  python3 docs/Testing/ModelChecking/run.py [--out DIR]
 
@@ -58,6 +58,143 @@ QUINT_EXPECTED_VIOLATED = "settledReadsNewest"
 RED_TEST_ORACLES = {"Writeback_through_oracle": ("RedTestOracle", True)}
 
 TLC_HOLDS, TLC_SAFETY, TLC_LIVENESS = 0, 12, 13
+
+# Reader isolation during a take (ReaderIsolation*.tla). A row:
+# (label, cfg, Case or None, kind, names, expected), where expected is
+# "holds" or the text TLC prints for the violation it must find.
+RI_INVARIANTS = ["TypeOK", "I1Exclusive", "I2Dependency", "I3CommitWait", "I4TakeCommits",
+                 "I5TakeFails", "I6Sound", "FactSound", "I7Disclosure", "I7NoStaleCondition"]
+RI_LIVENESS = ["ReleasedUnlessParked", "ReleasedWhenResolved", "QuiesceEnds", "StaleReleased"]
+RI_CASES = {
+    "held_token_superseded_by_a_write": "case_reader",
+    "absent_read_then_written_and_taken": "case_reader",
+    "dirty_absent_read_records_before_the_taker_fails": "case_reader",
+    "read_of_a_token_written_during_a_take": "case_reader",
+    "run_state_read_then_the_run_starts": "case_running",
+    "fact_into_fifo_appended_behind_head": "case_fifo_reader_fact",
+    "fifo_append_behind_the_read_head": "case_fifo_reader",
+    "read_then_taken_taker_runs": "case_reader",
+    "read_then_taken_taker_done": "case_reader",
+    "read_then_taken_taker_fails": "case_reader",
+    "read_while_taken_taker_done": "case_reader",
+    "read_while_taken_taker_fails": "case_reader",
+    "read_while_taken_taker_retries": "case_reader",
+    "present_fifo_read_whose_held_front_goes_back": "case_fifo",
+    "a_stale_reader_puts_no_fact_over_the_restored_token": "case_fact",
+    "reader_waits_on_a_parked_take_verify": "case_reader",
+    "reader_waits_on_a_parked_take_drop": "case_reader",
+    "reader_waits_on_a_parked_take_retry_then_fails": "case_reader",
+    "a_wait_condition_goes_when_the_reader_fails": "case_reader",
+    "a_reader_stale_by_a_write_is_not_held": "case_reader",
+}
+
+
+def violated(name):
+    return f"Invariant {name} is violated"
+
+
+TEMPORAL_VIOLATED = "Temporal properties were violated"
+RI_ROWS = (
+    [(f"{d}.invariants", f"ReaderIsolation_{d}", None, "INVARIANT", RI_INVARIANTS, "holds")
+     for d in ["single", "register", "fifo", "fact", "purefact", "tworows", "twosubjects", "wide"]]
+    + [(f"{d}.{p}", f"ReaderIsolation_{d}", None, "PROPERTY", [p], "holds")
+       for d in ["singlelive", "registerlive", "fifolive", "factlive"] for p in RI_LIVENESS]
+    + [(f"{d}.{w}", f"ReaderIsolation_{d}", None, "INVARIANT", [w], violated(w))
+       for d, ws in [
+           ("single", ["NeverHeldToken", "NeverEdge", "NeverHeldReader", "NeverDoneAfterItsTakeCommitted",
+                       "NeverStaleByRestore", "NeverDoneRecord", "NeverWaitsParked", "NeverCondition",
+                       "NeverHeldStale"]),
+           ("fifo", ["NeverEdge", "NeverStaleByRestore"]),
+           ("fact", ["NeverFactRefused", "NeverFactLanded"]),
+           ("tworows", ["NeverStaleByRestore", "NeverFactRefused"]),
+           ("twosubjects", ["NeverWaitsParked"]),
+       ] for w in ws]
+    + [
+        ("singlelive.ReleasedWithoutResolve", "ReaderIsolation_singlelive", None, "PROPERTY",
+         ["ReleasedWithoutResolve"], TEMPORAL_VIOLATED),
+        ("oldcond.I7NoStaleCondition", "ReaderIsolation_oldcond", None, "INVARIANT",
+         ["I7NoStaleCondition"], violated("I7NoStaleCondition")),
+        ("holdfirstlive.StaleReleased", "ReaderIsolation_holdfirstlive", None, "PROPERTY",
+         ["StaleReleased"], TEMPORAL_VIOLATED),
+        ("staleatrecordlive.StaleReleased", "ReaderIsolation_staleatrecordlive", None, "PROPERTY",
+         ["StaleReleased"], TEMPORAL_VIOLATED),
+        ("nowait.I6Sound", "ReaderIsolation_nowait", None, "INVARIANT", ["I6Sound"], violated("I6Sound")),
+        ("nostale.I5TakeFails", "ReaderIsolation_nostale", None, "INVARIANT", ["I5TakeFails"],
+         violated("I5TakeFails")),
+        ("nostale.I6Sound", "ReaderIsolation_nostale", None, "INVARIANT", ["I6Sound"], violated("I6Sound")),
+        ("noadvance.I4TakeCommits", "ReaderIsolation_noadvance", None, "INVARIANT", ["I4TakeCommits"],
+         violated("I4TakeCommits")),
+        ("keepedge.deadlock", "ReaderIsolation_keepedge", None, "INVARIANT", ["TypeOK"], "Deadlock reached"),
+        ("keepedgelive.ReleasedUnlessParked", "ReaderIsolation_keepedgelive", None, "PROPERTY",
+         ["ReleasedUnlessParked"], TEMPORAL_VIOLATED),
+        ("nocond.I7Disclosure", "ReaderIsolation_nocond", None, "INVARIANT", ["I7Disclosure"],
+         violated("I7Disclosure")),
+        ("oldtrace.QuiesceEnds", "ReaderIsolation_oldtrace", None, "PROPERTY", ["QuiesceEnds"],
+         TEMPORAL_VIOLATED),
+        ("answers.production", "ReaderIsolationAnswers_production", None, "INVARIANT",
+         ["OneEffectPerAsk"], "holds"),
+        ("answers.production.NoAskAnswered", "ReaderIsolationAnswers_production", None, "INVARIANT",
+         ["NoAskAnswered"], violated("NoAskAnswered")),
+        ("answers.testnet", "ReaderIsolationAnswers_testnet", None, "INVARIANT",
+         ["OneEffectPerAsk"], violated("OneEffectPerAsk")),
+        ("case.read_of_a_token_written_during_a_take.wide", "ReaderIsolation_case_reader_wide",
+         "read_of_a_token_written_during_a_take", "INVARIANT", ["CaseHolds"], violated("CaseHolds")),
+    ]
+    + [(f"case.{c}", f"ReaderIsolation_{net}", c, "INVARIANT", ["CaseHolds"] + RI_INVARIANTS[3:], "holds")
+       for c, net in RI_CASES.items()]
+    + [(f"case.{c}.end", f"ReaderIsolation_{net}", c, "INVARIANT", ["ScriptNeverEnds"],
+        violated("ScriptNeverEnds"))
+       for c, net in RI_CASES.items()]
+    + [
+        ("supersede.version", "ReaderIsolationSupersede_version", "free", "INVARIANT",
+         ["NoRevive", "I6Sound"], "holds"),
+        ("supersede.slot", "ReaderIsolationSupersede_slot", "free", "INVARIANT", ["NoRevive"],
+         violated("NoRevive")),
+        ("supersede.slot.I6Sound", "ReaderIsolationSupersede_slot", "free", "INVARIANT", ["I6Sound"],
+         violated("I6Sound")),
+        ("case.superseded_token_stays_out_after_the_newer_one_is_consumed.slot",
+         "ReaderIsolationSupersede_slot", "superseded_token_stays_out_after_the_newer_one_is_consumed",
+         "INVARIANT", ["CaseHolds"], violated("CaseHolds")),
+    ]
+    + [(f"supersede.version.{w}", "ReaderIsolationSupersede_version", "free", "INVARIANT", [w], violated(w))
+       for w in ["NeverRestored", "NeverStale", "NeverNotStale"]]
+    + [(f"case.{c}{end}", "ReaderIsolationSupersede_version", c, "INVARIANT", props, expected)
+       for c in ["superseded_token_stays_out_when_a_later_take_holds_the_newer_one",
+                 "superseded_token_stays_out_after_the_newer_one_is_consumed"]
+       for end, props, expected in [("", ["CaseHolds", "NoRevive", "I6Sound"], "holds"),
+                                    (".end", ["ScriptNeverEnds"], violated("ScriptNeverEnds"))]]
+    + [(f"idle.{d}", f"ReaderIsolationIdle_{d}", None, "INVARIANT", ["IdleRule", "I6Sound"], "holds")
+       for d in ["narrow_off", "narrow_on", "absent_on"]]
+    + [(f"idle.{d}.IdleRule", f"ReaderIsolationIdle_{d}", None, "INVARIANT", ["IdleRule"], violated("IdleRule"))
+       for d in ["wide_off", "wide_on", "absent_off"]]
+    + [(f"idle.{d}.I6Sound", f"ReaderIsolationIdle_{d}", None, "INVARIANT", ["I6Sound"], "holds")
+       for d in ["wide_off", "wide_on", "absent_off"]]
+    + [(f"idle.{d}.NeverAnswered", f"ReaderIsolationIdle_{d}", None, "INVARIANT", ["NeverAnswered"],
+        violated("NeverAnswered"))
+       for d in ["narrow_on", "absent_on"]]
+    + [
+        ("fifoask.d", "ReaderIsolationFifoAsk_d", None, "INVARIANT", ["AskConsumesWhatItSaw"], "holds"),
+        ("fifoask.current", "ReaderIsolationFifoAsk_current", None, "INVARIANT", ["AskConsumesWhatItSaw"],
+         violated("AskConsumesWhatItSaw")),
+        ("fifoask.b", "ReaderIsolationFifoAsk_b", None, "INVARIANT", ["AskConsumesWhatItSaw"],
+         violated("AskConsumesWhatItSaw")),
+        ("fifoask.d.WorkSettlesWhenResolved", "ReaderIsolationFifoAsk_d", None, "PROPERTY",
+         ["WorkSettlesWhenResolved"], "holds"),
+        ("fifoask.d.WorkSettles", "ReaderIsolationFifoAsk_d", None, "PROPERTY", ["WorkSettles"],
+         TEMPORAL_VIOLATED),
+        ("fifoask.dnomark.WorkSettlesWhenResolved", "ReaderIsolationFifoAsk_dnomark", None, "PROPERTY",
+         ["WorkSettlesWhenResolved"], TEMPORAL_VIOLATED),
+        ("fifoask.dnomech.WorkSettlesWhenResolved", "ReaderIsolationFifoAsk_dnomech", None, "PROPERTY",
+         ["WorkSettlesWhenResolved"], TEMPORAL_VIOLATED),
+    ]
+    + [(f"fifoask.d.{w}", "ReaderIsolationFifoAsk_d", None, "INVARIANT", [w], violated(w))
+       for w in ["NeverDone", "NeverWaitsParked"]]
+    + [(f"waitgraph.{d}", f"ReaderIsolationWaitGraph_{d}", None, "INVARIANT", ["TypeOK", "NoWaitCycle"],
+        "holds")
+       for d in ["ring2", "ring3"]]
+    + [(f"waitgraph.{d}.{w}", f"ReaderIsolationWaitGraph_{d}", None, "INVARIANT", [w], violated(w))
+       for d in ["ring2", "ring3"] for w in ["NeverCrossEdge", "NeverHeld"]]
+)
 
 
 class ToolError(Exception):
@@ -186,6 +323,52 @@ def check_red_test_oracles(jar, out, numbers):
     return mismatches
 
 
+def check_reader_isolation(jar, out, numbers, labels=None):
+    mismatches = []
+    specs = out / "specs"
+    specs.mkdir(exist_ok=True)
+    for tla in HERE.glob("*.tla"):
+        (specs / tla.name).write_text(tla.read_text())
+    for label, cfg, case, kind, names, expected in RI_ROWS:
+        if labels is not None and label not in labels:
+            continue
+        text = (HERE / f"{cfg}.cfg").read_text()
+        if case:
+            text += f'CONSTANT Case = "{case}"\n'
+        text += f"{kind} {' '.join(names)}\n"
+        (specs / f"ri-{label}.cfg").write_text(text)
+        log = out / f"ReaderIsolation.{label}.log"
+        cmd = [
+            "nice", "java", "-XX:+UseParallelGC", "-cp", str(jar.resolve()), "tlc2.TLC",
+            "-workers", "2", "-fp", "0", "-metadir", str((out / "states" / f"ri-{label}").resolve()),
+            "-config", f"ri-{label}.cfg", f"{cfg.split('_')[0]}.tla",
+        ]
+        started = time.monotonic()
+        with open(log, "w") as f:
+            f.write(f"CMD: {' '.join(cmd)}\n")
+            f.flush()
+            code = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, cwd=specs).returncode
+        seconds = time.monotonic() - started
+        text = log.read_text()
+        if code == TLC_HOLDS and "No error has been found" in text:
+            result = "holds"
+        elif code in (11, TLC_SAFETY, TLC_LIVENESS) and expected != "holds" and expected in text:
+            result = "violated"
+        elif code in (11, TLC_SAFETY, TLC_LIVENESS) and "Error:" in text:
+            result = "violated other"
+        else:
+            raise ToolError(f"{log}: TLC exit {code} without a verdict")
+        key = f"ReaderIsolation.{label}"
+        numbers[f"{key}.result"] = result
+        numbers[f"{key}.distinct_states"] = number(r"([\d,]+) distinct states found", text, log)
+        numbers[f"{key}.seconds"] = f"{seconds:.1f}"
+        print(f"{key}: {result}, {numbers[f'{key}.distinct_states']} distinct states, {seconds:.1f} s, "
+              f"log {log}", flush=True)
+        if result != ("holds" if expected == "holds" else "violated"):
+            mismatches.append(f"{key}: {result}, expected {expected}")
+    return mismatches
+
+
 def check_windows(jar, out, numbers):
     for spec in WINDOWS:
         graph = (out / f"{spec}.dot").resolve()
@@ -237,6 +420,7 @@ def main():
     try:
         mismatches = check_tlc(tla_jar(), out, numbers)
         mismatches += check_red_test_oracles(tla_jar(), out, numbers)
+        mismatches += check_reader_isolation(tla_jar(), out, numbers)
         check_windows(tla_jar(), out, numbers)
         mismatches += check_quint(quint_bin(), out, numbers)
     except Exception as e:

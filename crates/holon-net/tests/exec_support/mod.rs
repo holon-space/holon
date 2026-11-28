@@ -8,6 +8,7 @@
 pub mod model;
 
 pub mod twin_names;
+pub mod values;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -19,12 +20,15 @@ use std::time::Duration;
 use holon_api::Value;
 use holon_net::exec::Accepted;
 use holon_net::exec::AskMeta;
+use holon_net::exec::AskMetas;
+use holon_net::exec::Asks;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
 use holon_net::exec::Capacity;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
 use holon_net::exec::Content;
+use holon_net::exec::DeriveError;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
@@ -50,8 +54,10 @@ use holon_net::exec::Trigger;
 use holon_net::exec::UndoError;
 use holon_net::exec::Undone;
 use holon_net::exec::WhyNot;
+use holon_net::exec::ask_places;
 use holon_transition_contract::AnswerCall;
 use holon_transition_contract::AnswerId;
+use holon_transition_contract::AskRow;
 use holon_transition_contract::UftError;
 use model::Head;
 use model::Model;
@@ -145,7 +151,8 @@ pub enum PlaceSpec {
 pub struct Spec {
     pub places: BTreeMap<&'static str, PlaceSpec>,
     pub transitions: Vec<Transition>,
-    pub asks: BTreeMap<String, AskMeta>,
+    /// The ask side table: [`Asks::asks`] reads it.
+    pub asks: AskMetas,
 }
 
 impl Spec {
@@ -216,39 +223,39 @@ impl Spec {
     }
 
     pub fn netdef(&self) -> NetDef {
-        let net = self
-            .places
-            .iter()
-            .fold(NetDef::default(), |net, (name, def)| match def {
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Single,
-                } => net.place(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Register,
-                } => net.register(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: None,
-                    capacity: Capacity::Fifo,
-                } => net.fifo(name, *class),
-                PlaceSpec::Stored {
-                    class,
-                    candidate: Some(c),
-                    ..
-                } => {
-                    assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
-                    net.place_with_candidate(name, c)
-                }
-                PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
-            });
+        let net =
+            self.places
+                .iter()
+                .fold(holon_net::exec::new_net(), |net, (name, def)| match def {
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Single,
+                    } => net.place(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Register,
+                    } => net.register(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: None,
+                        capacity: Capacity::Fifo,
+                    } => net.fifo(name, *class),
+                    PlaceSpec::Stored {
+                        class,
+                        candidate: Some(c),
+                        ..
+                    } => {
+                        assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
+                        net.place_with_candidate(name, c)
+                    }
+                    PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
+                });
         let net = self
             .asks
             .iter()
-            .fold(net, |net, (work, meta)| net.ask(work, meta.clone()));
+            .fold(net, |net, (work, _)| net.ask(work, ask_places(work)));
         self.transitions.iter().fold(net, |net, t| {
             let mut def =
                 TransitionDef::new(&t.name, t.trigger, t.bind.sut.clone(), t.body.clone());
@@ -683,6 +690,10 @@ impl Driver {
         &self.exec
     }
 
+    pub fn asks(&self) -> Result<Vec<AskRow>, DeriveError> {
+        self.exec.asks(&self.spec.asks)
+    }
+
     /// Compares the answers of one external call, then queues the effect
     /// requests it returned.
     fn quiesced<T: Debug + PartialEq, E: Debug + PartialEq>(
@@ -1074,7 +1085,7 @@ impl Driver {
         agree(
             op,
             "asks",
-            self.exec.asks().expect("the asks derive"),
+            self.exec.asks(&self.spec.asks).expect("the asks derive"),
             self.model.ask_rows(),
         );
         for (p, d) in &self.spec.places {

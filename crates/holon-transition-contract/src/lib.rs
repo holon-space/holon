@@ -1,6 +1,7 @@
 //! @c4 component
 //! @c4 layer Core
 //! @c4 uses holon-api "entity and place names" "Rust"
+//! @c4 uses petri-workflow "occurrence, answer and ask-hash ids" "Rust"
 //!
 //! The contract of user-facing transitions (#167, increment 1).
 //!
@@ -17,7 +18,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::EntityUri;
@@ -26,6 +26,9 @@ use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::TypeHint;
 use holon_api::types::EntityName;
 pub use holon_api::types::PlaceName;
+pub use petri_workflow::AnswerId;
+pub use petri_workflow::AskHash;
+pub use petri_workflow::OccurrenceId;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -175,12 +178,6 @@ pub enum TimerKind {
     Delay,
 }
 
-/// The identity of one ask: a hash over the transition, the subject and the
-/// read-trace content at derivation (UFT-adopt.a). The executor (lane X)
-/// computes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct AskHash(pub [u8; 32]);
-
 /// One row of the derived place `Asks`. Derived by the executor (lane X).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AskRow {
@@ -193,54 +190,14 @@ pub struct AskRow {
     pub has_preview: bool,
 }
 
-/// Names one answer: the occurrence of its `Answer` firing, chosen by the
-/// caller.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AnswerId(pub String);
-
 /// The key under which a lowered work transition's `Content` carries the
 /// answer value the user gave.
 pub const ANSWER_INPUT_KEY: &str = "@input";
 
 /// The key under which a lowered work transition's `Content` carries the
 /// [`AnswerId`]; the work occurrence derives from it
-/// (`holon_net::exec::work_occurrence(transition, answer)`; no intra-doc link
-/// because holon-net depends on this crate, not the other way round).
+/// (`petri_workflow::exec::work_occurrence(transition, answer)`).
 pub const ANSWER_ID_KEY: &str = "@answer";
-
-/// Names one occurrence of a firing in a runtime net. The variants never
-/// collide, so neither do their displays.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OccurrenceId {
-    /// Supplied by the caller of a manual fire; an answer's id.
-    Caller(Arc<str>),
-    /// Minted by the executor for an auto firing.
-    Minted { transition: Arc<str>, n: u64 },
-    /// The work firing that consumed the answer `answer`: derived from the
-    /// answer id, so the settled chain and a Keyed receiver find it.
-    Work {
-        transition: Arc<str>,
-        answer: Arc<str>,
-    },
-}
-
-impl OccurrenceId {
-    pub fn caller(id: &str) -> Self {
-        Self::Caller(Arc::from(id))
-    }
-}
-
-impl fmt::Display for OccurrenceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Caller(id) => write!(f, "caller:{id}"),
-            Self::Minted { transition, n } => write!(f, "minted:{transition}#{n}"),
-            Self::Work { transition, answer } => write!(f, "work:{transition}@{answer}"),
-        }
-    }
-}
 
 /// The one user-fired call. Built by the UI/MCP (lane U) from a parsed value.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

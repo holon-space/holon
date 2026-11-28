@@ -208,7 +208,7 @@ const CASES_RUN: u32 = 512;
 /// the auto transitions it caused, so no answer waits for a `step` (D151.a,
 /// #167 idle rule, #192).
 fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
-    for row in d.exec().asks().expect("the asks derive") {
+    for row in d.asks().expect("the asks derive") {
         let (work, s) = (&row.transition.0, &row.subject.0);
         let tokens = d.exec().tokens();
         for busy in [
@@ -507,7 +507,7 @@ fn an_offered_ask_has_its_answer_enabled() {
     let attempt = d.pending.front().expect("the work is running").attempt;
     d.complete(attempt, EffectResult::Failed(Cause::definite("rejected")))
         .expect("the attempt is in flight");
-    let offered = d.exec().asks().expect("the asks derive");
+    let offered = d.asks().expect("the asks derive");
     assert_eq!(
         offered.len(),
         1,
@@ -558,7 +558,7 @@ fn no_ask_is_offered_while_its_work_runs() {
     d.answer(c).expect("the ask applies");
     d.write("Item", "y", item()).expect("the net quiesces");
     assert_eq!(
-        d.exec().asks().expect("the asks derive"),
+        d.asks().expect("the asks derive"),
         Vec::new(),
         "an ask of y while a1 works"
     );
@@ -568,7 +568,7 @@ fn no_ask_is_offered_while_its_work_runs() {
         .expect("the net quiesces");
     offered_asks_have_their_answer_enabled(&d, "the failure of a1");
     assert_eq!(
-        d.exec().asks().expect("the asks derive").len(),
+        d.asks().expect("the asks derive").len(),
         1,
         "the ask of y is back"
     );

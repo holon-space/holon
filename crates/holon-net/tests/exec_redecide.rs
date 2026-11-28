@@ -24,7 +24,7 @@ const NOW: Duration = Duration::ZERO;
 /// `Follow` fires for a waiting subject once its bind sees what it needs;
 /// `binds` counts the bind's runs.
 fn follow_net(bind: Read) -> NetDef {
-    NetDef::default()
+    holon_net::exec::new_net()
         .place("Waiting", Class::Process)
         .place("Flag", Class::Process)
         .place("Done", Class::Process)
